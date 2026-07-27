@@ -1,0 +1,33 @@
+appId: cn.enterpriseagent.desktop
+productName: 企业 AI 协同
+# Reuse the Electron runtime installed with the workspace. This keeps packaging
+# deterministic and avoids a second GitHub download after pnpm install.
+electronDist: node_modules/electron/dist
+compression: normal
+asar: true
+directories:
+  output: release
+files:
+  - out/**
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+mac:
+  target:
+    - dmg
+    - zip
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  artifactName: ${productName}-${version}-${arch}.${ext}
+linux:
+  target:
+    - AppImage
+  artifactName: ${productName}-${version}-${arch}.${ext}

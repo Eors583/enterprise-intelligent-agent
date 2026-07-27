@@ -1,0 +1,350 @@
+import { ConfigService } from '@nestjs/config';
+import { vi } from 'vitest';
+
+import { validateEnvironment, type EnvironmentVariables } from '../../../../config/environment.js';
+import type { PreparedAgentRun } from '../../domain/agent-run.models.js';
+import { HttpAgentRuntimeClient } from './http-agent-runtime.client.js';
+
+describe('HttpAgentRuntimeClient', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it('sends the locked prompt with an explicit instance identity and labelled peer context', async () => {
+    let body: Record<string, unknown> | undefined;
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return jsonResponse({ run_id: EXTERNAL_ID, status: 'queued' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createClient().create(run(), new AbortController().signal);
+
+    const serialized = JSON.stringify(body);
+    expect(serialized).toContain('You are the locked business assistant.');
+    expect(serialized).toContain('运行时身份：你是企业智能体「Agent A」');
+    expect(serialized).toContain('[智能体 Agent B] peer response');
+    expect(serialized).toContain('[用户 Requester] user question');
+    expect(serialized).not.toContain('MANUS_API_KEY');
+  });
+
+  it('treats create 404 as failed but attached execute/get 404 as UNKNOWN', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('not found', { status: 404 })),
+    );
+    const client = createClient();
+    const signal = new AbortController().signal;
+
+    await expect(client.create(run(), signal)).rejects.toMatchObject({
+      code: 'AI_RUNTIME_HTTP_404',
+      outcome: 'failed',
+    });
+    await expect(client.execute(run(), EXTERNAL_ID, signal)).rejects.toMatchObject({
+      code: 'AI_RUNTIME_HTTP_404',
+      outcome: 'unknown',
+    });
+    await expect(client.get(TENANT_ID, EXTERNAL_ID, signal)).rejects.toMatchObject({
+      code: 'AI_RUNTIME_HTTP_404',
+      outcome: 'unknown',
+    });
+  });
+
+  it('keeps the timeout active while reading a success response body', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          ({
+            ok: true,
+            status: 200,
+            body: null,
+            json: () => new Promise<never>(() => undefined),
+          }) as unknown as Response,
+      ),
+    );
+    const pending = createClient({ AI_RUNTIME_HTTP_TIMEOUT_MS: '1000' }).create(
+      run(),
+      new AbortController().signal,
+    );
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'AI_RUNTIME_TIMEOUT',
+      outcome: 'unknown',
+    });
+
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    await rejected;
+  });
+
+  it('propagates an already-aborted outer signal before dispatch', async () => {
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      expect(init?.signal?.aborted).toBe(true);
+      throw new Error('aborted before dispatch');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    controller.abort(new Error('worker shutdown'));
+
+    await expect(createClient().create(run(), controller.signal)).rejects.toMatchObject({
+      code: 'AI_RUNTIME_TIMEOUT',
+      outcome: 'unknown',
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves provider, model, token, cost and tool usage from Runtime', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          run_id: EXTERNAL_ID,
+          status: 'succeeded',
+          output: {
+            content: 'answer',
+            finish_reason: 'stop',
+            model: 'model-a-20260721',
+            provider: 'openai_compatible',
+            response_id: 'response-1',
+          },
+          usage: {
+            input_tokens: 120,
+            output_tokens: 30,
+            total_tokens: 150,
+            tool_calls: 1,
+            cost_micros: 450,
+            tokens_reported: true,
+            cost_reported: true,
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal),
+    ).resolves.toEqual({
+      runId: EXTERNAL_ID,
+      status: 'succeeded',
+      output: {
+        content: 'answer',
+        model: 'model-a-20260721',
+        provider: 'openai_compatible',
+      },
+      usage: {
+        inputTokens: 120,
+        outputTokens: 30,
+        totalTokens: 150,
+        toolCalls: 1,
+        costMicros: 450,
+        tokensReported: true,
+        costReported: true,
+      },
+    });
+  });
+
+  it('preserves explicitly unreported token and cost usage without trusting zeroes', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          run_id: EXTERNAL_ID,
+          status: 'succeeded',
+          output: {
+            content: 'answer',
+            finish_reason: 'stop',
+            model: 'manus-1.6-lite',
+            provider: 'manus',
+          },
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            tool_calls: 0,
+            cost_micros: 0,
+            tokens_reported: false,
+            cost_reported: false,
+          },
+        }),
+      ),
+    );
+
+    const result = await createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal);
+    expect(result.usage).toMatchObject({
+      totalTokens: 0,
+      costMicros: 0,
+      tokensReported: false,
+      costReported: false,
+    });
+  });
+
+  it('accepts legacy all-zero usage without report flags as explicitly unreported', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          run_id: EXTERNAL_ID,
+          status: 'succeeded',
+          output: {
+            content: 'answer from an older Runtime',
+            finish_reason: 'stop',
+            model: 'manus-1.6-lite',
+            provider: 'manus',
+          },
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            tool_calls: 0,
+            cost_micros: 0,
+          },
+        }),
+      ),
+    );
+
+    const result = await createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal);
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      output: { content: 'answer from an older Runtime' },
+      usage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        costMicros: 0,
+        tokensReported: false,
+        costReported: false,
+      },
+    });
+  });
+
+  it.each([
+    {
+      label: 'token',
+      usage: {
+        input_tokens: 4,
+        output_tokens: 2,
+        total_tokens: 6,
+        tool_calls: 0,
+        cost_micros: 0,
+        cost_reported: false,
+      },
+    },
+    {
+      label: 'cost',
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        tool_calls: 0,
+        cost_micros: 12,
+        tokens_reported: false,
+      },
+    },
+  ])('rejects non-zero $label usage when its report flag is missing', async ({ usage }) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          run_id: EXTERNAL_ID,
+          status: 'succeeded',
+          output: {
+            content: 'answer',
+            model: 'legacy-provider',
+            provider: 'manus',
+          },
+          usage,
+        }),
+      ),
+    );
+
+    await expect(
+      createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'AI_RUNTIME_INVALID_RESPONSE', outcome: 'unknown' });
+  });
+
+  it('rejects reported all-zero token usage for a successful answer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          run_id: EXTERNAL_ID,
+          status: 'succeeded',
+          output: {
+            content: 'answer',
+            model: 'broken-compatible-provider',
+            provider: 'openai_compatible',
+          },
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            tool_calls: 0,
+            cost_micros: 0,
+            tokens_reported: true,
+            cost_reported: false,
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal),
+    ).rejects.toMatchObject({ code: 'AI_RUNTIME_INVALID_RESPONSE', outcome: 'unknown' });
+  });
+});
+
+const TENANT_ID = '00000000-0000-7000-8000-000000000009';
+const RUN_ID = '00000000-0000-7000-8000-000000000801';
+const EXTERNAL_ID = '00000000-0000-7000-8000-000000000802';
+
+function run(): PreparedAgentRun {
+  return {
+    id: RUN_ID,
+    tenantId: TENANT_ID,
+    conversationId: '00000000-0000-7000-8000-000000000803',
+    requesterUserId: '00000000-0000-7000-8000-000000000901',
+    requesterRole: 'MEMBER',
+    agentId: '00000000-0000-7000-8000-000000000201',
+    agentName: 'Agent A',
+    agentVersionId: '00000000-0000-7000-8000-000000000301',
+    agentVersion: 1,
+    systemPrompt: 'You are the locked business assistant.',
+    externalRunId: null,
+    turnIndex: 1,
+    turnLimit: 4,
+    maxInputTokens: 16_000,
+    maxOutputTokens: 4_000,
+    messages: [
+      {
+        senderType: 'AGENT',
+        senderId: '00000000-0000-7000-8000-000000000202',
+        senderName: 'Agent B',
+        text: 'peer response',
+      },
+      {
+        senderType: 'USER',
+        senderId: '00000000-0000-7000-8000-000000000901',
+        senderName: 'Requester',
+        text: 'user question',
+      },
+    ],
+  };
+}
+
+function createClient(overrides: Record<string, string> = {}): HttpAgentRuntimeClient {
+  const values = validateEnvironment({
+    NODE_ENV: 'test',
+    REPOSITORY_DRIVER: 'prisma',
+    DATABASE_URL: 'postgresql://localhost/test',
+    ...overrides,
+  });
+  return new HttpAgentRuntimeClient(new ConfigService<EnvironmentVariables, true>(values));
+}
+
+function jsonResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}

@@ -1,0 +1,49 @@
+{
+  "name": "enterprise-intelligent-agent",
+  "version": "0.1.0",
+  "private": true,
+  "description": "企业 AI 协同平台 Monorepo",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "pnpm test:js && pnpm test:ai && pnpm test:semantic-acceptance",
+    "test:js": "turbo run test",
+    "test:ai": "python -m pytest services/ai-runtime",
+    "test:semantic-acceptance": "python -m unittest discover -s tools/semantic_acceptance/tests -p \"test_*.py\"",
+    "lint": "pnpm lint:js && pnpm lint:ai && pnpm lint:semantic-acceptance",
+    "lint:js": "turbo run lint",
+    "lint:ai": "python -m ruff check services/ai-runtime",
+    "lint:semantic-acceptance": "python -m ruff check tools/semantic_acceptance && python -m ruff format --check tools/semantic_acceptance",
+    "check": "pnpm typecheck && pnpm test && pnpm lint",
+    "format": "prettier --write . && python -m ruff format tools/semantic_acceptance",
+    "format:check": "prettier --check . && python -m ruff format --check tools/semantic_acceptance",
+    "dev:infra": "docker compose -f infra/docker-compose.dev.yml up -d",
+    "dev:infra:down": "docker compose -f infra/docker-compose.dev.yml down",
+    "dev:infra:pgvector": "docker compose -f infra/docker-compose.pgvector.dev.yml up -d",
+    "dev:infra:pgvector:down": "docker compose -f infra/docker-compose.pgvector.dev.yml down",
+    "db:generate": "pnpm --filter @enterprise/api prisma:generate",
+    "db:validate": "pnpm --filter @enterprise/api prisma:validate",
+    "db:migrate": "pnpm --filter @enterprise/api prisma:migrate",
+    "db:seed": "pnpm --filter @enterprise/api prisma:seed",
+    "test:db": "pnpm --filter @enterprise/api test:db",
+    "dev:api": "pnpm --filter @enterprise/api dev",
+    "dev:admin": "pnpm --filter @enterprise/admin dev",
+    "dev:desktop": "pnpm --filter @enterprise/desktop dev",
+    "dev:ai": "python -m uvicorn enterprise_ai_runtime.main:app --reload --port 8100",
+    "dev": "concurrently -k -n API,AI,ADMIN,DESKTOP -c blue,magenta,yellow,green \"pnpm dev:api\" \"pnpm dev:ai\" \"pnpm dev:admin\" \"pnpm dev:desktop\"",
+    "setup:electron": "pnpm --filter @enterprise/desktop electron:install"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "concurrently": "10.0.3",
+    "prettier": "3.9.5",
+    "turbo": "2.10.5",
+    "typescript": "5.9.3",
+    "vitest": "4.1.10"
+  }
+}

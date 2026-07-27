@@ -1,0 +1,24 @@
+name: enterprise-agent-semantic-acceptance
+
+# Isolated pgvector acceptance database. It deliberately uses a different
+# project, volume, container and host port from the live development stack.
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg17-bookworm
+    environment:
+      POSTGRES_DB: enterprise_agent_vector_acceptance
+      POSTGRES_USER: enterprise_agent
+      POSTGRES_PASSWORD: local-semantic-acceptance-only
+    ports:
+      - '127.0.0.1:55432:5432'
+    volumes:
+      - semantic-acceptance-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U enterprise_agent -d enterprise_agent_vector_acceptance']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+volumes:
+  semantic-acceptance-postgres-data:

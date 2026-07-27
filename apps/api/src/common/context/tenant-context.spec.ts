@@ -1,0 +1,92 @@
+import { UnauthorizedException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
+import type { Request } from 'express';
+
+import type { EnvironmentVariables } from '../../config/environment.js';
+import { TenantContext } from './tenant-context.js';
+
+describe('TenantContext', () => {
+  it('never trusts development identity headers in production', () => {
+    const request = {
+      header: (name: string) =>
+        name === 'x-tenant-id' ? '00000000-0000-7000-8000-000000000001' : undefined,
+    } as unknown as Request;
+    const values: EnvironmentVariables = {
+      NODE_ENV: 'production',
+      PORT: 3000,
+      HOST: '127.0.0.1',
+      CORS_ORIGINS: ['https://desktop.example.com'],
+      REPOSITORY_DRIVER: 'memory',
+      AUTH_TOKEN_PEPPER: 'test-token-pepper',
+      AUTH_ACCESS_TTL_SECONDS: 900,
+      AUTH_REFRESH_TTL_SECONDS: 2_592_000,
+      AUTH_LOGIN_RATE_LIMIT_ENABLED: true,
+      AUTH_LOGIN_RATE_LIMIT_NETWORK_ENABLED: false,
+      AUTH_LOGIN_RATE_LIMIT_ACCOUNT_FAILURES: 5,
+      AUTH_LOGIN_RATE_LIMIT_NETWORK_FAILURES: 30,
+      AUTH_LOGIN_RATE_LIMIT_WINDOW_SECONDS: 900,
+      AUTH_LOGIN_RATE_LIMIT_BLOCK_SECONDS: 900,
+      AUTH_RATE_LIMIT_BUCKET_CAPACITY_PER_SCOPE: 100_000,
+      REGISTRATION_MODE: 'disabled',
+      ALLOW_DEV_IDENTITY_HEADERS: false,
+      DEV_TENANT_ID: '00000000-0000-7000-8000-000000000001',
+      DEV_USER_ID: '00000000-0000-7000-8000-000000000101',
+      TRUST_PROXY_IDENTITY_HEADERS: false,
+      IM_OUTBOX_ENABLED: false,
+      IM_PROVIDER: 'local',
+      IM_OUTBOX_POLL_INTERVAL_MS: 500,
+      IM_OUTBOX_BATCH_SIZE: 20,
+      IM_OUTBOX_MAX_ATTEMPTS: 8,
+      IM_OUTBOX_RETRY_BASE_MS: 1_000,
+      IM_OUTBOX_RETRY_MAX_MS: 60_000,
+      IM_OUTBOX_CLAIM_TTL_MS: 30_000,
+      IM_PROVIDER_TIMEOUT_MS: 10_000,
+      TENCENT_IM_API_BASE_URL: 'https://console.tim.qq.com',
+      TENCENT_IM_USER_SIG_TTL_SECONDS: 5_184_000,
+      TENCENT_IM_HTTP_TIMEOUT_MS: 5_000,
+      AGENT_RUN_WORKER_ENABLED: false,
+      AGENT_RUN_WORKER_CONCURRENCY: 1,
+      AGENT_RUN_POLL_INTERVAL_MS: 500,
+      AGENT_RUN_CLAIM_TTL_MS: 120_000,
+      AI_RUNTIME_URL: 'http://127.0.0.1:8100',
+      AI_RUNTIME_HTTP_TIMEOUT_MS: 90_000,
+      KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: false,
+      KNOWLEDGE_RERANK_ENABLED: false,
+      KNOWLEDGE_AI_TIMEOUT_MS: 30_000,
+      KNOWLEDGE_EMBEDDING_DIMENSIONS: 1_536,
+      KNOWLEDGE_VECTOR_SEARCH_MODE: 'exact',
+      KNOWLEDGE_OBJECT_STORE_DRIVER: 'local',
+      KNOWLEDGE_OBJECT_STORE_MAX_BYTES: 52_428_800,
+      KNOWLEDGE_OBJECT_STORE_S3_REGION: 'us-east-1',
+      KNOWLEDGE_OBJECT_STORE_S3_CREDENTIAL_MODE: 'default_chain',
+      KNOWLEDGE_OBJECT_STORE_S3_FORCE_PATH_STYLE: true,
+      KNOWLEDGE_OBJECT_STORE_S3_PREFIX: 'knowledge/v1',
+      KNOWLEDGE_FILE_SCANNER_DRIVER: 'disabled',
+      KNOWLEDGE_FILE_SCANNER_CLAMAV_HOST: '127.0.0.1',
+      KNOWLEDGE_FILE_SCANNER_CLAMAV_PORT: 3_310,
+      KNOWLEDGE_FILE_SCANNER_TIMEOUT_MS: 30_000,
+      KNOWLEDGE_DOCUMENT_PARSER_DRIVER: 'local',
+      KNOWLEDGE_DOCLING_TIMEOUT_MS: 120_000,
+      KNOWLEDGE_DOCLING_MAX_RESPONSE_BYTES: 33_554_432,
+      KNOWLEDGE_INGESTION_WORKER_ENABLED: false,
+      KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: 500,
+      KNOWLEDGE_INGESTION_BATCH_SIZE: 2,
+      KNOWLEDGE_INGESTION_MAX_ATTEMPTS: 5,
+      KNOWLEDGE_INGESTION_RETRY_BASE_MS: 1_000,
+      KNOWLEDGE_INGESTION_RETRY_MAX_MS: 60_000,
+      KNOWLEDGE_INGESTION_CLAIM_TTL_MS: 120_000,
+      FEISHU_DIRECTORY_SYNC_ENABLED: false,
+      FEISHU_DIRECTORY_RECONCILE_REMOVALS: false,
+      FEISHU_DIRECTORY_INITIAL_PASSWORD: '1234567890',
+      FEISHU_API_BASE_URL: 'https://open.feishu.cn',
+      FEISHU_HTTP_TIMEOUT_MS: 10_000,
+      FEISHU_SYNC_LEASE_MS: 60_000,
+    };
+    const config = {
+      get: (key: keyof EnvironmentVariables) => values[key],
+    } as unknown as ConfigService<EnvironmentVariables, true>;
+
+    const context = new TenantContext(request, config);
+    expect(() => context.current).toThrow(UnauthorizedException);
+  });
+});

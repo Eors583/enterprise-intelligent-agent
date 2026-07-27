@@ -1,0 +1,12 @@
+node_modules
+.turbo
+.venv
+dist
+out
+release
+coverage
+pnpm-lock.yaml
+*.docx
+docs/企业AI协同平台-总体技术方案.md
+组织内部AI协同业务系统*.md
+腾讯云*.md

@@ -1,0 +1,24 @@
+name: enterprise-agent-pgvector-dev
+
+# Green development database for semantic RAG. It intentionally owns a new
+# volume instead of attaching the existing postgres:17-alpine data directory.
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.5-pg17-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-enterprise_agent_vector}
+      POSTGRES_USER: ${POSTGRES_USER:-enterprise_agent}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-development-only}
+    ports:
+      - '127.0.0.1:55433:5432'
+    volumes:
+      - pgvector-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pgvector-postgres-data:

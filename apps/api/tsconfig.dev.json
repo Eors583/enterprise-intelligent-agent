@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.build.json",
+  "compilerOptions": {
+    "outDir": "./.nest-dev",
+    "tsBuildInfoFile": "./.nest-dev/tsconfig.tsbuildinfo"
+  }
+}
