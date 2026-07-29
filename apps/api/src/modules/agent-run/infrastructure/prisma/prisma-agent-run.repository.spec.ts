@@ -2,9 +2,11 @@ import type { Prisma } from '@prisma/client';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { PrismaService } from '../../../../database/prisma.service.js';
+import { AuthorizationDecisionService } from '../../../authorization/authorization-decision.service.js';
 import type { KnowledgeRetrievalService } from '../../../knowledge-retrieval/knowledge-retrieval.service.js';
 import {
   exceedsConservativeInputBudget,
+  isAgentVersionExecutableForRun,
   PrismaAgentRunRepository,
 } from './prisma-agent-run.repository.js';
 
@@ -16,6 +18,69 @@ const CONVERSATION_ID = '00000000-0000-7000-8000-000000000005';
 const MESSAGE_ID = '00000000-0000-7000-8000-000000000006';
 const VERSION_ID = '00000000-0000-7000-8000-000000000007';
 const KNOWLEDGE_BASE_ID = '00000000-0000-7000-8000-000000000008';
+const ASSIGNMENT_ID = '00000000-0000-7000-8000-000000000009';
+const TASK_ID = '00000000-0000-7000-8000-000000000010';
+const OTHER_TASK_ID = '00000000-0000-7000-8000-000000000011';
+
+describe('isAgentVersionExecutableForRun', () => {
+  it('allows a superseded version only for its existing immutable Assignment snapshot', () => {
+    const assignmentId = '00000000-0000-7000-8000-000000000009';
+    expect(
+      isAgentVersionExecutableForRun({
+        status: 'RETIRED',
+        retryOfRunId: null,
+        assignmentRequired: true,
+        assignmentId,
+        policySnapshot: { snapshotSchemaVersion: 2, roleAssignmentId: assignmentId },
+      }),
+    ).toBe(true);
+    expect(
+      isAgentVersionExecutableForRun({
+        status: 'RETIRED',
+        retryOfRunId: null,
+        assignmentRequired: true,
+        assignmentId,
+        policySnapshot: {
+          snapshotSchemaVersion: 2,
+          roleAssignmentId: '00000000-0000-7000-8000-000000000010',
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps retired personal and legacy Agents unavailable for new Runs', () => {
+    expect(
+      isAgentVersionExecutableForRun({
+        status: 'RETIRED',
+        retryOfRunId: null,
+        assignmentRequired: false,
+        assignmentId: null,
+        policySnapshot: { snapshotSchemaVersion: 2 },
+      }),
+    ).toBe(false);
+    expect(
+      isAgentVersionExecutableForRun({
+        status: 'RETIRED',
+        retryOfRunId: null,
+        assignmentRequired: true,
+        assignmentId: '00000000-0000-7000-8000-000000000009',
+        policySnapshot: {},
+      }),
+    ).toBe(false);
+  });
+
+  it('preserves a governed retry that was explicitly pinned to its source Run', () => {
+    expect(
+      isAgentVersionExecutableForRun({
+        status: 'RETIRED',
+        retryOfRunId: RUN_ID,
+        assignmentRequired: false,
+        assignmentId: null,
+        policySnapshot: { snapshotSchemaVersion: 2, retryPinnedToSourceVersion: true },
+      }),
+    ).toBe(true);
+  });
+});
 
 describe('PrismaAgentRunRepository prepare', () => {
   it('uses a fail-closed UTF-8 upper bound before reserving generation tokens', () => {
@@ -86,6 +151,10 @@ describe('PrismaAgentRunRepository prepare', () => {
           },
         ]),
       },
+      aiSafetyDecisionRecord: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({}),
+      },
       auditEvent: { create: vi.fn() },
     };
     const prisma = {
@@ -101,6 +170,7 @@ describe('PrismaAgentRunRepository prepare', () => {
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
       retrieval as unknown as KnowledgeRetrievalService,
+      new AuthorizationDecisionService(),
     );
 
     await expect(repository.prepare(TENANT_ID, RUN_ID)).rejects.toThrow(
@@ -112,13 +182,197 @@ describe('PrismaAgentRunRepository prepare', () => {
       tenantId: TENANT_ID,
       userId: USER_ID,
       knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+      authorization: {
+        tenantRole: 'MEMBER',
+        assignment: null,
+        taskContext: {
+          assignmentRequired: false,
+          resourceAgentId: AGENT_ID,
+          resourceOwnerUserId: null,
+          resourceVisibility: 'tenant',
+          requesterUserId: USER_ID,
+          participantUserIds: [USER_ID],
+          enforceActorMembership: true,
+        },
+      },
       query: 'What is the leave policy?',
+      maximumOutboundClassification: 'INTERNAL',
       limit: 8,
     });
     expect(transaction.agentRun.update).not.toHaveBeenCalled();
     expect(transaction.agentRun.updateMany).not.toHaveBeenCalled();
     expect(transaction.auditEvent.create).not.toHaveBeenCalled();
     expect(run.status).toBe('QUEUED');
+  });
+
+  it('fails closed when a queued Role Agent relation remains but its marker is malformed', async () => {
+    const baseRun = queuedRun();
+    const run = {
+      ...baseRun,
+      agent: {
+        ...baseRun.agent,
+        ownerUserId: USER_ID,
+        settings: {
+          visibility: 'owner',
+          roleAssignmentId: '',
+        },
+        _count: { roleAssignments: 1 },
+      },
+    } as const;
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      agentRun: {
+        findFirst: vi.fn().mockResolvedValueOnce(run).mockResolvedValueOnce(null),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      conversationParticipant: {
+        findMany: vi.fn().mockResolvedValue([
+          { type: 'USER', userId: USER_ID, agentId: null },
+          { type: 'AGENT', userId: null, agentId: AGENT_ID },
+        ]),
+      },
+      roleAssignment: { findFirst: vi.fn().mockResolvedValue(null) },
+      agentRunStreamEvent: {
+        aggregate: vi.fn().mockResolvedValue({ _max: { sequence: null } }),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      $executeRaw: vi.fn().mockResolvedValue(1),
+    };
+    const prisma = {
+      withTenant: vi.fn(
+        (_tenantId: string, operation: (value: Prisma.TransactionClient) => Promise<unknown>) =>
+          operation(transaction as unknown as Prisma.TransactionClient),
+      ),
+    };
+    const retrieval = {
+      search: vi.fn(),
+      areChunksAccessibleInTransaction: vi.fn(),
+    };
+    const repository = new PrismaAgentRunRepository(
+      prisma as unknown as PrismaService,
+      retrieval as unknown as KnowledgeRetrievalService,
+      new AuthorizationDecisionService(),
+    );
+
+    await expect(repository.prepare(TENANT_ID, RUN_ID)).resolves.toEqual({
+      kind: 'terminal',
+      status: 'FAILED',
+      externalRunId: null,
+      errorCode: 'AGENT_ASSIGNMENT_INACTIVE',
+    });
+    expect(transaction.roleAssignment.findFirst).toHaveBeenCalledWith({
+      where: {
+        tenantId: TENANT_ID,
+        agentInstanceId: AGENT_ID,
+        userId: USER_ID,
+      },
+      orderBy: [{ effectiveFrom: 'desc' }, { createdAt: 'desc' }],
+      select: {
+        id: true,
+        tenantId: true,
+        userId: true,
+        agentInstanceId: true,
+        roleTemplateId: true,
+        status: true,
+        effectiveFrom: true,
+        effectiveTo: true,
+        organizationScope: true,
+        permissionScope: true,
+        employment: { select: { status: true, userId: true } },
+      },
+    });
+    expect(transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: expect.objectContaining({
+        status: 'FAILED',
+        errorCode: 'AGENT_ASSIGNMENT_INACTIVE',
+      }),
+    });
+    expect(retrieval.search).not.toHaveBeenCalled();
+  });
+
+  it('uses the trusted business Task id for task-scoped Role Agent execution and retrieval', async () => {
+    const run = roleAgentRun(TASK_ID);
+    const transaction = prepareTransaction(run, activeTaskScopedAssignment());
+    const prisma = tenantPrisma(transaction);
+    const retrieval = {
+      search: vi.fn().mockRejectedValue(new Error('stop after authorization')),
+      areChunksAccessibleInTransaction: vi.fn(),
+    };
+    const repository = new PrismaAgentRunRepository(
+      prisma as unknown as PrismaService,
+      retrieval as unknown as KnowledgeRetrievalService,
+      new AuthorizationDecisionService(),
+    );
+
+    await expect(repository.prepare(TENANT_ID, RUN_ID)).rejects.toThrow('stop after authorization');
+
+    expect(retrieval.search).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authorization: expect.objectContaining({
+          assignment: expect.objectContaining({
+            id: ASSIGNMENT_ID,
+            taskIds: [TASK_ID],
+          }),
+          taskContext: expect.objectContaining({ taskId: TASK_ID }),
+        }),
+      }),
+    );
+    expect(retrieval.search.mock.calls[0]?.[0]?.authorization.taskContext.taskId).not.toBe(RUN_ID);
+  });
+
+  it('denies a task-scoped Role Agent when the Run has no trusted business Task id', async () => {
+    const run = roleAgentRun(null);
+    const transaction = prepareTransaction(run, activeTaskScopedAssignment());
+    const prisma = tenantPrisma(transaction);
+    const retrieval = {
+      search: vi.fn(),
+      areChunksAccessibleInTransaction: vi.fn(),
+    };
+    const repository = new PrismaAgentRunRepository(
+      prisma as unknown as PrismaService,
+      retrieval as unknown as KnowledgeRetrievalService,
+      new AuthorizationDecisionService(),
+    );
+
+    await expect(repository.prepare(TENANT_ID, RUN_ID)).resolves.toEqual({
+      kind: 'terminal',
+      status: 'FAILED',
+      externalRunId: null,
+      errorCode: 'AGENT_TASK_SCOPE_DENIED',
+    });
+    expect(retrieval.search).not.toHaveBeenCalled();
+    expect(transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: expect.objectContaining({
+        status: 'FAILED',
+        errorCode: 'AGENT_TASK_SCOPE_DENIED',
+      }),
+    });
+  });
+
+  it('denies a task-scoped Role Agent when the Run is bound to another business Task', async () => {
+    const run = roleAgentRun(OTHER_TASK_ID);
+    const transaction = prepareTransaction(run, activeTaskScopedAssignment());
+    const prisma = tenantPrisma(transaction);
+    const retrieval = {
+      search: vi.fn(),
+      areChunksAccessibleInTransaction: vi.fn(),
+    };
+    const repository = new PrismaAgentRunRepository(
+      prisma as unknown as PrismaService,
+      retrieval as unknown as KnowledgeRetrievalService,
+      new AuthorizationDecisionService(),
+    );
+
+    await expect(repository.prepare(TENANT_ID, RUN_ID)).resolves.toMatchObject({
+      kind: 'terminal',
+      status: 'FAILED',
+      errorCode: 'AGENT_TASK_SCOPE_DENIED',
+    });
+    expect(retrieval.search).not.toHaveBeenCalled();
   });
 
   it('resumes a known RUNNING execution for reconciliation without reserving or dispatching again', async () => {
@@ -130,6 +384,29 @@ describe('PrismaAgentRunRepository prepare', () => {
       dispatchStartedAt: new Date('2026-07-21T00:00:01.000Z'),
       startedAt: new Date('2026-07-21T00:00:02.000Z'),
       reservedTokens: 20_000,
+      modelRoutePolicyVersionId: '00000000-0000-7000-8000-000000000010',
+      modelRouteSnapshot: {
+        schemaVersion: 1,
+        policyVersionId: '00000000-0000-7000-8000-000000000010',
+        policyVersion: 1,
+        policyHash: 'a'.repeat(64),
+        taskClass: 'GENERAL_QA',
+        maximumClassification: 'INTERNAL',
+        requiredCapabilities: ['chat'],
+        maximumAttempts: 1,
+        circuitFailureThreshold: 3,
+        circuitOpenSeconds: 60,
+        candidates: [
+          {
+            ordinal: 1,
+            catalogVersionId: '00000000-0000-7000-8000-000000000011',
+            routeKey: 'GENERAL_PRIMARY',
+            provider: 'OPENAI_COMPATIBLE',
+            model: 'enterprise-chat',
+            credentialReference: 'vault://ai/providers/general',
+          },
+        ],
+      },
     } as const;
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
@@ -158,6 +435,22 @@ describe('PrismaAgentRunRepository prepare', () => {
           },
         ]),
       },
+      aiSafetyDecisionRecord: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({}),
+      },
+      aiModelCatalogVersion: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: '00000000-0000-7000-8000-000000000011',
+            routeKey: 'GENERAL_PRIMARY',
+            provider: 'OPENAI_COMPATIBLE',
+            modelName: 'enterprise-chat',
+            credentialReference: 'vault://ai/providers/general',
+            maximumClassification: 'INTERNAL',
+          },
+        ]),
+      },
       auditEvent: { create: vi.fn() },
     };
     const prisma = {
@@ -173,6 +466,7 @@ describe('PrismaAgentRunRepository prepare', () => {
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
       retrieval as unknown as KnowledgeRetrievalService,
+      new AuthorizationDecisionService(),
     );
 
     await expect(repository.prepare(TENANT_ID, RUN_ID)).resolves.toMatchObject({
@@ -181,6 +475,163 @@ describe('PrismaAgentRunRepository prepare', () => {
     });
     expect(transaction.agentRun.updateMany).not.toHaveBeenCalled();
     expect(transaction.agentRun.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('PrismaAgentRunRepository provider-backed cancellation', () => {
+  it('attaches a late Runtime id without forging RUNNING after cancellation was requested', async () => {
+    const externalRunId = '00000000-0000-7000-8000-000000000012';
+    const requestedAt = new Date('2026-07-29T01:00:00.000Z');
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      agentRun: {
+        findFirst: vi.fn().mockResolvedValue({
+          ...queuedRun(),
+          status: 'DISPATCHING',
+          cancellationRequestedAt: requestedAt,
+          cancellationReason: 'ROLE_ASSIGNMENT_REVOKED',
+          cancellationConfirmedAt: null,
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+    };
+    const repository = cancellationRepository(transaction);
+
+    await expect(repository.attachExternalRun(TENANT_ID, RUN_ID, externalRunId)).resolves.toBe(
+      'cancellation_required',
+    );
+    expect(transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: {
+        externalRunId,
+        version: { increment: 1 },
+      },
+    });
+    expect(transaction.agentRun.update.mock.calls[0]?.[0].data).not.toHaveProperty('status');
+    expect(transaction.agentRun.update.mock.calls[0]?.[0].data).not.toHaveProperty('startedAt');
+  });
+
+  it('records a raced terminal Run as cancellation-complete without backdating confirmation', async () => {
+    const requestedAt = new Date(Date.now() - 1_000);
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      agentRun: {
+        findFirst: vi.fn().mockResolvedValue({
+          status: 'SUCCEEDED',
+          externalRunId: '00000000-0000-7000-8000-000000000012',
+          finishedAt: new Date(requestedAt.getTime() - 1_000),
+          cancellationRequestedAt: requestedAt,
+          cancellationConfirmedAt: null,
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+    };
+    const repository = cancellationRepository(transaction);
+
+    await expect(repository.prepareCancellation(TENANT_ID, RUN_ID)).resolves.toEqual({
+      kind: 'complete',
+      externalRunId: '00000000-0000-7000-8000-000000000012',
+    });
+    const confirmedAt = transaction.agentRun.update.mock.calls[0]?.[0].data
+      .cancellationConfirmedAt as Date;
+    expect(confirmedAt.getTime()).toBeGreaterThanOrEqual(requestedAt.getTime());
+  });
+
+  it('keeps UNKNOWN and its reservation while recording a confirmed remote stop', async () => {
+    const externalRunId = '00000000-0000-7000-8000-000000000012';
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      agentRun: {
+        findFirst: vi.fn().mockResolvedValue({
+          status: 'UNKNOWN',
+          externalRunId,
+          conversationId: CONVERSATION_ID,
+          reservedTokens: 20_000,
+          cancellationRequestedAt: new Date('2026-07-29T01:00:00.000Z'),
+          cancellationReason: 'IDENTITY_DEPROVISIONED',
+          cancellationConfirmedAt: null,
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const repository = cancellationRepository(transaction);
+
+    await repository.confirmCancellation(TENANT_ID, RUN_ID, externalRunId);
+
+    expect(transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: expect.objectContaining({
+        cancellationConfirmedAt: expect.any(Date),
+        version: { increment: 1 },
+      }),
+    });
+    const update = transaction.agentRun.update.mock.calls[0]?.[0].data;
+    expect(update).not.toHaveProperty('status');
+    expect(update).not.toHaveProperty('finishedAt');
+    expect(update).not.toHaveProperty('reservedTokens');
+    expect(transaction.auditEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'agent.run.cancellation_confirmed_after_unknown',
+        metadata: expect.objectContaining({
+          cancellationReason: 'IDENTITY_DEPROVISIONED',
+          latencyMs: null,
+        }),
+      }),
+    });
+  });
+
+  it('treats a legacy QUEUED Run with a provider id as provider-backed cancellation', async () => {
+    const externalRunId = '00000000-0000-7000-8000-000000000012';
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      agentRun: {
+        findFirst: vi.fn().mockResolvedValue({
+          status: 'QUEUED',
+          externalRunId,
+          conversationId: CONVERSATION_ID,
+          reservedTokens: 20_000,
+          cancellationRequestedAt: new Date('2026-07-29T01:00:00.000Z'),
+          cancellationReason: 'IDENTITY_DEPROVISIONED',
+          cancellationConfirmedAt: null,
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      agentRunStreamEvent: {
+        aggregate: vi.fn().mockResolvedValue({ _max: { sequence: null } }),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const repository = cancellationRepository(transaction);
+
+    await repository.confirmCancellation(TENANT_ID, RUN_ID, externalRunId);
+
+    expect(transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: expect.objectContaining({
+        status: 'CANCELLED',
+        errorCode: 'IDENTITY_DEPROVISIONED',
+        cancellationConfirmedAt: expect.any(Date),
+        version: { increment: 1 },
+      }),
+    });
+    expect(transaction.agentRun.update.mock.calls[0]?.[0].data).toMatchObject({
+      tokenEvidence: 'QUOTA_UPPER_BOUND',
+      quotaChargedTokens: 20_000,
+      quotaSettledAt: expect.any(Date),
+      reservedTokens: 0,
+    });
+    expect(transaction.agentRun.update.mock.calls[0]?.[0].data).not.toHaveProperty(
+      'usageRecordedAt',
+    );
+    expect(transaction.auditEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'agent.run.cancel_confirmed',
+      }),
+    });
   });
 });
 
@@ -194,6 +645,7 @@ function queuedRun() {
     requesterUserId: USER_ID,
     agentId: AGENT_ID,
     agentVersionId: VERSION_ID,
+    taskId: null,
     parentRunId: null,
     outputMessageId: null,
     trigger: 'USER_MESSAGE',
@@ -204,6 +656,7 @@ function queuedRun() {
     externalRunId: null,
     attempts: 0,
     version: 0,
+    reservedTokens: 0,
     policySnapshot: {},
     errorCode: null,
     errorMessage: null,
@@ -225,6 +678,7 @@ function queuedRun() {
       status: 'ONLINE',
       ownerUserId: null,
       settings: { visibility: 'tenant' },
+      _count: { roleAssignments: 0 },
     },
     agentVersion: {
       id: VERSION_ID,
@@ -248,4 +702,116 @@ function queuedRun() {
       createdAt,
     },
   } as const;
+}
+
+function cancellationRepository(transaction: Record<string, unknown>) {
+  const prisma = {
+    withTenant: vi.fn(
+      (_tenantId: string, operation: (value: Prisma.TransactionClient) => Promise<unknown>) =>
+        operation(transaction as unknown as Prisma.TransactionClient),
+    ),
+  };
+  const retrieval = {
+    search: vi.fn(),
+    areChunksAccessibleInTransaction: vi.fn(),
+  };
+  return new PrismaAgentRunRepository(
+    prisma as unknown as PrismaService,
+    retrieval as unknown as KnowledgeRetrievalService,
+    new AuthorizationDecisionService(),
+  );
+}
+
+function roleAgentRun(taskId: string | null) {
+  const run = queuedRun();
+  return {
+    ...run,
+    taskId,
+    agent: {
+      ...run.agent,
+      settings: { visibility: 'tenant', roleAssignmentId: ASSIGNMENT_ID },
+      _count: { roleAssignments: 1 },
+    },
+  } as const;
+}
+
+function activeTaskScopedAssignment() {
+  return {
+    id: ASSIGNMENT_ID,
+    tenantId: TENANT_ID,
+    userId: USER_ID,
+    agentInstanceId: AGENT_ID,
+    status: 'ACTIVE',
+    effectiveFrom: new Date('2026-07-01T00:00:00.000Z'),
+    effectiveTo: null,
+    organizationScope: {},
+    permissionScope: {
+      taskIds: [TASK_ID],
+      actions: ['agent.run.execute'],
+    },
+    employment: {
+      status: 'ACTIVE',
+      userId: USER_ID,
+    },
+  } as const;
+}
+
+function prepareTransaction(
+  run: ReturnType<typeof roleAgentRun>,
+  assignment: ReturnType<typeof activeTaskScopedAssignment>,
+) {
+  return {
+    $queryRaw: vi.fn().mockResolvedValue([]),
+    $executeRaw: vi.fn().mockResolvedValue(1),
+    agentRun: {
+      findFirst: vi.fn().mockResolvedValueOnce(run).mockResolvedValueOnce(null),
+      count: vi.fn().mockResolvedValue(0),
+      update: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn(),
+    },
+    agentRunStreamEvent: {
+      aggregate: vi.fn().mockResolvedValue({ _max: { sequence: null } }),
+      findFirst: vi.fn().mockResolvedValue(null),
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    tenant: {
+      findFirst: vi.fn().mockResolvedValue({
+        agentRunConcurrencyLimit: 4,
+        agentRunRateLimitPerMinute: 60,
+        agentRunMonthlyTokenLimit: 100_000_000n,
+      }),
+    },
+    conversationParticipant: {
+      findMany: vi.fn().mockResolvedValue([
+        { type: 'USER', userId: USER_ID, agentId: null },
+        { type: 'AGENT', userId: null, agentId: AGENT_ID },
+      ]),
+    },
+    roleAssignment: {
+      findFirst: vi.fn().mockResolvedValue(assignment),
+    },
+    message: {
+      findMany: vi.fn().mockResolvedValue([
+        {
+          id: MESSAGE_ID,
+          senderType: 'USER',
+          senderUserId: USER_ID,
+          senderAgentId: null,
+          senderName: 'Requester',
+          content: { type: 'text', text: 'What is the leave policy?' },
+          createdAt: run.inputMessage.createdAt,
+        },
+      ]),
+    },
+    auditEvent: { create: vi.fn().mockResolvedValue({}) },
+  };
+}
+
+function tenantPrisma(transaction: ReturnType<typeof prepareTransaction>) {
+  return {
+    withTenant: vi.fn(
+      (_tenantId: string, operation: (value: Prisma.TransactionClient) => Promise<unknown>) =>
+        operation(transaction as unknown as Prisma.TransactionClient),
+    ),
+  };
 }

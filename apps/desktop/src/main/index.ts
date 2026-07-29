@@ -1,8 +1,14 @@
 import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { app, BrowserWindow, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
 import {
   DESKTOP_IPC_CHANNELS,
+  type DesktopAgentRunStreamPayload,
+  type DesktopAgentRunStreamStartRequest,
+  type DesktopAgentRunStreamUpdate,
   type DesktopApiRequest,
+  type DesktopAuthState,
+  type DesktopOidcLoginRequest,
   type DesktopRuntimeInfo,
 } from '../shared/desktop-api';
 import { AccountStore } from './account-store';
@@ -10,7 +16,12 @@ import { DesktopAuthManager } from './desktop-auth-manager';
 import { createPasswordRecoveryUrl } from './recovery-url';
 
 let mainWindow: BrowserWindow | null = null;
+let oidcLoginWindow: BrowserWindow | null = null;
 let authManager: DesktopAuthManager | null = null;
+const agentRunStreams = new Map<
+  string,
+  { readonly controller: AbortController; readonly senderId: number }
+>();
 
 function normalizePlatform(platform: NodeJS.Platform): DesktopRuntimeInfo['platform'] {
   if (platform === 'win32' || platform === 'darwin' || platform === 'linux') return platform;
@@ -44,6 +55,27 @@ function registerIpcHandlers(): void {
     assertTrustedIpcSender(event);
     return requireAuthManager().login(request as never);
   });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.verifyMfaLogin, async (event, request: unknown) => {
+    assertTrustedIpcSender(event);
+    return requireAuthManager().verifyMfaLogin(request as never);
+  });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.listOidcProviders, async (event, tenantSlug: unknown) => {
+    assertTrustedIpcSender(event);
+    if (typeof tenantSlug !== 'string') throw new Error('tenantSlug must be a string.');
+    return requireAuthManager().listOidcProviders(tenantSlug);
+  });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.loginWithOidc, async (event, request: unknown) => {
+    assertTrustedIpcSender(event);
+    if (
+      !request ||
+      typeof request !== 'object' ||
+      typeof Reflect.get(request, 'tenantSlug') !== 'string' ||
+      typeof Reflect.get(request, 'providerKey') !== 'string'
+    ) {
+      throw new Error('Invalid OIDC login request.');
+    }
+    return runOidcLogin(request as DesktopOidcLoginRequest);
+  });
   ipcMain.handle(DESKTOP_IPC_CHANNELS.registerTenant, async (event, request: unknown) => {
     assertTrustedIpcSender(event);
     return requireAuthManager().registerTenant(request as never);
@@ -73,11 +105,249 @@ function registerIpcHandlers(): void {
     if (!request || typeof request !== 'object') throw new Error('Invalid desktop API request.');
     return requireAuthManager().apiRequest(request as DesktopApiRequest);
   });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.startAgentRunStream, async (event, request: unknown) => {
+    assertTrustedIpcSender(event);
+    const stream = parseAgentRunStreamStartRequest(request);
+    if (agentRunStreams.has(stream.subscriptionId)) {
+      throw new Error('Agent Run stream subscription already exists.');
+    }
+    const controller = new AbortController();
+    const registration = { controller, senderId: event.sender.id };
+    agentRunStreams.set(stream.subscriptionId, registration);
+    let cursor = stream.cursor;
+    const send = (update: DesktopAgentRunStreamPayload): void => {
+      if (
+        agentRunStreams.get(stream.subscriptionId) !== registration ||
+        event.sender.isDestroyed()
+      ) {
+        return;
+      }
+      if (update.kind === 'state') cursor = update.cursor;
+      else cursor = update.event.sequence;
+      event.sender.send(DESKTOP_IPC_CHANNELS.agentRunStreamUpdate, {
+        ...update,
+        subscriptionId: stream.subscriptionId,
+      } satisfies DesktopAgentRunStreamUpdate);
+    };
+    void requireAuthManager()
+      .streamAgentRun(stream, send, controller.signal)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          send({
+            kind: 'state',
+            state: 'closed',
+            cursor,
+            error: error instanceof Error ? error.message : 'Agent Run stream failed.',
+          });
+        }
+      })
+      .finally(() => {
+        if (agentRunStreams.get(stream.subscriptionId) === registration) {
+          agentRunStreams.delete(stream.subscriptionId);
+        }
+      });
+  });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.stopAgentRunStream, (event, subscriptionId: unknown) => {
+    assertTrustedIpcSender(event);
+    if (typeof subscriptionId !== 'string' || !UUID_PATTERN.test(subscriptionId)) {
+      throw new Error('Invalid Agent Run stream subscription id.');
+    }
+    const active = agentRunStreams.get(subscriptionId);
+    if (active?.senderId === event.sender.id) {
+      active.controller.abort(new Error('Agent Run stream subscription stopped.'));
+      agentRunStreams.delete(subscriptionId);
+    }
+  });
+}
+
+async function runOidcLogin(request: DesktopOidcLoginRequest): Promise<DesktopAuthState> {
+  if (oidcLoginWindow && !oidcLoginWindow.isDestroyed()) {
+    oidcLoginWindow.focus();
+    throw new Error('An OIDC login is already in progress.');
+  }
+  const callbackUrl = registeredOidcCallbackUrl();
+  const started = await requireAuthManager().startOidcLogin({
+    tenantSlug: request.tenantSlug,
+    providerKey: request.providerKey,
+    redirectUri: callbackUrl.toString(),
+    sessionLabel: '桌面应用',
+  });
+  const authorizationUrl = new URL(started.authorizationUrl);
+  assertSafeOidcNavigation(authorizationUrl);
+
+  return new Promise<DesktopAuthState>((resolve, reject) => {
+    let completed = false;
+    const finish = (operation: Promise<DesktopAuthState>): void => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      if (oidcLoginWindow && !oidcLoginWindow.isDestroyed()) oidcLoginWindow.hide();
+      void operation.then(resolve, reject).finally(() => {
+        if (oidcLoginWindow && !oidcLoginWindow.isDestroyed()) oidcLoginWindow.close();
+      });
+    };
+    const fail = (error: Error): void => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      reject(error);
+      if (oidcLoginWindow && !oidcLoginWindow.isDestroyed()) oidcLoginWindow.close();
+    };
+    const partition = `oidc-auth-${randomUUID()}`;
+    const authWindow = new BrowserWindow({
+      width: 720,
+      height: 760,
+      minWidth: 520,
+      minHeight: 620,
+      ...(mainWindow === null ? {} : { parent: mainWindow }),
+      modal: mainWindow !== null,
+      show: false,
+      autoHideMenuBar: true,
+      title: '企业单点登录',
+      webPreferences: {
+        partition,
+        nodeIntegration: false,
+        contextIsolation: true,
+        sandbox: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        safeDialogs: true,
+      },
+    });
+    oidcLoginWindow = authWindow;
+    authWindow.webContents.session.setPermissionCheckHandler(() => false);
+    authWindow.webContents.session.setPermissionRequestHandler(
+      (_webContents, _permission, callback) => callback(false),
+    );
+    authWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    authWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
+
+    const inspectNavigation = (event: Electron.Event, value: string): void => {
+      let destination: URL;
+      try {
+        destination = new URL(value);
+      } catch {
+        event.preventDefault();
+        fail(new Error('OIDC provider attempted an invalid navigation.'));
+        return;
+      }
+      if (
+        destination.origin === callbackUrl.origin &&
+        destination.pathname === callbackUrl.pathname
+      ) {
+        event.preventDefault();
+        const state = destination.searchParams.get('state');
+        const code = destination.searchParams.get('code');
+        const providerError = destination.searchParams.get('error');
+        if (providerError || !state || !code) {
+          fail(new Error('OIDC provider denied or returned an incomplete authorization response.'));
+          return;
+        }
+        finish(
+          requireAuthManager().completeOidcLogin({
+            state,
+            code,
+            sessionLabel: '桌面应用',
+          }),
+        );
+        return;
+      }
+      try {
+        assertSafeOidcNavigation(destination);
+      } catch (error) {
+        event.preventDefault();
+        fail(error instanceof Error ? error : new Error('OIDC navigation was rejected.'));
+      }
+    };
+    authWindow.webContents.on('will-navigate', inspectNavigation);
+    authWindow.webContents.on('will-redirect', inspectNavigation);
+    authWindow.once('ready-to-show', () => authWindow.show());
+    authWindow.once('closed', () => {
+      oidcLoginWindow = null;
+      void authWindow.webContents.session.clearStorageData().catch(() => undefined);
+      if (!completed) fail(new Error('OIDC login was cancelled.'));
+    });
+    const timeout = setTimeout(
+      () => fail(new Error('OIDC login expired before the provider returned.')),
+      10 * 60 * 1_000,
+    );
+    void authWindow.loadURL(authorizationUrl.toString()).catch((error: unknown) => {
+      fail(error instanceof Error ? error : new Error('OIDC provider could not be opened.'));
+    });
+  });
+}
+
+function registeredOidcCallbackUrl(): URL {
+  const configured = new URL(__AUTH_PUBLIC_APP_URL__);
+  if (
+    configured.protocol !== 'https:' &&
+    !(
+      !app.isPackaged &&
+      configured.protocol === 'http:' &&
+      ['127.0.0.1', 'localhost', '[::1]'].includes(configured.hostname)
+    )
+  ) {
+    throw new Error(
+      'Desktop OIDC callback must use HTTPS (local development may use loopback HTTP).',
+    );
+  }
+  return new URL('/oidc/callback', configured.origin);
+}
+
+function assertSafeOidcNavigation(url: URL): void {
+  if (url.username || url.password) {
+    throw new Error('OIDC navigation URLs must not contain embedded credentials.');
+  }
+  if (url.protocol === 'https:') return;
+  if (
+    !app.isPackaged &&
+    url.protocol === 'http:' &&
+    ['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+  ) {
+    return;
+  }
+  throw new Error('OIDC navigation was rejected because it is not HTTPS.');
 }
 
 function requireAuthManager(): DesktopAuthManager {
   if (!authManager) throw new Error('Desktop authentication is not initialized.');
   return authManager;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function parseAgentRunStreamStartRequest(value: unknown): DesktopAgentRunStreamStartRequest {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    typeof Reflect.get(value, 'subscriptionId') !== 'string' ||
+    typeof Reflect.get(value, 'conversationId') !== 'string' ||
+    typeof Reflect.get(value, 'runId') !== 'string' ||
+    typeof Reflect.get(value, 'expectedSessionId') !== 'string' ||
+    typeof Reflect.get(value, 'cursor') !== 'number'
+  ) {
+    throw new Error('Invalid Agent Run stream subscription.');
+  }
+  const request = value as DesktopAgentRunStreamStartRequest;
+  if (
+    !UUID_PATTERN.test(request.subscriptionId) ||
+    !UUID_PATTERN.test(request.conversationId) ||
+    !UUID_PATTERN.test(request.runId) ||
+    !UUID_PATTERN.test(request.expectedSessionId) ||
+    !Number.isSafeInteger(request.cursor) ||
+    request.cursor < 0 ||
+    request.cursor > 10_001
+  ) {
+    throw new Error('Invalid Agent Run stream subscription.');
+  }
+  return request;
+}
+
+function abortAgentRunStreams(reason: string): void {
+  for (const active of agentRunStreams.values()) {
+    active.controller.abort(new Error(reason));
+  }
+  agentRunStreams.clear();
 }
 
 function addConnectOrigin(origins: Set<string>, value: string | undefined): void {
@@ -218,6 +488,7 @@ if (!hasSingleInstanceLock) {
       new AccountStore(join(app.getPath('userData'), 'accounts.v1.json')),
       __RENDERER_API_BASE_URL__,
       (state) => {
+        abortAgentRunStreams('The active desktop account changed.');
         if (!mainWindow || mainWindow.isDestroyed()) return;
         try {
           mainWindow.webContents.send(DESKTOP_IPC_CHANNELS.authStateChanged, state);
@@ -237,5 +508,6 @@ if (!hasSingleInstanceLock) {
 }
 
 app.on('window-all-closed', () => {
+  abortAgentRunStreams('The desktop window closed.');
   if (process.platform !== 'darwin') app.quit();
 });

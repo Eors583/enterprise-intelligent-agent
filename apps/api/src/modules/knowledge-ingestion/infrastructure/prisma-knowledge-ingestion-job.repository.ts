@@ -100,6 +100,22 @@ export class PrismaKnowledgeIngestionJobRepository extends KnowledgeIngestionJob
     });
   }
 
+  ownsLease(input: { readonly jobId: string; readonly workerId: string }): Promise<boolean> {
+    return this.withWorkerRole(async (transaction) => {
+      const rows = await transaction.$queryRaw<Array<{ readonly owned: boolean }>>(Prisma.sql`
+        SELECT EXISTS (
+          SELECT 1
+          FROM public."knowledge_ingestion_jobs"
+          WHERE "id" = ${input.jobId}::uuid
+            AND "status" = 'RUNNING'::"KnowledgeIngestionStatus"
+            AND "claimed_by" = ${input.workerId}
+            AND "lease_expires_at" > clock_timestamp()
+        ) AS owned
+      `);
+      return rows[0]?.owned === true;
+    });
+  }
+
   releaseForRetry(input: {
     readonly jobId: string;
     readonly workerId: string;

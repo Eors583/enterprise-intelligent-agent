@@ -2,20 +2,33 @@ import type { INestApplication } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PrismaClient } from '@prisma/client';
 import {
+  aiEvaluationReadinessSchema,
   authSessionResponseSchema,
   knowledgeBaseSchema,
   knowledgeDocumentSchema,
+  knowledgeGraphCorrectionSchema,
+  knowledgeGraphGovernanceOverviewSchema,
+  knowledgeGraphOverviewSchema,
+  knowledgeGraphResponseSchema,
+  knowledgeOntologySchema,
+  knowledgeOntologyVersionSchema,
   knowledgeRetrievalTestResponseSchema,
 } from '@enterprise/contracts';
 import request from 'supertest';
 
 import { validateEnvironment, type EnvironmentVariables } from '../src/config/environment.js';
 import { OutboxPrismaService } from '../src/database/outbox-prisma.service.js';
+import { KnowledgeIngestionAvailabilityService } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion-availability.service.js';
 import { KnowledgeIngestionProcessor } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.service.js';
 import { KnowledgeIngestionWorker } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.worker.js';
 import { PrismaKnowledgeIngestionJobRepository } from '../src/modules/knowledge-ingestion/infrastructure/prisma-knowledge-ingestion-job.repository.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
 import { LocalKnowledgeObjectStore } from '../src/modules/knowledge-ingestion/infrastructure/local-knowledge-object.store.js';
+import {
+  seedPassingEvaluationRun,
+  seedPublishedEvaluationDataset,
+} from './ai-evaluation-test-fixture.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantSlug = 'knowledge-ingestion-integration';
@@ -34,6 +47,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       createWorkerConfig(),
       new PrismaKnowledgeIngestionJobRepository(queueClient),
       app.get(KnowledgeIngestionProcessor),
+      app.get(KnowledgeIngestionAvailabilityService),
     );
   });
 
@@ -59,6 +73,17 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       .expect(201);
     const session = authSessionResponseSchema.parse(registration.body);
     const authorization = { Authorization: `Bearer ${session.accessToken}` };
+    const tenantId = session.account.tenantId;
+    const evaluationReviewer = await administrator.user.create({
+      data: {
+        tenantId,
+        email: 'evaluation-reviewer@knowledge-ingestion.integration',
+        emailNormalized: 'evaluation-reviewer@knowledge-ingestion.integration',
+        displayName: 'Knowledge Evaluation Reviewer',
+        role: 'ADMIN',
+      },
+      select: { id: true },
+    });
 
     const knowledgeBase = knowledgeBaseSchema.parse(
       (
@@ -75,23 +100,28 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .expect(201)
       ).body,
     );
-
-    const draft = knowledgeDocumentSchema.parse(
-      (
-        await request(app.getHttpServer())
-          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
-          .set(authorization)
-          .send({
-            title: '待审核草稿',
-            sourceType: 'MARKDOWN',
-            contentText: '# 草稿\n\nLEGACYPOLICYALPHA 尚未发布的内容。',
-            status: 'DRAFT',
-          })
-          .expect(201)
-      ).body,
+    await publishFixtureExtractionOntology(
+      authorization,
+      tenantId,
+      evaluationReviewer.id,
+      knowledgeBase.id,
     );
-    expect(draft).toMatchObject({ status: 'DRAFT', currentVersionId: null });
-    expect(draft.versions[0]).toMatchObject({
+
+    const draftResponse = await request(app.getHttpServer())
+      .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+      .set(authorization)
+      .send({
+        title: '待审核草稿',
+        sourceType: 'MARKDOWN',
+        contentText: '# 草稿\n\nLEGACYPOLICYALPHA 尚未发布的内容。',
+        status: 'DRAFT',
+      });
+    if (draftResponse.status !== 201) {
+      throw new Error(`Draft creation failed: ${JSON.stringify(draftResponse.body)}`);
+    }
+    const unpublishedDraft = knowledgeDocumentSchema.parse(draftResponse.body);
+    expect(unpublishedDraft).toMatchObject({ status: 'DRAFT', currentVersionId: null });
+    expect(unpublishedDraft.versions[0]).toMatchObject({
       status: 'DRAFT',
       chunkCount: 0,
       ingestionJob: null,
@@ -106,27 +136,52 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .expect(201)
       ).body,
     );
-    expect(beforeDraftPublish.items.some((item) => item.documentId === draft.id)).toBe(false);
+    expect(beforeDraftPublish.items.some((item) => item.documentId === unpublishedDraft.id)).toBe(
+      false,
+    );
 
     const firstQueued = knowledgeDocumentSchema.parse(
       (
         await request(app.getHttpServer())
-          .post(
-            `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${draft.id}/versions/${draft.versions[0]?.id}/publish`,
-          )
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
           .set(authorization)
+          /*
+          .send({
+            title: '寰呭鏍歌崏绋?,
+            sourceType: 'MARKDOWN',
+            contentText: '# 鑽夌\n\nLEGACYPOLICYALPHA 灏氭湭鍙戝竷鐨勫唴瀹广€?,
+            status: 'READY',
+          })
+          */
+          .send({
+            title: 'Published policy draft',
+            sourceType: 'MARKDOWN',
+            contentText:
+              '# Legacy policy\n\nLEGACYPOLICYALPHA is visible only after governed publication.',
+            status: 'READY',
+          })
           .expect(201)
       ).body,
     );
+    const draft = firstQueued;
     expect(firstQueued.versions[0]).toMatchObject({
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    const firstPublished = await processDocument(
+    const firstIndexed = await processDocument(
       authorization,
       knowledgeBase.id,
       draft.id,
-      draft.versions[0]?.id,
+      firstQueued.versions[0]?.id,
+    );
+    const firstPublished = await publishIndexedDocument(
+      authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
+      knowledgeBase.id,
+      draft.id,
+      firstIndexed.versions[0]?.id,
     );
     const firstPublishedVersion = firstPublished.versions.find(
       (version) => version.id === firstPublished.currentVersionId,
@@ -137,6 +192,280 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       chunkCount: 1,
       ingestionJob: { status: 'SUCCEEDED' },
     });
+    const firstGraphOverview = knowledgeGraphOverviewSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/graph-overview`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    expect(firstGraphOverview).toMatchObject({
+      status: 'READY',
+      publishedChunkCount: 1,
+      linkedChunkCount: 1,
+      mentionCoverage: 1,
+      evidenceCoverage: 1,
+      strongRetrievalReady: true,
+      readinessBlockers: [],
+    });
+    expect(firstGraphOverview.entityCount).toBeGreaterThan(0);
+    expect(firstGraphOverview.relationCount).toBeGreaterThan(0);
+    expect(firstGraphOverview.evidenceCount).toBeGreaterThan(0);
+    const firstGraph = knowledgeGraphResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/graph?limit=50`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    expect(firstGraph.entities.length).toBeGreaterThan(0);
+    expect(firstGraph.relations.length).toBeGreaterThan(0);
+
+    const relationshipSeedQueued = knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+          .set(authorization)
+          .send({
+            title: '关系检索入口',
+            sourceType: 'MARKDOWN',
+            contentText:
+              '# 关系入口\n\n关系验收口令 GRAPHSEED-2026。\n安全平台主管负责应急响应流程。',
+            status: 'READY',
+          })
+          .expect(201)
+      ).body,
+    );
+    const relationshipSeed = await processAndPublishDocument(
+      authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
+      knowledgeBase.id,
+      relationshipSeedQueued.id,
+      relationshipSeedQueued.versions[0]?.id,
+    );
+    const relationshipTargetQueued = knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+          .set(authorization)
+          .send({
+            title: '应急系统依赖',
+            sourceType: 'MARKDOWN',
+            contentText: '# 应急依赖\n\n应急响应流程依赖统一告警系统。',
+            status: 'READY',
+          })
+          .expect(201)
+      ).body,
+    );
+    const relationshipTarget = await processAndPublishDocument(
+      authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
+      knowledgeBase.id,
+      relationshipTargetQueued.id,
+      relationshipTargetQueued.versions[0]?.id,
+    );
+    const sameTitleDocuments = [];
+    for (const suffix of ['甲', '乙']) {
+      const queued = knowledgeDocumentSchema.parse(
+        (
+          await request(app.getHttpServer())
+            .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+            .set(authorization)
+            .send({
+              title: '同名管理制度',
+              sourceType: 'MARKDOWN',
+              contentText: `# 总则\n\n负责人：平台组\n同名制度${suffix}的专属内容。`,
+              status: 'READY',
+            })
+            .expect(201)
+        ).body,
+      );
+      sameTitleDocuments.push(
+        await processAndPublishDocument(
+          authorization,
+          tenantId,
+          session.account.userId,
+          evaluationReviewer.id,
+          knowledgeBase.id,
+          queued.id,
+          queued.versions[0]?.id,
+        ),
+      );
+    }
+    const sameTitleDocumentEntities = await administrator.$queryRaw<
+      Array<{ readonly externalKey: string | null }>
+    >`
+      SELECT entity."external_key" AS "externalKey"
+      FROM public."knowledge_entities" AS entity
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'DOCUMENT'
+        AND entity."canonical_name" = '同名管理制度'
+      ORDER BY entity."external_key"
+    `;
+    expect(sameTitleDocumentEntities.map((entity) => entity.externalKey)).toEqual(
+      sameTitleDocuments
+        .map((document) => `document:${document.id}`)
+        .sort((left, right) => left.localeCompare(right)),
+    );
+    const sameTitleSections = await administrator.$queryRaw<
+      Array<{ readonly externalKey: string | null }>
+    >`
+      SELECT entity."external_key" AS "externalKey"
+      FROM public."knowledge_entities" AS entity
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'SECTION'
+        AND entity."canonical_name" = '同名管理制度 / 总则'
+    `;
+    expect(sameTitleSections).toHaveLength(2);
+    expect(new Set(sameTitleSections.map((entity) => entity.externalKey)).size).toBe(2);
+    const sharedSemanticEntities = await administrator.$queryRaw<
+      Array<{ readonly id: string; readonly documentIds: string[] }>
+    >`
+      SELECT
+        entity."id"::text AS id,
+        array_agg(DISTINCT mention."document_id"::text ORDER BY mention."document_id"::text)
+          AS "documentIds"
+      FROM public."knowledge_entities" AS entity
+      JOIN public."knowledge_entity_mentions" AS mention
+        ON mention."tenant_id" = entity."tenant_id"
+       AND mention."knowledge_base_id" = entity."knowledge_base_id"
+       AND mention."entity_id" = entity."id"
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'PERSON'
+        AND entity."normalized_name" = '平台组'
+        AND entity."external_key" IS NULL
+      GROUP BY entity."id"
+    `;
+    expect(sharedSemanticEntities).toHaveLength(1);
+    expect(new Set(sharedSemanticEntities[0]?.documentIds)).toEqual(
+      new Set(sameTitleDocuments.map((document) => document.id)),
+    );
+
+    const sourceDocument = sameTitleDocuments[0];
+    if (sourceDocument === undefined) throw new Error('Expected a source document to rename.');
+    const renamedQueued = knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .patch(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${sourceDocument.id}`)
+          .set(authorization)
+          .send({
+            title: '同名管理制度（修订版）',
+            contentText: '# 总则\n\n负责人：平台组\n同名制度甲的修订内容。',
+            status: 'READY',
+            expectedVersion: sourceDocument.documentVersion,
+          })
+          .expect(200)
+      ).body,
+    );
+    const renamedVersion = renamedQueued.versions.find(
+      (version) => version.versionNumber === sourceDocument.documentVersion + 1,
+    );
+    await processAndPublishDocument(
+      authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
+      knowledgeBase.id,
+      sourceDocument.id,
+      renamedVersion?.id,
+    );
+    const renamedSourceEntities = await administrator.$queryRaw<
+      Array<{
+        readonly canonicalName: string;
+        readonly aliases: string[];
+      }>
+    >`
+      SELECT
+        entity."canonical_name" AS "canonicalName",
+        entity."aliases"
+      FROM public."knowledge_entities" AS entity
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'DOCUMENT'
+        AND entity."external_key" = ${`document:${sourceDocument.id}`}
+    `;
+    expect(renamedSourceEntities).toEqual([
+      expect.objectContaining({
+        canonicalName: '同名管理制度（修订版）',
+        aliases: expect.arrayContaining(['同名管理制度']),
+      }),
+    ]);
+    const renamedAliases = renamedSourceEntities[0]?.aliases ?? [];
+    expect(renamedAliases).not.toContain('同名管理制度（修订版）');
+    expect(new Set(renamedAliases).size).toBe(renamedAliases.length);
+    expect(renamedAliases.length).toBeLessThanOrEqual(32);
+    expect(renamedAliases.every((alias) => alias.length <= 160)).toBe(true);
+
+    const relationshipRetrieval = knowledgeRetrievalTestResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/retrieval-test`)
+          .set(authorization)
+          .send({ query: 'GRAPHSEED-2026', limit: 8 })
+          .expect(201)
+      ).body,
+    );
+    expect(relationshipRetrieval.relationshipCandidateCount).toBeGreaterThan(0);
+    expect(relationshipRetrieval.relationshipExpandedCount).toBeGreaterThan(0);
+    expect(relationshipRetrieval.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'RELATIONSHIP',
+          status: 'APPLIED',
+          code: 'KNOWLEDGE_RELATIONSHIP_EXPANSION_APPLIED',
+        }),
+      ]),
+    );
+    const relationshipSeedResult = relationshipRetrieval.items.find(
+      (item) => item.documentId === relationshipSeed.id,
+    );
+    expect(relationshipSeedResult).toMatchObject({
+      documentVersionId: relationshipSeed.currentVersionId,
+      relationshipScore: 0,
+      relationshipEvidence: [],
+    });
+    expect(relationshipSeed.currentVersionId).not.toBeNull();
+    expect(relationshipTarget.currentVersionId).not.toBeNull();
+
+    const aliasUpdate = await administrator.knowledgeEntity.updateMany({
+      where: {
+        tenantId,
+        knowledgeBaseId: knowledgeBase.id,
+        canonicalName: '安全平台主管',
+        status: 'ACTIVE',
+      },
+      data: { aliases: ['ROOTGRAPHALIAS-2026'] },
+    });
+    expect(aliasUpdate.count).toBeGreaterThan(0);
+    const directEntitySeedRetrieval = knowledgeRetrievalTestResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/retrieval-test`)
+          .set(authorization)
+          .send({ query: 'ROOTGRAPHALIAS-2026', limit: 8 })
+          .expect(201)
+      ).body,
+    );
+    expect(directEntitySeedRetrieval.relationshipCandidateCount).toBeGreaterThan(0);
+    expect(directEntitySeedRetrieval.relationshipExpandedCount).toBeGreaterThan(0);
+    expect(directEntitySeedRetrieval.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'RELATIONSHIP',
+          status: 'APPLIED',
+          code: 'KNOWLEDGE_RELATIONSHIP_EXPANSION_APPLIED',
+        }),
+      ]),
+    );
 
     await request(app.getHttpServer())
       .patch(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}`)
@@ -159,14 +488,18 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .set(authorization)
           .send({
             contentText: '# 新制度\n\nDRAFTPOLICYOMEGA 仅在发布后可检索。',
-            status: 'DRAFT',
+            status: 'READY',
             expectedVersion: firstPublished.documentVersion,
           })
           .expect(200)
       ).body,
     );
     const secondDraftVersion = secondDraft.versions.find((version) => version.versionNumber === 2);
-    expect(secondDraftVersion).toMatchObject({ status: 'DRAFT', chunkCount: 0 });
+    expect(secondDraftVersion).toMatchObject({
+      status: 'PROCESSING',
+      chunkCount: 0,
+      ingestionJob: { status: 'PENDING', attempts: 0 },
+    });
     if (secondDraftVersion === undefined || firstPublishedVersion === undefined) {
       throw new Error('Expected both publication test versions.');
     }
@@ -187,24 +520,11 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       beforeSecondPublish.items.some((item) => item.excerpt.includes('DRAFTPOLICYOMEGA')),
     ).toBe(false);
 
-    const secondQueued = knowledgeDocumentSchema.parse(
-      (
-        await request(app.getHttpServer())
-          .post(
-            `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${draft.id}/versions/${secondDraftVersion.id}/publish`,
-          )
-          .set(authorization)
-          .expect(201)
-      ).body,
-    );
-    expect(
-      secondQueued.versions.find((version) => version.id === secondDraftVersion.id),
-    ).toMatchObject({
-      status: 'PROCESSING',
-      ingestionJob: { status: 'PENDING', attempts: 0 },
-    });
-    const secondPublished = await processDocument(
+    const secondPublished = await processAndPublishDocument(
       authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
       knowledgeBase.id,
       draft.id,
       secondDraftVersion.id,
@@ -233,7 +553,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       ]),
     );
 
-    const rolledBack = knowledgeDocumentSchema.parse(
+    const rollbackCandidateDocument = knowledgeDocumentSchema.parse(
       (
         await request(app.getHttpServer())
           .post(
@@ -243,6 +563,39 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .send({ expectedCurrentVersionId: secondDraftVersion.id })
           .expect(201)
       ).body,
+    );
+    expect(rollbackCandidateDocument).toMatchObject({
+      currentVersionId: secondDraftVersion.id,
+      documentVersion: 2,
+    });
+    const rollbackCandidate = rollbackCandidateDocument.versions.find(
+      (version) => version.versionNumber === 3,
+    );
+    if (rollbackCandidate === undefined) {
+      throw new Error('Expected a rollback candidate version.');
+    }
+    const [rollbackClock] = await administrator.$queryRaw<
+      Array<{ databaseDefaultClock: boolean; retrievalEligible: boolean }>
+    >`
+      SELECT
+        version."effective_from" = version."created_at" AS "databaseDefaultClock",
+        version."effective_from" <= statement_timestamp() AS "retrievalEligible"
+      FROM public."knowledge_document_versions" AS version
+      WHERE version."tenant_id" = ${tenantId}::uuid
+        AND version."id" = ${rollbackCandidate.id}::uuid
+    `;
+    expect(rollbackClock).toEqual({
+      databaseDefaultClock: true,
+      retrievalEligible: true,
+    });
+    const rolledBack = await publishIndexedDocument(
+      authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
+      knowledgeBase.id,
+      draft.id,
+      rollbackCandidate.id,
     );
     expect(rolledBack.documentVersion).toBe(3);
     expect(rolledBack.currentVersionId).not.toBe(firstPublishedVersion.id);
@@ -292,6 +645,30 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
     expect(
       afterRollbackNewContent.items.some((item) => item.excerpt.includes('DRAFTPOLICYOMEGA')),
     ).toBe(false);
+    const rebuiltGraph = await request(app.getHttpServer())
+      .post(
+        `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${draft.id}/versions/${rolledBack.currentVersionId}/rebuild-graph`,
+      )
+      .set(authorization)
+      .expect(409);
+    expect(rebuiltGraph.body).toMatchObject({
+      code: 'CONFLICT',
+      message: 'An active graph projection is immutable. Create and govern a new document version.',
+    });
+    const rollbackGraph = knowledgeGraphResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/graph?limit=50`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    expect(
+      rollbackGraph.relations
+        .flatMap((relation) => relation.evidence)
+        .filter((evidence) => evidence.documentId === draft.id)
+        .every((evidence) => evidence.documentVersionId === rolledBack.currentVersionId),
+    ).toBe(true);
 
     const uploadedQueued = knowledgeDocumentSchema.parse(
       (
@@ -316,8 +693,11 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    const uploaded = await processDocument(
+    const uploaded = await processAndPublishDocument(
       authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
       knowledgeBase.id,
       uploadedQueued.id,
       uploadedQueued.versions[0]?.id,
@@ -377,8 +757,11 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    const revised = await processDocument(
+    const revised = await processAndPublishDocument(
       authorization,
+      tenantId,
+      session.account.userId,
+      evaluationReviewer.id,
       knowledgeBase.id,
       uploaded.id,
       queuedRevision?.id,
@@ -514,6 +897,336 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
     });
   });
 
+  async function processAndPublishDocument(
+    authorization: Record<string, string>,
+    tenantId: string,
+    submitterUserId: string,
+    reviewerUserId: string,
+    knowledgeBaseId: string,
+    documentId: string,
+    documentVersionId: string | undefined,
+  ) {
+    await processDocument(authorization, knowledgeBaseId, documentId, documentVersionId);
+    return publishIndexedDocument(
+      authorization,
+      tenantId,
+      submitterUserId,
+      reviewerUserId,
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+    );
+  }
+
+  async function publishIndexedDocument(
+    authorization: Record<string, string>,
+    tenantId: string,
+    submitterUserId: string,
+    reviewerUserId: string,
+    knowledgeBaseId: string,
+    documentId: string,
+    documentVersionId: string | undefined,
+  ) {
+    if (documentVersionId === undefined) throw new Error('Expected a document version id.');
+    const version = await administrator.knowledgeDocumentVersion.findUniqueOrThrow({
+      where: { id: documentVersionId },
+      select: {
+        versionNumber: true,
+        sourceType: true,
+        parseReviewStatus: true,
+        parseReviewRevision: true,
+        governanceReviewStatus: true,
+        governanceRevision: true,
+      },
+    });
+    if (version.sourceType === 'FILE' || version.sourceType === 'WEB') {
+      expect(version.parseReviewStatus).toBe('PENDING');
+      await request(app.getHttpServer())
+        .post(
+          `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/versions/${documentVersionId}/parse-review`,
+        )
+        .set({ 'x-tenant-id': tenantId, 'x-user-id': reviewerUserId })
+        .send({
+          decision: 'APPROVE',
+          expectedReviewRevision: version.parseReviewRevision,
+          note: 'Independent integration reviewer verified the parsed fixture.',
+        })
+        .expect(201);
+    }
+    if (version.governanceReviewStatus === 'PENDING') {
+      await request(app.getHttpServer())
+        .post(
+          `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/versions/${documentVersionId}/governance-review`,
+        )
+        .set({ 'x-tenant-id': tenantId, 'x-user-id': reviewerUserId })
+        .send({
+          decision: 'APPROVE',
+          expectedRevision: version.governanceRevision,
+          note: 'Independent integration reviewer approved the governed knowledge scope.',
+        })
+        .expect(201);
+    }
+    await approveCandidateGraphCorrections(
+      authorization,
+      tenantId,
+      reviewerUserId,
+      knowledgeBaseId,
+      documentVersionId,
+    );
+    const fixtureName = `KNOWLEDGE-${documentVersionId}`;
+    const fixture = await seedPublishedEvaluationDataset({
+      prisma: administrator,
+      tenantId,
+      submitterUserId,
+      reviewerUserId,
+      subjectType: 'KNOWLEDGE_VERSION',
+      subjectId: documentVersionId,
+      subjectVersion: version.versionNumber,
+      fixtureName,
+    });
+    const probe = aiEvaluationReadinessSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get('/api/v1/admin/ai-evaluations/readiness')
+          .set(authorization)
+          .query({
+            subjectType: 'KNOWLEDGE_VERSION',
+            subjectId: documentVersionId,
+            subjectVersion: version.versionNumber,
+            datasetVersionId: fixture.datasetVersionId,
+            currentSnapshotHash: '0'.repeat(64),
+          })
+          .expect(200)
+      ).body,
+    );
+    const evaluationRunId = await seedPassingEvaluationRun({
+      prisma: administrator,
+      tenantId,
+      submitterUserId,
+      reviewerUserId,
+      subjectType: 'KNOWLEDGE_VERSION',
+      subjectId: documentVersionId,
+      subjectVersion: version.versionNumber,
+      fixtureName,
+      datasetVersionId: fixture.datasetVersionId,
+      evidenceId: fixture.evidenceId,
+      caseIds: fixture.caseIds,
+      subjectSnapshotHash: probe.currentSnapshotHash,
+    });
+    return knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(
+            `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/versions/${documentVersionId}/publish`,
+          )
+          .set(authorization)
+          .send({ evaluationRunId })
+          .expect(201)
+      ).body,
+    );
+  }
+
+  async function publishFixtureExtractionOntology(
+    authorization: Record<string, string>,
+    tenantId: string,
+    reviewerUserId: string,
+    knowledgeBaseId: string,
+  ): Promise<void> {
+    const entityTypes = [
+      'CONCEPT',
+      'DATE',
+      'DOCUMENT',
+      'IDENTIFIER',
+      'ORGANIZATION',
+      'PERSON',
+      'POLICY',
+      'SCOPE',
+      'SECTION',
+      'SYSTEM',
+      'TERM',
+      'TOPIC',
+      'VALUE',
+    ].map((key) => ({ key, name: key }));
+    const predicates = [
+      ['CONTAINS_SECTION_DOCUMENT_SECTION', 'CONTAINS_SECTION', 'DOCUMENT', 'SECTION'],
+      ['PARENT_OF_SECTION_SECTION', 'PARENT_OF', 'SECTION', 'SECTION'],
+      ['DESCRIBES_DOCUMENT_TOPIC', 'DESCRIBES', 'DOCUMENT', 'TOPIC'],
+      ['DESCRIBES_SECTION_TOPIC', 'DESCRIBES', 'SECTION', 'TOPIC'],
+      ['HAS_ATTRIBUTE_DOCUMENT_VALUE', 'HAS_ATTRIBUTE', 'DOCUMENT', 'VALUE'],
+      ['HAS_ATTRIBUTE_DOCUMENT_DATE', 'HAS_ATTRIBUTE', 'DOCUMENT', 'DATE'],
+      ['HAS_ATTRIBUTE_DOCUMENT_ORGANIZATION', 'HAS_ATTRIBUTE', 'DOCUMENT', 'ORGANIZATION'],
+      ['HAS_ATTRIBUTE_DOCUMENT_IDENTIFIER', 'HAS_ATTRIBUTE', 'DOCUMENT', 'IDENTIFIER'],
+      ['IDENTIFIED_BY_DOCUMENT_IDENTIFIER', 'IDENTIFIED_BY', 'DOCUMENT', 'IDENTIFIER'],
+      ['OWNED_BY_DOCUMENT_PERSON', 'OWNED_BY', 'DOCUMENT', 'PERSON'],
+      ['APPLIES_TO_DOCUMENT_SCOPE', 'APPLIES_TO', 'DOCUMENT', 'SCOPE'],
+      ['APPLIES_TO_POLICY_SCOPE', 'APPLIES_TO', 'POLICY', 'SCOPE'],
+      ['BELONGS_TO_DOCUMENT_ORGANIZATION', 'BELONGS_TO', 'DOCUMENT', 'ORGANIZATION'],
+      ['BELONGS_TO_CONCEPT_CONCEPT', 'BELONGS_TO', 'CONCEPT', 'CONCEPT'],
+      ['EFFECTIVE_ON_DOCUMENT_DATE', 'EFFECTIVE_ON', 'DOCUMENT', 'DATE'],
+      ['DEPENDS_ON_DOCUMENT_SYSTEM', 'DEPENDS_ON', 'DOCUMENT', 'SYSTEM'],
+      ['DEPENDS_ON_CONCEPT_SYSTEM', 'DEPENDS_ON', 'CONCEPT', 'SYSTEM'],
+      ['REFERENCES_CONCEPT_CONCEPT', 'REFERENCES', 'CONCEPT', 'CONCEPT'],
+      ['RESPONSIBLE_FOR_CONCEPT_CONCEPT', 'RESPONSIBLE_FOR', 'CONCEPT', 'CONCEPT'],
+    ].map(([key, predicate, domainTypeKey, rangeTypeKey]) => ({
+      key: key!,
+      predicate: predicate!,
+      label: predicate!,
+      domainTypeKey: domainTypeKey!,
+      rangeTypeKey: rangeTypeKey!,
+    }));
+    const ontology = knowledgeOntologySchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBaseId}/graph-governance/ontologies`)
+          .set(authorization)
+          .send({
+            code: 'INGESTION_FIXTURE',
+            name: 'Ingestion fixture extraction ontology',
+            description: 'Covers every deterministic extractor relation used by this fixture.',
+            changeSummary: 'Create the independently reviewed integration-test relation schema.',
+            entityTypes,
+            predicates,
+            idempotencyKey: `ingestion-fixture-ontology-${knowledgeBaseId}`,
+          })
+          .expect(201)
+      ).body,
+    );
+    const draft = ontology.versions[0];
+    if (draft === undefined) throw new Error('Expected an ontology draft version.');
+    const submitted = knowledgeOntologyVersionSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(
+            `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/graph-governance/ontology-versions/${draft.id}/transitions`,
+          )
+          .set(authorization)
+          .send({
+            expectedRevision: draft.revision,
+            action: 'SUBMIT',
+            comment: 'Submit the deterministic extractor ontology for independent review.',
+            idempotencyKey: `ingestion-fixture-ontology-submit-${knowledgeBaseId}`,
+          })
+          .expect(201)
+      ).body,
+    );
+    const published = knowledgeOntologyVersionSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(
+            `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/graph-governance/ontology-versions/${draft.id}/transitions`,
+          )
+          .set({ 'x-tenant-id': tenantId, 'x-user-id': reviewerUserId })
+          .send({
+            expectedRevision: submitted.revision,
+            action: 'PUBLISH',
+            comment: 'Independently approve the deterministic extractor ontology.',
+            idempotencyKey: `ingestion-fixture-ontology-publish-${knowledgeBaseId}`,
+          })
+          .expect(201)
+      ).body,
+    );
+    expect(published.status).toBe('PUBLISHED');
+  }
+
+  async function approveCandidateGraphCorrections(
+    authorization: Record<string, string>,
+    tenantId: string,
+    reviewerUserId: string,
+    knowledgeBaseId: string,
+    documentVersionId: string,
+  ): Promise<void> {
+    const [candidate] = await administrator.$queryRaw<Array<{ readonly id: string }>>`
+      SELECT projection."id"::text AS id
+      FROM public."knowledge_graph_projections" projection
+      WHERE projection."tenant_id" = ${tenantId}::uuid
+        AND projection."knowledge_base_id" = ${knowledgeBaseId}::uuid
+        AND projection."document_version_id" = ${documentVersionId}::uuid
+        AND projection."status" = 'CANDIDATE'::"KnowledgeGraphProjectionStatus"
+    `;
+    if (candidate === undefined) {
+      throw new Error('Expected a candidate graph projection for the document version.');
+    }
+    const overview = knowledgeGraphGovernanceOverviewSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBaseId}/graph-governance`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    const unresolvedCandidateConflicts = overview.conflicts.filter(
+      (conflict) =>
+        conflict.projectionId === candidate.id &&
+        (conflict.status === 'OPEN' || conflict.status === 'IN_REVIEW'),
+    );
+    expect(unresolvedCandidateConflicts).toEqual([]);
+    const corrections = overview.corrections.filter(
+      (correction) =>
+        correction.status === 'DRAFT' &&
+        correction.evidence.some((evidence) => evidence['projectionId'] === candidate.id),
+    );
+    for (const correction of corrections) {
+      const submitted = knowledgeGraphCorrectionSchema.parse(
+        (
+          await transitionGraphCorrection(
+            authorization,
+            knowledgeBaseId,
+            correction.id,
+            correction.revision,
+            'SUBMIT',
+            `ingestion-fixture-correction-submit-${correction.id}`,
+          ).expect(201)
+        ).body,
+      );
+      const approved = knowledgeGraphCorrectionSchema.parse(
+        (
+          await transitionGraphCorrection(
+            { 'x-tenant-id': tenantId, 'x-user-id': reviewerUserId },
+            knowledgeBaseId,
+            correction.id,
+            submitted.revision,
+            'APPROVE',
+            `ingestion-fixture-correction-approve-${correction.id}`,
+          ).expect(201)
+        ).body,
+      );
+      const applied = knowledgeGraphCorrectionSchema.parse(
+        (
+          await transitionGraphCorrection(
+            authorization,
+            knowledgeBaseId,
+            correction.id,
+            approved.revision,
+            'APPLY',
+            `ingestion-fixture-correction-apply-${correction.id}`,
+          ).expect(201)
+        ).body,
+      );
+      expect(applied.status).toBe('APPLIED');
+    }
+  }
+
+  function transitionGraphCorrection(
+    headers: Record<string, string>,
+    knowledgeBaseId: string,
+    correctionId: string,
+    expectedRevision: number,
+    action: 'SUBMIT' | 'APPROVE' | 'APPLY',
+    idempotencyKey: string,
+  ) {
+    return request(app.getHttpServer())
+      .post(
+        `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/graph-governance/corrections/${correctionId}/transitions`,
+      )
+      .set(headers)
+      .send({
+        expectedRevision,
+        action,
+        comment: `${action} deterministic extractor relation governance.`,
+        idempotencyKey,
+      });
+  }
+
   async function processDocument(
     authorization: Record<string, string>,
     knowledgeBaseId: string,
@@ -521,8 +1234,11 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
     documentVersionId: string | undefined,
   ) {
     if (documentVersionId === undefined) throw new Error('Expected a document version id.');
-    await expect(worker.runOnce()).resolves.toBe(1);
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      // The repository uses a separate worker connection. Poll the target
+      // version instead of assuming its just-committed queue row must be the
+      // first row visible to a single immediate claim.
+      await worker.runOnce();
       const document = knowledgeDocumentSchema.parse(
         (
           await request(app.getHttpServer())
@@ -578,36 +1294,5 @@ async function cleanup(administrator: PrismaClient): Promise<void> {
     if (version.objectKey !== null) await objects.delete(version.objectKey);
   }
 
-  await administrator.directoryEmploymentBinding.deleteMany({ where: { tenantId } });
-  await administrator.directoryOrgUnitBinding.deleteMany({ where: { tenantId } });
-  await administrator.directoryUserBinding.deleteMany({ where: { tenantId } });
-  await administrator.directoryIntegration.deleteMany({ where: { tenantId } });
-  await administrator.agentRun.deleteMany({ where: { tenantId } });
-  await administrator.outboxEvent.deleteMany({ where: { tenantId } });
-  await administrator.message.deleteMany({ where: { tenantId } });
-  await administrator.conversationParticipant.deleteMany({ where: { tenantId } });
-  await administrator.conversation.deleteMany({ where: { tenantId } });
-  await administrator.agentInstance.deleteMany({ where: { tenantId } });
-  await administrator.agentVersion.deleteMany({ where: { tenantId } });
-  await administrator.agentTemplate.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeIngestionJob.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeChunk.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeDocument.updateMany({
-    where: { tenantId },
-    data: { currentVersionId: null },
-  });
-  await administrator.knowledgeDocumentVersion.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeDocument.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeBaseOrgUnit.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeBase.deleteMany({ where: { tenantId } });
-  await administrator.auditEvent.deleteMany({ where: { tenantId } });
-  await administrator.managerRelation.deleteMany({ where: { tenantId } });
-  await administrator.employment.deleteMany({ where: { tenantId } });
-  await administrator.position.deleteMany({ where: { tenantId } });
-  await administrator.authSession.deleteMany({ where: { tenantId } });
-  await administrator.passwordCredential.deleteMany({ where: { tenantId } });
-  await administrator.orgUnit.deleteMany({ where: { tenantId } });
-  await administrator.organization.deleteMany({ where: { tenantId } });
-  await administrator.user.deleteMany({ where: { tenantId } });
-  await administrator.tenant.delete({ where: { id: tenantId } });
+  await cleanupDisposableTenants(administrator, [tenantId]);
 }

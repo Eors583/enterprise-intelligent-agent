@@ -82,7 +82,7 @@ const verifiedKnowledgeCitationInputSchema = z
     knowledgeBaseName: z.string().min(1),
     documentVersion: z.number().int().positive(),
     headingPath: z.array(z.string()),
-    sourceType: z.enum(['TEXT', 'MARKDOWN', 'FILE']),
+    sourceType: z.enum(['TEXT', 'MARKDOWN', 'FILE', 'WEB']),
     updatedAt: z.iso.datetime(),
   })
   .strict();
@@ -91,7 +91,9 @@ const legacyKnowledgeCitationInputSchema = z.object(knowledgeCitationCoreShape).
 
 const normalizedKnowledgeCitationSchema = z.discriminatedUnion('verificationStatus', [
   verifiedKnowledgeCitationInputSchema.extend({
-    verificationStatus: z.literal('VERIFIED'),
+    // This proves server-side Run/chunk/version lineage. It deliberately does
+    // not claim that an entailment model has proven every generated statement.
+    verificationStatus: z.literal('LINEAGE_VERIFIED'),
   }),
   z
     .object({
@@ -111,7 +113,7 @@ const normalizedKnowledgeCitationSchema = z.discriminatedUnion('verificationStat
 export const knowledgeCitationSchema = z.preprocess((value) => {
   const verified = verifiedKnowledgeCitationInputSchema.safeParse(value);
   if (verified.success) {
-    return { ...verified.data, verificationStatus: 'VERIFIED' };
+    return { ...verified.data, verificationStatus: 'LINEAGE_VERIFIED' };
   }
   const legacy = legacyKnowledgeCitationInputSchema.safeParse(value);
   if (legacy.success) {
@@ -143,9 +145,15 @@ export const knowledgeCitationDetailSchema = z
     documentVersion: z.number().int().positive(),
     chunkId: z.string().uuid(),
     headingPath: z.array(z.string()),
-    sourceType: z.enum(['TEXT', 'MARKDOWN', 'FILE']),
+    sourceType: z.enum(['TEXT', 'MARKDOWN', 'FILE', 'WEB']),
     content: z.string().min(1),
     updatedAt: z.iso.datetime(),
+  })
+  .strict();
+
+export const knowledgeCitationOriginalQuerySchema = z
+  .object({
+    messageId: z.string().uuid(),
   })
   .strict();
 
@@ -240,6 +248,7 @@ export const conversationAgentRunSchema = z.object({
   outputMessageId: z.string().uuid().nullable(),
   agentId: z.string().uuid(),
   agentName: z.string().min(1),
+  streamMode: z.enum(['live', 'terminal_only']).nullable(),
   status: z.enum([
     'QUEUED',
     'DISPATCHING',
@@ -271,6 +280,7 @@ export type ConversationListResponse = z.infer<typeof conversationListResponseSc
 export type MessageSender = z.infer<typeof messageSenderSchema>;
 export type KnowledgeCitation = z.infer<typeof knowledgeCitationSchema>;
 export type KnowledgeCitationDetail = z.infer<typeof knowledgeCitationDetailSchema>;
+export type KnowledgeCitationOriginalQuery = z.infer<typeof knowledgeCitationOriginalQuerySchema>;
 export type AnswerFeedbackRating = z.infer<typeof answerFeedbackRatingSchema>;
 export type AnswerFeedbackReason = z.infer<typeof answerFeedbackReasonSchema>;
 export type UpsertAnswerFeedbackRequest = z.infer<typeof upsertAnswerFeedbackRequestSchema>;

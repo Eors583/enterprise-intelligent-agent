@@ -1,13 +1,33 @@
 import type {
+  AgentRunCancellationPreparation,
+  AgentRunExternalAttachment,
   AgentRunKnowledgeSource,
   AgentRunPreparation,
+  AgentRunStreamMode,
   AgentRunUsage,
+  AgentRunModelAttempt,
 } from './agent-run.models.js';
 
 export abstract class AgentRunRepository {
   abstract prepare(tenantId: string, runId: string): Promise<AgentRunPreparation>;
 
-  abstract attachExternalRun(tenantId: string, runId: string, externalRunId: string): Promise<void>;
+  abstract attachExternalRun(
+    tenantId: string,
+    runId: string,
+    externalRunId: string,
+  ): Promise<AgentRunExternalAttachment>;
+
+  abstract prepareCancellation(
+    tenantId: string,
+    runId: string,
+  ): Promise<AgentRunCancellationPreparation>;
+
+  abstract confirmCancellation(
+    tenantId: string,
+    runId: string,
+    externalRunId: string,
+    usage?: AgentRunUsage,
+  ): Promise<void>;
 
   abstract completeSucceeded(
     tenantId: string,
@@ -15,6 +35,7 @@ export abstract class AgentRunRepository {
     output: string,
     citations?: readonly AgentRunKnowledgeSource[],
     usage?: AgentRunUsage,
+    streamMode?: AgentRunStreamMode,
   ): Promise<{ readonly outputMessageId: string; readonly externalRunId: string | null }>;
 
   abstract completeFailed(
@@ -23,6 +44,7 @@ export abstract class AgentRunRepository {
     errorCode: string,
     safeMessage: string,
     usage?: AgentRunUsage,
+    streamMode?: AgentRunStreamMode,
   ): Promise<void>;
 
   abstract completeUnknown(
@@ -30,5 +52,13 @@ export abstract class AgentRunRepository {
     runId: string,
     errorCode: string,
     usage?: AgentRunUsage,
+    streamMode?: AgentRunStreamMode,
+  ): Promise<void>;
+
+  abstract recordModelExecutionEvidence(
+    tenantId: string,
+    runId: string,
+    attempts: readonly AgentRunModelAttempt[],
+    outputSafetyDecision?: import('@enterprise/contracts').AiSafetyDecision,
   ): Promise<void>;
 }

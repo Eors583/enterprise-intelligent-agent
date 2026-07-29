@@ -4,7 +4,9 @@ export interface MemberAgent {
   readonly ownerUserId: string;
   readonly name: string;
   readonly status: 'online' | 'offline' | 'disabled';
-  readonly versionStatus: 'draft' | 'published' | 'retired';
+  readonly versionStatus: 'draft' | 'testing' | 'published' | 'retired';
   readonly visibility: 'tenant' | 'owner';
+  readonly assignedToPrincipal: boolean;
+  readonly requiresActiveAssignment: boolean;
   readonly summary?: string;
 }

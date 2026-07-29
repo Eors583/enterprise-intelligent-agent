@@ -13,6 +13,14 @@ class RunNotFoundError(RunError):
         self.run_id = run_id
 
 
+class RunStreamReconciliationRequiredError(RunError):
+    """A durable RUNNING record has no safe in-process execution to resume."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id} requires reconciliation")
+        self.run_id = run_id
+
+
 class InvalidRunTransitionError(RunError):
     """Raised when a state transition violates the run state machine."""
 

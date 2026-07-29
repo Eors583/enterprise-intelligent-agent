@@ -1,5 +1,10 @@
 import { z } from 'zod';
 
+import {
+  identityDeviceRegistrationSchema,
+  mfaLoginChallengeResponseSchema,
+} from './identity-governance.js';
+
 export const tenantRoleSchema = z.enum(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN', 'MEMBER']);
 
 export const registerTenantRequestSchema = z.object({
@@ -33,6 +38,7 @@ export const loginRequestSchema = z.object({
     .transform((value) => value.toLowerCase()),
   password: z.string().min(1).max(128),
   sessionLabel: z.string().trim().min(1).max(120).optional(),
+  device: identityDeviceRegistrationSchema.optional(),
 });
 
 export const authAccountSchema = z.object({
@@ -54,6 +60,27 @@ export const authSessionResponseSchema = z.object({
   refreshToken: z.string().min(32),
   account: authAccountSchema,
 });
+
+/**
+ * Browser/BFF session responses deliberately contain no bearer credential.
+ * Access and refresh tokens are transported only in HttpOnly same-site
+ * cookies; browser JavaScript receives the account projection.
+ */
+export const browserAuthSessionResponseSchema = z
+  .object({
+    account: authAccountSchema,
+  })
+  .strict();
+
+export const loginResultSchema = z.union([
+  authSessionResponseSchema,
+  mfaLoginChallengeResponseSchema,
+]);
+
+export const browserLoginResultSchema = z.union([
+  browserAuthSessionResponseSchema,
+  mfaLoginChallengeResponseSchema,
+]);
 
 export const refreshSessionRequestSchema = z.object({
   refreshToken: z.string().min(32).max(512),
@@ -135,6 +162,7 @@ export const currentSessionResponseSchema = authAccountSchema.omit({ sessionId: 
 export type TenantRole = z.infer<typeof tenantRoleSchema>;
 export type RegisterTenantRequest = z.infer<typeof registerTenantRequestSchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
+export type LoginResult = z.infer<typeof loginResultSchema>;
 export type RefreshSessionRequest = z.infer<typeof refreshSessionRequestSchema>;
 export type ChangePasswordRequest = z.infer<typeof changePasswordRequestSchema>;
 export type ChangePasswordResponse = z.infer<typeof changePasswordResponseSchema>;
@@ -146,4 +174,6 @@ export type AcceptMemberInvitationRequest = z.infer<typeof acceptMemberInvitatio
 export type AcceptMemberInvitationResponse = z.infer<typeof acceptMemberInvitationResponseSchema>;
 export type AuthAccount = z.infer<typeof authAccountSchema>;
 export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
+export type BrowserAuthSessionResponse = z.infer<typeof browserAuthSessionResponseSchema>;
+export type BrowserLoginResult = z.infer<typeof browserLoginResultSchema>;
 export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;

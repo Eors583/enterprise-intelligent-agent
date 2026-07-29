@@ -1,59 +1,51 @@
-import { authSessionResponseSchema, type AuthSessionResponse } from '@enterprise/contracts';
+import {
+  authSessionResponseSchema,
+  browserAuthSessionResponseSchema,
+  type BrowserAuthSessionResponse,
+} from '@enterprise/contracts';
 
-const SESSION_KEY = 'enterprise-admin.auth-session.v1';
+export type AdminBrowserSession = BrowserAuthSessionResponse;
 
-type Listener = (session: AuthSessionResponse | null) => void;
+type Listener = (session: AdminBrowserSession | null) => void;
 const listeners = new Set<Listener>();
+let currentSession: AdminBrowserSession | null = null;
 
-function browserStorage(): Storage | null {
-  try {
-    return typeof window === 'undefined' ? null : window.sessionStorage;
-  } catch {
-    return null;
-  }
-}
-
-export function parseStoredSession(raw: string): AuthSessionResponse | null {
+/**
+ * Compatibility parser used only to discard legacy token-bearing storage.
+ * Browser credentials are never written back to Web Storage.
+ */
+export function parseStoredSession(raw: string): AdminBrowserSession | null {
   try {
     const value: unknown = JSON.parse(raw);
-    let candidate = value;
-
-    if (value && typeof value === 'object') {
-      const account = Reflect.get(value, 'account');
-      if (
-        account &&
-        typeof account === 'object' &&
-        !Reflect.has(account, 'passwordChangeRequired')
-      ) {
-        candidate = {
-          ...value,
-          account: { ...account, passwordChangeRequired: false },
-        };
-      }
-    }
-
-    const parsed = authSessionResponseSchema.safeParse(candidate);
-    return parsed.success ? parsed.data : null;
+    const candidate =
+      value &&
+      typeof value === 'object' &&
+      Reflect.get(value, 'account') &&
+      typeof Reflect.get(value, 'account') === 'object' &&
+      !Reflect.has(Reflect.get(value, 'account') as object, 'passwordChangeRequired')
+        ? {
+            ...value,
+            account: {
+              ...(Reflect.get(value, 'account') as object),
+              passwordChangeRequired: false,
+            },
+          }
+        : value;
+    const browser = browserAuthSessionResponseSchema.safeParse(candidate);
+    if (browser.success) return browser.data;
+    const legacy = authSessionResponseSchema.safeParse(candidate);
+    return legacy.success ? { account: legacy.data.account } : null;
   } catch {
     return null;
   }
 }
 
-export function readSession(): AuthSessionResponse | null {
-  const storage = browserStorage();
-  const raw = storage?.getItem(SESSION_KEY);
-  if (!raw) return null;
-
-  const session = parseStoredSession(raw);
-  if (session) return session;
-  storage?.removeItem(SESSION_KEY);
-  return null;
+export function readSession(): AdminBrowserSession | null {
+  return currentSession;
 }
 
-export function writeSession(session: AuthSessionResponse | null): void {
-  const storage = browserStorage();
-  if (session) storage?.setItem(SESSION_KEY, JSON.stringify(session));
-  else storage?.removeItem(SESSION_KEY);
+export function writeSession(session: AdminBrowserSession | null): void {
+  currentSession = session;
   listeners.forEach((listener) => listener(session));
 }
 
@@ -62,6 +54,6 @@ export function subscribeSession(listener: Listener): () => void {
   return () => listeners.delete(listener);
 }
 
-export function isSessionRoleAllowed(session: AuthSessionResponse): boolean {
-  return ['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN'].includes(session.account.role);
+export function isSessionRoleAllowed(session: AdminBrowserSession): boolean {
+  return ['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN', 'MEMBER'].includes(session.account.role);
 }

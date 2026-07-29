@@ -5,12 +5,18 @@ import { AuthModule } from '../auth/auth.module.js';
 import { AdminAccessModule } from './admin-access.module.js';
 import { FeishuDirectorySyncController } from './feishu-directory-sync.controller.js';
 import { FeishuDirectorySyncService } from './feishu-directory-sync.service.js';
+import { FeishuDirectorySyncWorker } from './feishu-directory-sync.worker.js';
 import { FeishuDirectoryClient } from './feishu/feishu-directory.client.js';
 import { FeishuCredentialVault } from './feishu/feishu-credential-vault.js';
 
 @Module({
   imports: [AuthModule, AgentControlModule, AdminAccessModule],
   controllers: [FeishuDirectorySyncController],
-  providers: [FeishuDirectoryClient, FeishuCredentialVault, FeishuDirectorySyncService],
+  providers: [
+    FeishuDirectoryClient,
+    FeishuCredentialVault,
+    FeishuDirectorySyncService,
+    FeishuDirectorySyncWorker,
+  ],
 })
 export class FeishuDirectoryAdminModule {}

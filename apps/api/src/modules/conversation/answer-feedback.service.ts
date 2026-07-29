@@ -8,12 +8,15 @@ import type { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../database/prisma.service.js';
 import { IdentityService } from '../identity/application/identity.service.js';
+import { AnswerFeedbackEvaluationRepository } from './domain/answer-feedback-evaluation.repository.js';
 
 @Injectable()
 export class AnswerFeedbackService {
   constructor(
     @Inject(IdentityService) private readonly identity: IdentityService,
     @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(AnswerFeedbackEvaluationRepository)
+    private readonly evaluations: AnswerFeedbackEvaluationRepository,
   ) {}
 
   async getCurrent(messageId: string): Promise<CurrentAnswerFeedbackResponse> {
@@ -64,22 +67,49 @@ export class AnswerFeedbackService {
           comment: request.comment,
         },
       });
-      await transaction.auditEvent.create({
-        data: {
-          tenantId: user.tenantId,
-          actorType: 'USER',
-          actorId: user.id,
-          action: 'agent.answer_feedback.upsert',
-          resourceType: 'answer_feedback',
-          resourceId: feedback.id,
-          metadata: {
-            conversationId: message.conversationId,
-            messageId,
-            rating: request.rating,
-            reason: request.reason,
+      await Promise.all([
+        transaction.auditEvent.create({
+          data: {
+            tenantId: user.tenantId,
+            actorType: 'USER',
+            actorId: user.id,
+            action: 'agent.answer_feedback.upsert',
+            resourceType: 'answer_feedback',
+            resourceId: feedback.id,
+            metadata: {
+              conversationId: message.conversationId,
+              messageId,
+              rating: request.rating,
+              reason: request.reason,
+            },
           },
-        },
-      });
+        }),
+        transaction.outboxEvent.create({
+          data: {
+            tenantId: user.tenantId,
+            aggregateType: 'answer_feedback',
+            aggregateId: feedback.id,
+            eventType: 'agent.answer-feedback.recorded.v1',
+            payload: {
+              feedbackId: feedback.id,
+              conversationId: message.conversationId,
+              messageId,
+              userId: user.id,
+              rating: request.rating,
+              reason: request.reason,
+              feedbackUpdatedAt: feedback.updatedAt.toISOString(),
+              evaluationCandidate: request.rating === 'NOT_HELPFUL',
+            },
+          },
+        }),
+      ]);
+      if (request.rating === 'NOT_HELPFUL') {
+        await this.evaluations.projectNotHelpful(transaction, {
+          tenantId: user.tenantId,
+          userId: user.id,
+          feedbackId: feedback.id,
+        });
+      }
       return mapFeedback(feedback);
     });
   }

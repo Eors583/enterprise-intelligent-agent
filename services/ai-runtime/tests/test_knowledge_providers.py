@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from typing import Any
 
 import httpx
@@ -203,9 +204,7 @@ def test_cohere_rerank_provider_rejects_incomplete_or_invalid_results(
         ]
         top_n = 2 if len(results) == 2 else 1
         with pytest.raises(ProviderResponseError):
-            await provider.rerank(
-                "query", documents, top_n=top_n, request_id="req-invalid-rerank"
-            )
+            await provider.rerank("query", documents, top_n=top_n, request_id="req-invalid-rerank")
         await provider.aclose()
 
     asyncio.run(exercise())
@@ -253,7 +252,10 @@ def test_embedding_transport_errors_are_sanitized(
     exception: type[httpx.TransportError],
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise exception("top-secret-key private transport detail", request=request)
+        raise exception(
+            "Authorization: Bearer top-secret-key private transport detail",
+            request=request,
+        )
 
     async def exercise() -> None:
         provider = OpenAIEmbeddingProvider(
@@ -269,15 +271,32 @@ def test_embedding_transport_errors_are_sanitized(
         )
         with pytest.raises(expected_error) as captured:
             await provider.embed(["text"], request_id="req-transport-error")
+        rendered = "".join(traceback.format_exception(captured.type, captured.value, captured.tb))
+        assert captured.value.__cause__ is None
+        assert "Authorization" not in rendered
         assert "top-secret-key" not in str(captured.value)
+        assert "top-secret-key" not in rendered
         await provider.aclose()
 
     asyncio.run(exercise())
 
 
-def test_rerank_timeout_is_sanitized() -> None:
+@pytest.mark.parametrize(
+    ("exception", "expected_error"),
+    [
+        (httpx.ReadTimeout, ProviderTimeoutError),
+        (httpx.ConnectError, ProviderUnavailableError),
+    ],
+)
+def test_rerank_transport_errors_are_sanitized(
+    exception: type[httpx.TransportError],
+    expected_error: type[Exception],
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("rerank-secret private detail", request=request)
+        raise exception(
+            "Authorization: Bearer rerank-secret private detail",
+            request=request,
+        )
 
     async def exercise() -> None:
         provider = CohereRerankProvider(
@@ -287,14 +306,184 @@ def test_rerank_timeout_is_sanitized() -> None:
             timeout_seconds=10,
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
-        with pytest.raises(ProviderTimeoutError) as captured:
+        with pytest.raises(expected_error) as captured:
             await provider.rerank(
                 "query",
                 [RerankDocument(id="a", text="answer")],
                 top_n=1,
                 request_id="req-rerank-timeout",
             )
+        rendered = "".join(traceback.format_exception(captured.type, captured.value, captured.tb))
+        assert captured.value.__cause__ is None
+        assert "Authorization" not in rendered
         assert "rerank-secret" not in str(captured.value)
+        assert "rerank-secret" not in rendered
+        await provider.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_knowledge_provider_owned_clients_ignore_environment_proxies() -> None:
+    async def exercise() -> None:
+        embedding = OpenAIEmbeddingProvider(
+            base_url="https://embedding.example/v1",
+            api_key="embedding-secret",
+            model="embed",
+            dimensions=DIMENSIONS,
+            timeout_seconds=10,
+        )
+        rerank = CohereRerankProvider(
+            base_url="https://rerank.example/v2",
+            api_key="rerank-secret",
+            model="rerank",
+            timeout_seconds=10,
+        )
+        assert embedding._client.trust_env is False
+        assert rerank._client.trust_env is False
+        await embedding.aclose()
+        await rerank.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_embedding_readiness_requires_a_real_success_and_caches_the_evidence() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "model": "embed",
+                "data": [{"index": 0, "embedding": vector()}],
+                "usage": {"prompt_tokens": 5, "total_tokens": 5},
+            },
+        )
+
+    async def exercise() -> None:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://embedding.example/v1",
+            api_key="secret",
+            model="embed",
+            dimensions=DIMENSIONS,
+            timeout_seconds=10,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert await provider.is_ready() is True
+        assert await provider.is_ready() is True
+        assert len(requests) == 1
+        body = json.loads(requests[0].read())
+        assert body["input"] == ["enterprise knowledge embedding readiness probe"]
+        await provider.aclose()
+        assert await provider.is_ready() is False
+
+    asyncio.run(exercise())
+
+
+def test_embedding_readiness_is_not_configuration_only_and_caches_failure() -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(401, json={"error": "credential detail must stay private"})
+
+    async def exercise() -> None:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://embedding.example/v1",
+            api_key="invalid-secret",
+            model="embed",
+            dimensions=DIMENSIONS,
+            timeout_seconds=10,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert await provider.is_ready() is False
+        assert await provider.is_ready() is False
+        assert request_count == 1
+        await provider.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_successful_embedding_call_supplies_readiness_evidence_without_an_extra_probe() -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "model": "embed",
+                "data": [{"index": 0, "embedding": vector()}],
+            },
+        )
+
+    async def exercise() -> None:
+        provider = OpenAIEmbeddingProvider(
+            base_url="https://embedding.example/v1",
+            api_key="secret",
+            model="embed",
+            dimensions=DIMENSIONS,
+            timeout_seconds=10,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        await provider.embed(["business text"], request_id="req-business-embedding")
+        assert await provider.is_ready() is True
+        assert request_count == 1
+        await provider.aclose()
+
+    asyncio.run(exercise())
+
+
+def test_rerank_readiness_requires_a_real_success_and_caches_the_evidence() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={"results": [{"index": 0, "relevance_score": 0.99}]},
+        )
+
+    async def exercise() -> None:
+        provider = CohereRerankProvider(
+            base_url="https://rerank.example/v2",
+            api_key="secret",
+            model="rerank",
+            timeout_seconds=10,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert await provider.is_ready() is True
+        assert await provider.is_ready() is True
+        assert len(requests) == 1
+        body = json.loads(requests[0].read())
+        assert body["query"] == "enterprise knowledge rerank readiness probe"
+        await provider.aclose()
+        assert await provider.is_ready() is False
+
+    asyncio.run(exercise())
+
+
+def test_rerank_readiness_is_not_configuration_only() -> None:
+    request_count = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(503, json={"error": "private provider failure"})
+
+    async def exercise() -> None:
+        provider = CohereRerankProvider(
+            base_url="https://rerank.example/v2",
+            api_key="secret",
+            model="rerank",
+            timeout_seconds=10,
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert await provider.is_ready() is False
+        assert await provider.is_ready() is False
+        assert request_count == 1
         await provider.aclose()
 
     asyncio.run(exercise())

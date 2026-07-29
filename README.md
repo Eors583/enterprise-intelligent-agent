@@ -1,10 +1,10 @@
 # 企业 AI 协同平台
 
-面向企业内部协作的桌面应用、管理后台和后端工程。当前版本已经形成一条真实可运行的 MVP 闭环：用户可以创建企业或登录，在 Electron 桌面端安全保存并切换多个账号，读取动态组织目录，创建/复用真人或智能体 direct 会话并发送消息；管理员可以在独立后台维护组织树、成员账号、角色、任职和知识库。
+面向企业内部协作的桌面应用、管理后台和后端工程。当前仓库已经形成从企业身份、组织与角色任命，到价值/战略/目标/任务、流程协同、Agent Run、Tool Gateway、知识/记忆/经验、评测与 FinOps 的 V2 工程闭环；员工可在 Electron 桌面端进入角色与任务工作台，管理员可在独立后台治理组织、智能体、知识、模型、身份、审计和成本。
 
-当前仍是开发版本，不是生产版。单智能体回答、Agent Run、文件摄取、可信引用和权限内检索已形成可运行链路；Embedding、pgvector 混合召回和 Reranker 已实现为可选能力，但默认关闭，必须配置真实供应商并通过企业问题集评估后才能作为语义 RAG 启用。未配置或供应商不可用时，界面会明确标记为“仅词法检索”，不会把关键词 + trigram 宣称为企业级语义检索。
+当前仍是开发版本，不是生产版。单智能体回答、流式 Agent Run、文件摄取、可信引用和权限内检索已形成代码链路；Embedding、pgvector 混合召回和 Reranker 已实现为可选能力，但默认关闭，必须配置真实供应商并通过非空知识切片和企业问题集评估后才能作为语义 RAG 启用。未配置或供应商不可用时，界面会明确标记为“仅词法检索”，不会把关键词 + trigram 宣称为企业级语义检索。
 
-详细边界见 [ADR-0005：首方认证、动态组织管理与知识库治理闭环](./docs/adr/0005-first-party-auth-admin-and-knowledge-governance.md)。
+当前实现、验收状态与生产边界以 [BMS-AI V2 实施计划](./docs/BMS-AI_V2_实施计划.md) 和 [BMS-AI V2 验收矩阵](./docs/BMS-AI_V2_验收矩阵.md) 为准；原始认证与知识库决策见 [ADR-0005](./docs/adr/0005-first-party-auth-admin-and-knowledge-governance.md)。
 
 ## 已实现能力
 
@@ -13,9 +13,17 @@
 - 独立 React/Vite 管理后台；
 - 动态组织树的创建、改名、排序、移动和归档；
 - 成员账号、角色、状态、部门和职位管理；
-- 知识库、部门范围、PDF/DOCX/TXT/Markdown 上传解析、切片、版本、发布/回滚和软归档；
+- 知识库、部门范围、PDF/DOCX/XLSX/TXT/Markdown 上传解析、切片、版本、发布/回滚和软归档；
 - 可选 OpenAI-compatible Embedding、pgvector 精确/受控 HNSW 向量召回、RRF 融合及 Cohere-compatible Reranker；
 - 权限过滤后的知识引用、管理员检索测试与历史 READY 版本向量重建；
+- 结构化 Role Blueprint、版本评审/发布/回滚，以及多人、多角色、临时、代理和交接任命；
+- Value→Strategy→Objective→Task→Process→Deliverable→Evidence 企业语义主链；
+- 版本化流程、业务事件、结构化协同、纠偏反馈、补偿、DLQ 和人工接管；
+- Tool Registry/Gateway、动作风险分级、dry-run、幂等、确认/审批、UNKNOWN 对账与补偿；
+- 企业/角色/员工/任务/会话五层记忆，以及经验候选、脱敏、复核、发布、投影和退休；
+- 版本化 AI 评测集、坏例回流、运行证明、发布门禁和管理端治理；
+- 知识本体/谓词、实体合并、时态、冲突与人工校正治理；
+- 员工角色/任务/协同/工具/记忆/经验工作台，以及管理总览；
 - PostgreSQL `FORCE RLS`、租户复合外键和职责分离数据库角色；
 - direct 会话、消息幂等、Outbox/Audit 同事务、可靠 Worker；
 - Local IM Provider 和腾讯云单聊 outbound adapter；
@@ -23,6 +31,9 @@
 - 租户并发、分钟速率、月度 Token 配额、Owner 配额编辑，以及 Agent Run Runtime 可信上报的 Token/成本/执行延迟统计；
 - 持久化登录失败限速、首次登录强制改密、管理员重置密码与会话吊销；
 - 枚举安全的忘记密码请求、一次性密码重置、成员邀请/重发/状态跟踪与接受邀请；邮件发送仍是 best-effort，尚未进入可恢复的持久 Outbox；
+- TOTP MFA、设备会话、Refresh Family、OIDC/SAML/SCIM 管理面和身份安全审计；
+- 模型价格/预算、AI 与人工成本、成本分摊、收益/ROI、预警、路由建议和独立成本复核；
+- 租户内审计检索、受控导出、SHA-256 追加链完整性复算和 OpenTelemetry 接线；
 - 可校验数据库备份、隔离恢复演练和核心告警探针；
 - API 开发 watch 与生产构建使用独立输出目录，避免生产构建清理 `dist` 时中断开发 watch。
 
@@ -89,9 +100,9 @@ pnpm db:seed
 pnpm test:db
 ```
 
-2026-07-22 最新隔离复验：27 个 migration 在 `enterprise_agent_third_batch_acceptance` 全量部署；PostgreSQL 集成测试 7 文件、60/60 项通过，JavaScript/TypeScript 406 项、AI Runtime 130 项、语义验收工具离线回归 27 项、PowerShell 运维回归 8 个 suite/119 个断言通过。一次真实 custom archive 恢复演练的 17/17 项门禁全部通过，`cleanupVerified=true`，备份 SHA-256 为 `e91c829b62438a33178ec2585ece4bd4e267b8e8f3bb8eba043755632c4e5707`。中间一次测试调用暴露出角色连接 URL 可能混入根 `.env` 的风险；最终测试运行器已把普通、认证、管理和 Outbox 四个角色 URL 全部强制派生到 `TEST_DATABASE_URL`，两个受保护的既有验收库从未建立连接。指定模型但知识切片为零时，核心探针现在返回 `not_ready` / `insufficient_evidence` 和退出码 `2`，不再把 SQL 空集合判为真实向量覆盖。离线语义回归没有访问真实供应商，也不等同于企业问题集效果验收；真实供应商效果、可恢复邮件投递和生产运维接线仍未关闭，因此 V1 维持 **No-Go**。详情见[第三批复验记录](./docs/试点产品路线与第一批验收.md#7-第三批实施与复验状态2026-07-22)。
+Migration 依次建立基础 schema、复合租户外键、RLS/最小权限、可靠 Outbox、首方认证、组织与知识模型、Agent Run、知识摄取与反馈、语义向量、租户用量治理、V2 经营与协同域、企业身份、审计、FinOps 和运行治理。不要修改已经执行的历史 migration；新变更必须增加新 migration。
 
-Migration 依次建立基础 schema、复合租户外键、RLS/最小权限、可靠 Outbox、首方认证、组织与知识模型、Agent Run、知识摄取与反馈、语义向量、租户用量治理、登录失败限速及账号恢复/邀请。不要修改已经执行的历史 migration；新变更必须增加新 migration。
+迁移数量和测试通过数字不在 README 中写死。每个候选版本都必须重新在一个全新独立数据库执行完整迁移、重复 seed、PostgreSQL/RLS/ACL 集成测试、备份恢复门禁和全仓质量检查；仓库内模拟或空集合探针不能替代真实外部供应商与业务问题集验收。在这些总门禁完成前，整体状态保持 **No-Go**。
 
 本地 seed 登录信息：
 
@@ -120,7 +131,7 @@ pnpm dev:admin     # http://127.0.0.1:4173
 pnpm dev:desktop
 ```
 
-API 开发 watch 现在输出到 `.nest-dev`，生产构建仍输出到 `dist`，并有自动化回归验证生产构建期间影子 watch 持续存活。变更前已经启动的旧 watch 进程不会热切换输出目录，需要等它下一次正常启动后才会使用新配置；本批没有为此手动重启当前开发服务。
+API 开发 watch 输出到 `.nest-dev`，生产构建输出到 `dist`，避免构建过程覆盖正在运行的开发产物。
 
 关键检查地址：
 
@@ -154,10 +165,11 @@ pnpm test:db
 
 - Electron Renderer 无 Node.js、文件系统或 Shell 权限，只能调用窄化 Preload IPC；
 - 桌面 access token 仅存在 Main 内存，refresh token 使用系统 `safeStorage` 加密；
-- 管理后台当前把会话保存在标签页 `sessionStorage`，适合受控内网 MVP，公网部署需升级为 BFF/HttpOnly Cookie；
+- 管理后台通过同源 BFF 使用 `HttpOnly`、`Secure`（生产）和 `SameSite=Strict` Cookie；前端内存只保存非敏感账号摘要，旧版 Web Storage 中的 token 只会被丢弃，不会继续使用；
 - API 默认要求 Bearer 会话；开发身份请求头只有 `ALLOW_DEV_IDENTITY_HEADERS=true` 时才可用；
 - 密码使用带随机盐的 scrypt，不透明 token 在数据库只保存带 pepper 的 HMAC-SHA-256；
-- 普通业务、认证、管理、provisioning 和 Outbox 分别使用数据库能力角色；
+- 普通业务、认证、管理、任命生命周期、provisioning、Outbox 和 AI Runtime
+  分别使用数据库能力角色；
 - 普通与管理事务先 `SET LOCAL ROLE`，再设置 transaction-local `app.tenant_id`；
 - 租户表使用应用 tenant 条件、复合外键和 PostgreSQL `FORCE RLS` 多层隔离；
 - 管理写操作与 Audit 同事务；组织/知识更新使用乐观锁，删除采用软归档；
@@ -173,24 +185,27 @@ pnpm test:db
 - `DATABASE_URL`：普通 API 登录；
 - `AUTH_DATABASE_URL`：认证登录；
 - `ADMIN_DATABASE_URL`：管理登录；
+- `LIFECYCLE_DATABASE_URL`：角色任命定时生效、过期、代理和交接回收的专用登录；
 - `OUTBOX_DATABASE_URL`：启用 Worker 时的专用登录。
 
 这些 URL 必须使用职责匹配的不同数据库用户名。运行时登录不能是 superuser，也不能拥有 `BYPASSRLS`；migration 使用独立发布身份。
 
 ## MVP 边界和下一步
 
-当前尚未完成或仍需生产验收：
+当前尚未完成或仍需总门禁/生产验收：
 
-- 忘记密码与一次性成员邀请链路已经实现；恢复/邀请邮件目前仍是进程内 best-effort 投递，原始一次性令牌不会持久化，因此进程中断后不能由 Outbox 自动重放。生产前仍需持久化投递/重试闭环，以及 OIDC/SAML、SCIM、MFA 和设备会话管理；
+- 忘记密码、一次性成员邀请、MFA、设备会话、OIDC/SAML/SCIM 管理面已经实现；恢复/邀请邮件仍是 best-effort，且真实 IdP 签名、元数据和 SCIM 兼容性必须联网验收；
 - 可信代理边界、WAF/设备级限速、限速表独立过期清理与生产告警投递；
 - 群聊、消息分页、已读/撤回、富媒体、WebSocket 和系统通知；
 - 腾讯账号 provisioning、回调 Inbox 和真实公网凭据验收；
-- 对象存储、OCR、真实 Embedding/Reranker 供应商验收、中文企业问题集效果门禁与大规模向量召回容量验证；
-- 覆盖生成、Embedding、Reranker 的统一用量账本，以及不可变模型价格版本、币种和部门预算；
-- AI Runtime 的 PostgreSQL RunStore、服务间认证与多实例执行租约；当前内存 RunStore 被生产启动门禁禁止，不能作为真实部署路径；
-- 流式回复、完整模型降级路由、工具调用与高风险操作审批；
+- 生产对象存储/KMS/病毒扫描/高级 OCR 与文档解析器接线，真实 Embedding/Reranker 供应商验收、中文企业问题集效果门禁与大规模向量召回容量验证；
+- 生成、Embedding、Reranker 的供应商账单核对，以及价格/币种/预算/收益的业务 Owner 验收；
+- AI Runtime 已具备 PostgreSQL RunStore 和 Bearer 服务认证；仍需完成多实例执行租约、
+  Runtime Outbox/Inbox、mTLS 与供应商级熔断后才能作为生产执行底座；
+- 模型降级与流式断线恢复的真实供应商故障演练，以及 Tool Gateway 生产业务适配器和高风险审批 UAT；
 - 对没有可确认取消协议的通用 Chat Completions 供应商实现真正的“停止生成”；
-- Windows 生产计划任务以 `SYSTEM` 身份的实际注册与权限验收、自动备份/恢复调度、加密异地存储、告警通道接线、全链路监控、高可用、自动更新和代码签名闭环。
+- 全新数据库迁移/RLS/ACL/恢复总门禁、全仓回归和浏览器 UAT；
+- Windows 生产计划任务以 `SYSTEM` 身份的实际注册与权限验收、自动备份/恢复调度、加密异地存储、PITR、告警/SIEM/OTLP 接线、高可用、自动更新和代码签名闭环。
 
 RAG 必须先完成受控摄取和版本快照，再建立索引流水线，随后把租户、知识库状态、文档状态和组织范围过滤放进检索查询本身。详细路线见 [ADR-0005](./docs/adr/0005-first-party-auth-admin-and-knowledge-governance.md#11-后续-rag-实施路线)。
 

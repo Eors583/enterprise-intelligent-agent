@@ -7,8 +7,18 @@ import {
   knowledgeDocumentSchema,
   knowledgeDocumentSummarySchema,
   knowledgeDocumentVersionDetailSchema,
+  importKnowledgeWebDocumentRequestSchema,
+  reviewKnowledgeDocumentGovernanceRequestSchema,
+  reviewKnowledgeDocumentParseRequestSchema,
+  knowledgeGraphQuerySchema,
+  knowledgeGraphRebuildResponseSchema,
+  knowledgeGraphOverviewSchema,
+  knowledgeGraphResponseSchema,
+  knowledgeRetrievalTestResponseSchema,
+  publishKnowledgeDocumentVersionRequestSchema,
   rollbackKnowledgeDocumentVersionRequestSchema,
   updateKnowledgeBaseRequestSchema,
+  updateKnowledgeDocumentVersionGovernanceRequestSchema,
 } from '../src/index.js';
 
 const ORG_UNIT_ID = '00000000-0000-7000-8000-000000000001';
@@ -88,10 +98,55 @@ describe('knowledge administration contracts', () => {
         chunkCount: 0,
         createdAt: '2026-07-20T00:00:00.000Z',
         publishedAt: null,
+        evaluationRunId: null,
+        evaluationDatasetVersionId: null,
+        evaluationSnapshotHash: null,
+        governance: knowledgeGovernance(),
         ingestionJob: null,
         contentText: '# Unpublished draft',
+        graphProjectionId: '00000000-0000-7000-8000-000000000099',
+        graphProjectionStatus: 'CANDIDATE',
+        graphProjectionHash: 'a'.repeat(64),
       }),
     ).toMatchObject({ documentId: DOCUMENT_ID, contentText: '# Unpublished draft' });
+  });
+
+  it('validates explicit version governance and maker-checker review commands', () => {
+    const {
+      revision: _revision,
+      reviewStatus: _reviewStatus,
+      reviewedById: _reviewedById,
+      reviewedAt: _reviewedAt,
+      reviewNote: _reviewNote,
+      policyHash: _policyHash,
+      ...policy
+    } = knowledgeGovernance();
+    expect(
+      updateKnowledgeDocumentVersionGovernanceRequestSchema.parse({
+        expectedRevision: 2,
+        policy,
+      }),
+    ).toMatchObject({
+      expectedRevision: 2,
+      policy: { scopeMode: 'TENANT', classification: 'INTERNAL' },
+    });
+    expect(
+      reviewKnowledgeDocumentGovernanceRequestSchema.parse({
+        decision: 'REJECT',
+        expectedRevision: 3,
+        note: 'The declared scope is too broad.',
+      }),
+    ).toEqual({
+      decision: 'REJECT',
+      expectedRevision: 3,
+      note: 'The declared scope is too broad.',
+    });
+    expect(
+      reviewKnowledgeDocumentGovernanceRequestSchema.safeParse({
+        decision: 'REJECT',
+        expectedRevision: 3,
+      }).success,
+    ).toBe(false);
   });
 
   it('requires an explicit current publication id for rollback concurrency control', () => {
@@ -101,6 +156,43 @@ describe('knowledge administration contracts', () => {
       }),
     ).toEqual({ expectedCurrentVersionId: VERSION_ID });
     expect(rollbackKnowledgeDocumentVersionRequestSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('requires an exact Evaluation Run reference for Knowledge Version publication', () => {
+    expect(
+      publishKnowledgeDocumentVersionRequestSchema.parse({
+        evaluationRunId: '00000000-0000-7000-8000-000000000006',
+      }),
+    ).toEqual({
+      evaluationRunId: '00000000-0000-7000-8000-000000000006',
+    });
+    expect(publishKnowledgeDocumentVersionRequestSchema.safeParse({}).success).toBe(false);
+  });
+
+  it('accepts only HTTPS web imports and requires a reason when parse review rejects', () => {
+    expect(
+      importKnowledgeWebDocumentRequestSchema.parse({
+        url: 'https://docs.example.test/handbook',
+      }),
+    ).toEqual({ url: 'https://docs.example.test/handbook' });
+    expect(
+      importKnowledgeWebDocumentRequestSchema.safeParse({
+        url: 'http://127.0.0.1/internal',
+      }).success,
+    ).toBe(false);
+
+    expect(
+      reviewKnowledgeDocumentParseRequestSchema.parse({
+        decision: 'APPROVE',
+        expectedReviewRevision: 3,
+      }),
+    ).toEqual({ decision: 'APPROVE', expectedReviewRevision: 3 });
+    expect(
+      reviewKnowledgeDocumentParseRequestSchema.safeParse({
+        decision: 'REJECT',
+        expectedReviewRevision: 3,
+      }).success,
+    ).toBe(false);
   });
 
   it('validates paginated chunk previews and semantic coverage metadata', () => {
@@ -144,4 +236,289 @@ describe('knowledge administration contracts', () => {
       }).success,
     ).toBe(false);
   });
+
+  it('validates an evidence-backed relationship graph overview', () => {
+    const overview = {
+      knowledgeBaseId: '00000000-0000-7000-8000-000000000002',
+      status: 'READY',
+      entityCount: 12,
+      relationCount: 8,
+      mentionCount: 24,
+      evidenceCount: 11,
+      orphanEntityCount: 0,
+      relationsWithoutEvidenceCount: 0,
+      publishedChunkCount: 10,
+      linkedChunkCount: 10,
+      mentionCoverage: 1,
+      evidenceCoverage: 1,
+      entityTypes: [
+        { type: 'DEPARTMENT', count: 4 },
+        { type: 'POLICY', count: 8 },
+      ],
+      relationTypes: [{ predicate: 'APPLIES_TO', count: 8 }],
+      strongRetrievalReady: true,
+      readinessBlockers: [],
+      lastBuiltAt: '2026-07-27T08:00:00.000Z',
+    } as const;
+
+    expect(knowledgeGraphOverviewSchema.parse(overview)).toEqual(overview);
+    expect(
+      knowledgeGraphOverviewSchema.safeParse({
+        ...overview,
+        relationsWithoutEvidenceCount: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      knowledgeGraphOverviewSchema.safeParse({
+        ...overview,
+        linkedChunkCount: 11,
+      }).success,
+    ).toBe(false);
+  });
+
+  it('coerces HTTP graph limits and validates graph rebuild results', () => {
+    expect(knowledgeGraphQuerySchema.parse({ limit: '25' })).toEqual({ limit: 25 });
+    expect(
+      knowledgeGraphRebuildResponseSchema.parse({
+        documentVersionId: VERSION_ID,
+        entityCount: 5,
+        relationCount: 4,
+        mentionCount: 7,
+        evidenceCount: 4,
+      }),
+    ).toEqual({
+      documentVersionId: VERSION_ID,
+      entityCount: 5,
+      relationCount: 4,
+      mentionCount: 7,
+      evidenceCount: 4,
+    });
+  });
+
+  it('preserves directed relation evidence and graph retrieval diagnostics', () => {
+    const response = {
+      query: '研发部门适用哪项差旅制度？',
+      simulatedUserId: '00000000-0000-7000-8000-000000000010',
+      accessibleKnowledgeBaseIds: ['00000000-0000-7000-8000-000000000002'],
+      mode: 'HYBRID',
+      embeddingModel: 'embedding-v2',
+      reranker: 'CROSS_ENCODER',
+      rerankerModel: 'reranker-v1',
+      degradedReason: null,
+      lexicalCandidateCount: 20,
+      vectorCandidateCount: 20,
+      relationshipCandidateCount: 6,
+      relationshipExpandedCount: 2,
+      diagnostics: [
+        { stage: 'LEXICAL', status: 'APPLIED', code: 'LEXICAL_READY', candidateCount: 20 },
+        {
+          stage: 'RELATIONSHIP',
+          status: 'APPLIED',
+          code: 'RELATIONSHIP_EXPANDED',
+          candidateCount: 6,
+        },
+      ],
+      semanticCoverage: 1,
+      noAnswer: false,
+      elapsedMs: 42,
+      items: [
+        {
+          chunkId: '00000000-0000-7000-8000-000000000011',
+          knowledgeBaseId: '00000000-0000-7000-8000-000000000002',
+          knowledgeBaseName: '企业制度',
+          documentId: DOCUMENT_ID,
+          documentVersionId: VERSION_ID,
+          documentVersion: 2,
+          title: '差旅制度',
+          headingPath: ['适用范围'],
+          excerpt: '本制度适用于研发部门。',
+          keywordScore: 0.7,
+          fuzzyScore: 0.4,
+          semanticScore: 0.9,
+          fusionScore: 0.8,
+          rerankerScore: 0.92,
+          relationshipScore: 0.88,
+          relationshipEvidence: [
+            {
+              relationId: '00000000-0000-7000-8000-000000000012',
+              relationType: 'APPLIES_TO',
+              sourceChunkId: '00000000-0000-7000-8000-000000000011',
+              sourceEntityName: '差旅制度',
+              targetEntityName: '研发部门',
+              direction: 'OUTBOUND',
+              hopDistance: 1,
+              confidence: 0.96,
+              contribution: 0.24,
+              path: [
+                {
+                  relationId: '00000000-0000-7000-8000-000000000012',
+                  predicate: 'APPLIES_TO',
+                  direction: 'OUTBOUND',
+                  sourceEntityId: '00000000-0000-7000-8000-000000000013',
+                  sourceEntityName: '差旅制度',
+                  targetEntityId: '00000000-0000-7000-8000-000000000014',
+                  targetEntityName: '研发部门',
+                },
+              ],
+            },
+          ],
+          finalScore: 0.95,
+        },
+      ],
+    } as const;
+
+    expect(knowledgeRetrievalTestResponseSchema.parse(response)).toEqual(response);
+    expect(
+      knowledgeRetrievalTestResponseSchema.safeParse({
+        ...response,
+        diagnostics: [
+          {
+            stage: 'RELATIONSHIP',
+            status: 'DEGRADED',
+            code: 'raw sql error: relation missing',
+            candidateCount: 0,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    const evidence = response.items[0].relationshipEvidence[0];
+    expect(
+      knowledgeRetrievalTestResponseSchema.safeParse({
+        ...response,
+        items: [
+          {
+            ...response.items[0],
+            relationshipEvidence: [
+              {
+                ...evidence,
+                hopDistance: 2,
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      knowledgeRetrievalTestResponseSchema.safeParse({
+        ...response,
+        items: [
+          {
+            ...response.items[0],
+            relationshipEvidence: [
+              {
+                ...evidence,
+                path: [
+                  ...evidence.path,
+                  {
+                    ...evidence.path[0],
+                    relationId: '00000000-0000-7000-8000-000000000015',
+                  },
+                  {
+                    ...evidence.path[0],
+                    relationId: '00000000-0000-7000-8000-000000000016',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      knowledgeRetrievalTestResponseSchema.safeParse({
+        ...response,
+        items: [
+          {
+            ...response.items[0],
+            relationshipEvidence: [
+              {
+                ...evidence,
+                path: [
+                  {
+                    ...evidence.path[0],
+                    debugMetadata: 'must-not-leak',
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it('validates paginated entity, directed relation and evidence previews', () => {
+    const response = {
+      knowledgeBaseId: '00000000-0000-7000-8000-000000000002',
+      query: null,
+      entityType: null,
+      focusEntityId: null,
+      totalEntities: 2,
+      totalRelations: 1,
+      entities: [
+        {
+          id: '00000000-0000-7000-8000-000000000021',
+          entityType: 'POLICY',
+          canonicalName: '差旅制度',
+          description: null,
+          aliases: ['出差制度'],
+          attributes: { owner: '财务部' },
+          confidence: 0.97,
+          mentionCount: 3,
+          relationCount: 1,
+          updatedAt: '2026-07-27T08:00:00.000Z',
+        },
+      ],
+      relations: [
+        {
+          id: '00000000-0000-7000-8000-000000000022',
+          subjectEntityId: '00000000-0000-7000-8000-000000000021',
+          subjectEntityName: '差旅制度',
+          predicate: 'APPLIES_TO',
+          objectEntityId: '00000000-0000-7000-8000-000000000023',
+          objectEntityName: '研发部门',
+          attributes: {},
+          confidence: 0.94,
+          evidenceCount: 1,
+          evidence: [
+            {
+              id: '00000000-0000-7000-8000-000000000024',
+              chunkId: '00000000-0000-7000-8000-000000000025',
+              documentId: DOCUMENT_ID,
+              documentVersionId: VERSION_ID,
+              excerpt: '本制度适用于研发部门。',
+              confidence: 0.96,
+            },
+          ],
+          updatedAt: '2026-07-27T08:00:00.000Z',
+        },
+      ],
+    } as const;
+
+    expect(knowledgeGraphResponseSchema.parse(response)).toEqual(response);
+  });
 });
+
+function knowledgeGovernance() {
+  return {
+    ownerUserId: '00000000-0000-7000-8000-000000000005',
+    classification: 'INTERNAL' as const,
+    scopeMode: 'TENANT' as const,
+    organizationScopeIds: [],
+    projectScopeIds: [],
+    taskScopeIds: [],
+    roleTemplateScopeIds: [],
+    dataLabels: [],
+    effectiveFrom: '2026-07-01T00:00:00.000Z',
+    expiresAt: null,
+    retentionUntil: null,
+    retentionAction: 'ARCHIVE' as const,
+    supersedesVersionId: null,
+    revision: 2,
+    reviewStatus: 'APPROVED' as const,
+    reviewedById: '00000000-0000-7000-8000-000000000006',
+    reviewedAt: '2026-07-02T00:00:00.000Z',
+    reviewNote: 'Approved.',
+    policyHash: 'a'.repeat(64),
+  };
+}

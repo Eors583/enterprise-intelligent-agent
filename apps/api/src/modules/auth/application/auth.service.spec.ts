@@ -1,5 +1,6 @@
 import { UnauthorizedException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
+import type { AuthSessionResponse, LoginResult } from '@enterprise/contracts';
 
 import type { EnvironmentVariables } from '../../../config/environment.js';
 import type { AuthPrismaService } from '../../../database/auth-prisma.service.js';
@@ -211,11 +212,13 @@ describe('AuthService work-email login', () => {
       candidateUserIds: ['external'],
     });
 
-    const result = await service.login({
-      tenantSlug: 'test-workspace',
-      email: 'employee@example.test',
-      password: '1234567890',
-    });
+    const result = requireAuthenticatedLogin(
+      await service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    );
 
     expect(result.account.userId).toBe('external');
     expect(result.account.email).toBe('external@external.invalid');
@@ -238,14 +241,34 @@ describe('AuthService work-email login', () => {
       candidateUserIds: ['external'],
     });
 
-    const result = await service.login({
-      tenantSlug: 'test-workspace',
-      email: 'employee@example.test',
-      password: '1234567890',
-    });
+    const result = requireAuthenticatedLogin(
+      await service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    );
 
     expect(result.account.userId).toBe('local');
     expect(transaction.employment.groupBy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a credentialless Feishu identity found by work email even when the submitted password matches a former shared default', async () => {
+    const { service, transaction, passwords } = loginSetup({
+      localUser: null,
+      candidateUserIds: ['external'],
+      externalHasCredential: false,
+    });
+
+    await expect(
+      service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(passwords.verify).toHaveBeenCalledOnce();
+    expect(transaction.authSession.create).not.toHaveBeenCalled();
   });
 
   it('does not create a session when the password changed after verification', async () => {
@@ -266,6 +289,13 @@ describe('AuthService work-email login', () => {
   });
 });
 
+function requireAuthenticatedLogin(result: LoginResult): AuthSessionResponse {
+  if ('kind' in result) {
+    throw new Error('Expected an authenticated session, received an MFA challenge.');
+  }
+  return result;
+}
+
 const principal: AuthenticatedPrincipal = {
   sessionId: '00000000-0000-7000-8000-000000000010',
   tenantId: '00000000-0000-7000-8000-000000000001',
@@ -285,6 +315,7 @@ function loginSetup(options: {
   readonly localUser: ReturnType<typeof loginUser> | null;
   readonly candidateUserIds: readonly string[];
   readonly lockedPasswordHash?: string;
+  readonly externalHasCredential?: boolean;
 }) {
   const config = authConfig();
   const transaction = {
@@ -302,7 +333,14 @@ function loginSetup(options: {
       findUnique: vi
         .fn()
         .mockImplementation(({ where }: { where: { tenantId_id: { id: string } } }) =>
-          Promise.resolve(loginUser(where.tenantId_id.id, 'external@external.invalid', true)),
+          Promise.resolve(
+            loginUser(
+              where.tenantId_id.id,
+              'external@external.invalid',
+              true,
+              options.externalHasCredential ?? true,
+            ),
+          ),
         ),
     },
     employment: {
@@ -311,7 +349,7 @@ function loginSetup(options: {
     passwordCredential: {
       findUnique: vi.fn().mockResolvedValue({
         passwordHash: options.lockedPasswordHash ?? 'scrypt$encoded',
-        mustChangePassword: options.localUser?.passwordCredential.mustChangePassword ?? true,
+        mustChangePassword: options.localUser?.passwordCredential?.mustChangePassword ?? true,
       }),
     },
     authSession: {
@@ -329,17 +367,20 @@ function loginSetup(options: {
   return {
     service: new AuthService(prisma, passwords, new TokenService(config), config),
     transaction,
+    passwords,
   };
 }
 
-function loginUser(id: string, email: string, mustChangePassword: boolean) {
+function loginUser(id: string, email: string, mustChangePassword: boolean, hasCredential = true) {
   return {
     id,
     email,
     displayName: id,
     role: 'MEMBER' as const,
     status: 'ACTIVE' as const,
-    passwordCredential: { passwordHash: 'scrypt$encoded', mustChangePassword },
+    passwordCredential: hasCredential
+      ? { passwordHash: 'scrypt$encoded', mustChangePassword }
+      : null,
   };
 }
 

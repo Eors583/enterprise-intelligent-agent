@@ -7,6 +7,12 @@ export abstract class AgentRunQueueRepository {
     readonly claimTtlMs: number;
   }): Promise<readonly ClaimedAgentRunEvent[]>;
 
+  abstract claimCancellations(input: {
+    readonly workerId: string;
+    readonly batchSize: number;
+    readonly claimTtlMs: number;
+  }): Promise<readonly ClaimedAgentRunEvent[]>;
+
   abstract markPublished(input: {
     readonly eventId: string;
     readonly workerId: string;

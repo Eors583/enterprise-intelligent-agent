@@ -104,6 +104,14 @@ export class OrganizationAdminController {
     return this.invitations.invite(request);
   }
 
+  @Post('members/:id/invitation')
+  @HttpCode(HttpStatus.OK)
+  issueDirectoryMemberInvitation(
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ): Promise<IssueMemberInvitationResponse> {
+    return this.invitations.issueForDirectoryMember(id);
+  }
+
   @Post('members/:id/invitation/resend')
   @HttpCode(HttpStatus.OK)
   resendMemberInvitation(

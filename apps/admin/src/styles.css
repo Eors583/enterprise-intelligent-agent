@@ -1328,6 +1328,8 @@ textarea::placeholder {
 .status-pill.status-archived,
 .status-pill.status-inactive,
 .status-pill.status-terminated,
+.status-pill.status-revoked,
+.status-pill.status-expired,
 .status-pill.status-not_configured {
   border-color: #d8dfdd;
   color: #73827f;
@@ -1641,6 +1643,51 @@ tbody tr:hover {
 .table-primary,
 .table-secondary {
   display: block;
+}
+
+.role-assignment-card table {
+  min-width: 1050px;
+}
+
+.role-assignment-key {
+  display: block;
+  max-width: 240px;
+  margin-top: 4px;
+  overflow: hidden;
+  color: #73847f;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-assignment-advanced {
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.role-assignment-advanced summary {
+  cursor: pointer;
+  color: #31433f;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.role-assignment-advanced > p {
+  margin: 10px 0 14px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.role-assignment-json-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.role-assignment-json-grid textarea {
+  min-height: 110px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
 }
 
 .table-primary {
@@ -1958,6 +2005,59 @@ tbody tr:hover {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.knowledge-parse-review-panel {
+  margin-top: 16px;
+  padding: 18px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.knowledge-parse-review-panel > header,
+.knowledge-parse-review-panel > article,
+.knowledge-parse-review-form > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.knowledge-parse-review-panel > header > div,
+.knowledge-parse-review-panel > article > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.knowledge-parse-review-panel > article {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.knowledge-parse-review-panel small,
+.knowledge-parse-review-panel p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.knowledge-parse-source-uri {
+  max-width: min(720px, 70vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-parse-review-form {
+  min-width: min(420px, 100%);
+}
+
+.knowledge-parse-review-form textarea {
+  width: 100%;
+  min-height: 72px;
+  margin-bottom: 8px;
 }
 
 .knowledge-document-toolbar {
@@ -2187,6 +2287,149 @@ tbody tr:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.knowledge-publication-journey {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 9px;
+  padding: 10px;
+  border: 1px solid #dfe9e6;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.knowledge-publication-journey ol {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(88px, 1fr));
+  margin: 0;
+  padding: 0;
+  gap: 5px;
+  list-style: none;
+}
+
+.knowledge-publication-journey li {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: start;
+  gap: 5px;
+  padding: 7px;
+  border-radius: 8px;
+  color: #71837e;
+  background: #f4f7f6;
+}
+
+.knowledge-publication-journey li.is-complete {
+  color: #176b5f;
+  background: #e9f6f2;
+}
+
+.knowledge-publication-journey li.is-current {
+  color: #284c8f;
+  background: #edf3ff;
+  box-shadow: inset 0 0 0 1px #c7d8f7;
+}
+
+.knowledge-publication-journey li.is-blocked {
+  color: #9a303e;
+  background: #fff0f2;
+  box-shadow: inset 0 0 0 1px #f5c9cf;
+}
+
+.knowledge-publication-stage-marker {
+  display: inline-grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border-radius: 999px;
+  color: inherit;
+  background: rgb(255 255 255 / 75%);
+  font-weight: 800;
+}
+
+.knowledge-publication-journey li > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.knowledge-publication-journey li small {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 8px;
+  line-height: 1.45;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.knowledge-semantic-not-ready {
+  margin: 0;
+  padding: 7px 9px;
+  border-radius: 8px;
+  color: #92510d;
+  background: #fff7e7;
+  font-size: 9px;
+}
+
+.knowledge-publication-journey > .button,
+.knowledge-publication-complete {
+  justify-self: end;
+}
+
+.knowledge-publication-complete {
+  color: #176b5f;
+  font-weight: 700;
+}
+
+.knowledge-integrity-wizard {
+  max-height: min(72vh, 760px);
+  overflow-y: auto;
+  padding-right: 3px;
+}
+
+.knowledge-integrity-step {
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fbfcfc;
+}
+
+.knowledge-integrity-step > header {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  background: #f4f8f7;
+}
+
+.knowledge-integrity-step > header > span:first-child {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  color: #fff;
+  background: var(--brand);
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.knowledge-integrity-step > div {
+  display: grid;
+  padding: 12px;
+  gap: 10px;
+}
+
+.knowledge-integrity-step p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.knowledge-integrity-step .button {
+  justify-self: start;
 }
 
 .knowledge-drop-zone {
@@ -2860,7 +3103,8 @@ tbody tr:hover {
 
   .form-grid.two,
   .form-grid.document-fields,
-  .form-grid.document-edit-fields {
+  .form-grid.document-edit-fields,
+  .role-assignment-json-grid {
     grid-template-columns: 1fr;
   }
 
@@ -3022,6 +3266,10 @@ tbody tr:hover {
     justify-content: flex-start;
   }
 
+  .knowledge-publication-journey ol {
+    grid-template-columns: 1fr;
+  }
+
   .knowledge-chunk-card > header {
     flex-direction: column;
   }
@@ -3094,4 +3342,1803 @@ tbody tr:hover {
   grid-template-columns: auto 1fr auto;
   align-items: center;
   gap: 10px;
+}
+
+.knowledge-graph-readiness-inline {
+  display: grid;
+  gap: 10px;
+  padding: 13px 14px;
+  border: 1px solid #dfe8e6;
+  border-radius: 10px;
+  background: #fbfdfc;
+}
+
+.knowledge-graph-readiness-inline > header,
+.knowledge-graph-readiness-inline > header > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.knowledge-graph-readiness-inline > header {
+  justify-content: space-between;
+}
+
+.knowledge-graph-readiness-inline > header span,
+.knowledge-graph-readiness-inline > p,
+.knowledge-graph-readiness-inline li {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.knowledge-graph-readiness-inline > header em {
+  padding: 4px 7px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.knowledge-graph-readiness-inline > header em.status-ready {
+  color: #176f5b;
+  background: #e8f7f1;
+}
+
+.knowledge-graph-readiness-inline > header em.status-failed {
+  color: #9b3b35;
+  background: #fff0ef;
+}
+
+.knowledge-graph-readiness-inline dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  gap: 8px;
+}
+
+.knowledge-graph-readiness-inline dl > div {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+  border-radius: 8px;
+  background: #f2f7f5;
+}
+
+.knowledge-graph-readiness-inline dt {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.knowledge-graph-readiness-inline dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.knowledge-graph-readiness-inline ul,
+.knowledge-graph-readiness-inline p {
+  margin: 0;
+}
+
+.knowledge-graph-content {
+  display: grid;
+  padding: 16px 18px 18px;
+  gap: 14px;
+}
+
+.knowledge-graph-governance {
+  display: grid;
+  gap: 18px;
+}
+
+.knowledge-governance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.knowledge-governance-grid > section {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.knowledge-governance-grid h3 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.knowledge-governance-record {
+  display: grid;
+  gap: 9px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface-soft);
+}
+
+.knowledge-governance-record > header,
+.knowledge-governance-version,
+.knowledge-governance-version > span,
+.knowledge-governance-version > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.knowledge-governance-record > header {
+  justify-content: space-between;
+}
+
+.knowledge-governance-record > header > span,
+.knowledge-governance-version {
+  min-width: 0;
+}
+
+.knowledge-governance-record code {
+  display: block;
+  overflow: hidden;
+  max-width: 260px;
+  color: var(--muted);
+  font-size: 10px;
+  text-overflow: ellipsis;
+}
+
+.knowledge-governance-record em {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: rgba(105, 83, 245, 0.1);
+  color: var(--brand);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.knowledge-governance-record pre {
+  overflow: auto;
+  max-height: 180px;
+  margin: 0;
+  padding: 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--muted);
+  font:
+    11px/1.55 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.knowledge-governance-version {
+  flex-wrap: wrap;
+  justify-content: space-between;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.knowledge-governance-create {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+}
+
+.knowledge-governance-create > summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.knowledge-governance-create[open] > summary {
+  margin-bottom: 14px;
+}
+
+@media (max-width: 900px) {
+  .knowledge-governance-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.knowledge-graph-headline {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid #e3ebe9;
+  border-radius: 10px;
+  background: #f8fbfa;
+}
+
+.knowledge-graph-headline > span {
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.knowledge-graph-headline > strong {
+  color: #425a54;
+  font-size: 10px;
+}
+
+.knowledge-graph-headline > em {
+  padding: 5px 8px;
+  border-radius: 999px;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.knowledge-graph-headline.status-ready {
+  border-color: #bee5d7;
+  background: #f0faf6;
+}
+
+.knowledge-graph-headline.status-ready > em {
+  color: #176f5b;
+  background: #dff4ec;
+}
+
+.knowledge-graph-headline.status-building {
+  border-color: #d8dcf1;
+  background: #f6f7fd;
+}
+
+.knowledge-graph-headline.status-degraded,
+.knowledge-graph-headline.status-empty,
+.knowledge-graph-headline.status-failed {
+  border-color: #f0cbc8;
+  background: #fff7f6;
+}
+
+.knowledge-graph-headline.status-degraded > em,
+.knowledge-graph-headline.status-empty > em,
+.knowledge-graph-headline.status-failed > em {
+  color: #9b3b35;
+  background: #ffeae8;
+}
+
+.knowledge-graph-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.knowledge-graph-metrics > div {
+  display: grid;
+  gap: 4px;
+  padding: 11px;
+  border: 1px solid #e4ecea;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.knowledge-graph-metrics > div.warning {
+  border-color: #f0cbc8;
+  background: #fff8f7;
+}
+
+.knowledge-graph-metrics span {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.knowledge-graph-metrics strong {
+  color: var(--ink);
+  font-size: 15px;
+}
+
+.knowledge-graph-metrics > div.warning strong {
+  color: #a33d37;
+}
+
+.knowledge-graph-coverage {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.knowledge-graph-coverage > div {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border: 1px solid #e2eae8;
+  border-radius: 9px;
+}
+
+.knowledge-graph-coverage header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+}
+
+.knowledge-graph-coverage progress {
+  width: 100%;
+  accent-color: var(--brand);
+}
+
+.knowledge-graph-coverage small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.knowledge-graph-taxonomy {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.knowledge-graph-taxonomy > section {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #e2eae8;
+  border-radius: 9px;
+}
+
+.knowledge-graph-taxonomy > section > strong {
+  font-size: 10px;
+}
+
+.knowledge-graph-taxonomy > section > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.knowledge-graph-taxonomy span {
+  padding: 5px 7px;
+  border-radius: 999px;
+  color: #405b54;
+  background: #eef5f2;
+  font-size: 9px;
+}
+
+.knowledge-graph-taxonomy b {
+  color: var(--brand);
+}
+
+.knowledge-graph-taxonomy small {
+  color: var(--muted);
+}
+
+.knowledge-graph-search {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(160px, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid #dfe8e6;
+  border-radius: 10px;
+  background: #f8fbfa;
+}
+
+.knowledge-graph-search label {
+  display: grid;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.knowledge-graph-browser {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.4fr);
+  gap: 12px;
+}
+
+.knowledge-graph-browser > section {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.knowledge-graph-browser > section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.knowledge-graph-browser > section > header strong {
+  color: var(--ink);
+  font-size: 11px;
+}
+
+.knowledge-entity-list,
+.knowledge-relation-list {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  max-height: 640px;
+  overflow: auto;
+}
+
+.knowledge-entity-list > button {
+  display: grid;
+  width: 100%;
+  gap: 6px;
+  padding: 11px;
+  border: 1px solid #e1e9e7;
+  border-radius: 9px;
+  color: var(--ink);
+  background: #fff;
+  text-align: left;
+}
+
+.knowledge-entity-list > button:hover,
+.knowledge-entity-list > button.selected {
+  border-color: #92cdbb;
+  background: #f1faf6;
+}
+
+.knowledge-entity-type {
+  width: fit-content;
+  padding: 3px 6px;
+  border-radius: 999px;
+  color: #4a625c;
+  background: #eaf2ef;
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.knowledge-entity-list small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-entity-list footer,
+.knowledge-relation-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.knowledge-relation-list > article {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid #e1e9e7;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.knowledge-relation-list > article > header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+}
+
+.knowledge-relation-list > article > header > span {
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: #685c32;
+  background: #fff7dc;
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.knowledge-relation-list > article > header > strong:last-child {
+  text-align: right;
+}
+
+.knowledge-relation-meta code {
+  overflow: hidden;
+  margin-left: auto;
+  text-overflow: ellipsis;
+}
+
+.knowledge-relation-list details summary,
+.knowledge-result-relationship-evidence summary {
+  cursor: pointer;
+  color: var(--brand);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.knowledge-relation-evidence {
+  display: grid;
+  margin-top: 8px;
+  gap: 7px;
+}
+
+.knowledge-relation-evidence blockquote {
+  display: grid;
+  margin: 0;
+  padding: 9px 10px;
+  border-left: 3px solid #9bcfbe;
+  border-radius: 0 7px 7px 0;
+  background: #f6faf8;
+  gap: 6px;
+}
+
+.knowledge-relation-evidence p {
+  margin: 0;
+  color: #40544f;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.knowledge-relation-evidence footer {
+  display: flex;
+  justify-content: space-between;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.knowledge-retrieval-diagnostics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.knowledge-retrieval-diagnostics > article {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid #e2eae8;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.knowledge-retrieval-diagnostics > article.status-degraded {
+  border-color: #f0cbc8;
+  background: #fff8f7;
+}
+
+.knowledge-retrieval-diagnostics > article.status-skipped {
+  background: #f5f7f6;
+}
+
+.knowledge-retrieval-diagnostics header {
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 9px;
+}
+
+.knowledge-retrieval-diagnostics header span {
+  color: var(--muted);
+}
+
+.knowledge-retrieval-diagnostics p {
+  overflow: hidden;
+  margin: 0;
+  color: #52645f;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 8px;
+  text-overflow: ellipsis;
+}
+
+.knowledge-retrieval-diagnostics small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.knowledge-result-relationship-evidence {
+  padding-top: 8px;
+  border-top: 1px dashed #dfe8e6;
+}
+
+.knowledge-result-relationship-evidence > div {
+  display: grid;
+  margin-top: 8px;
+  gap: 6px;
+}
+
+.knowledge-retrieval-result-list .knowledge-result-relationship-evidence article {
+  display: grid;
+  gap: 6px;
+  padding: 8px 9px;
+  border: 1px solid #e1eae7;
+  border-radius: 8px;
+  background: #f7fbf9;
+}
+
+.knowledge-retrieval-result-list .knowledge-result-relationship-evidence article > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.knowledge-retrieval-result-list .knowledge-result-relationship-evidence article > header strong {
+  overflow: visible;
+  font-size: 9px;
+  white-space: normal;
+}
+
+.knowledge-retrieval-result-list .knowledge-result-relationship-evidence article > header span {
+  flex: 0 0 auto;
+  color: var(--brand);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.knowledge-relationship-path {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  gap: 5px;
+  list-style: none;
+}
+
+.knowledge-relationship-path li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 6px 7px;
+  border-radius: 6px;
+  background: #eef6f3;
+  gap: 7px;
+}
+
+.knowledge-relationship-path li > span {
+  color: var(--brand);
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.knowledge-relationship-path li > strong {
+  overflow-wrap: anywhere;
+  color: #304d45;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.knowledge-relationship-path li > code {
+  overflow: hidden;
+  max-width: 130px;
+  color: var(--muted);
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.knowledge-retrieval-result-list .knowledge-result-relationship-evidence article > footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+@media (max-width: 900px) {
+  .knowledge-graph-readiness-inline dl,
+  .knowledge-graph-metrics,
+  .knowledge-retrieval-diagnostics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .knowledge-graph-search,
+  .knowledge-graph-browser {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .knowledge-graph-headline,
+  .knowledge-relation-list > article > header {
+    grid-template-columns: 1fr;
+  }
+
+  .knowledge-graph-headline > em,
+  .knowledge-relation-list > article > header > span {
+    width: fit-content;
+  }
+
+  .knowledge-relation-list > article > header > strong:last-child {
+    text-align: left;
+  }
+
+  .knowledge-graph-coverage,
+  .knowledge-graph-taxonomy {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Role Blueprint governance */
+.button.danger {
+  color: #fff;
+  background: var(--danger);
+  box-shadow: 0 5px 16px rgb(199 62 77 / 17%);
+}
+
+.button.danger:hover:not(:disabled) {
+  background: #aa2f3d;
+}
+
+.status-pill.status-testing,
+.status-pill.status-in_review {
+  border-color: #cbd8ee;
+  color: #48669d;
+  background: #f2f6fd;
+}
+
+.status-pill.status-published,
+.status-pill.status-approved {
+  border-color: #bde4d8;
+  color: #17785f;
+  background: #edf9f5;
+}
+
+.status-pill.status-retired,
+.status-pill.status-changes_requested,
+.status-pill.status-not_submitted {
+  border-color: #d8dfdd;
+  color: #73827f;
+  background: #f3f5f4;
+}
+
+.role-blueprint-layout {
+  display: grid;
+  align-items: start;
+  grid-template-columns: minmax(260px, 0.72fr) minmax(560px, 1.8fr);
+  gap: 18px;
+}
+
+.role-blueprint-index {
+  position: sticky;
+  top: 92px;
+  overflow: hidden;
+}
+
+.role-blueprint-index > header {
+  display: grid;
+  gap: 13px;
+  padding: 17px;
+  border-bottom: 1px solid var(--line);
+  background: #fbfdfc;
+}
+
+.role-blueprint-index > header > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.role-blueprint-index > header strong {
+  color: #243a35;
+  font-size: 13px;
+}
+
+.role-blueprint-index > header small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.role-blueprint-index .search-input {
+  width: 100%;
+}
+
+.role-blueprint-list {
+  display: grid;
+  max-height: calc(100vh - 235px);
+  overflow-y: auto;
+  padding: 8px;
+  gap: 3px;
+}
+
+.role-blueprint-list > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 9px;
+  padding: 10px;
+  color: #445752;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.role-blueprint-list > button:hover {
+  background: #f4f8f7;
+}
+
+.role-blueprint-list > button.selected {
+  color: #143d37;
+  background: var(--brand-soft);
+  box-shadow: inset 3px 0 var(--brand);
+}
+
+.role-blueprint-mark,
+.role-blueprint-hero-mark {
+  display: grid;
+  place-items: center;
+  border: 1px solid #c9e4de;
+  border-radius: 10px;
+  color: #12786c;
+  background: #eff9f6;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.role-blueprint-mark {
+  width: 36px;
+  height: 36px;
+}
+
+.role-blueprint-list > button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.role-blueprint-list strong,
+.role-blueprint-list code,
+.role-blueprint-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role-blueprint-list strong {
+  font-size: 12px;
+}
+
+.role-blueprint-list code {
+  color: #57706a;
+  font-size: 9px;
+}
+
+.role-blueprint-list small {
+  color: #83928e;
+  font-size: 9px;
+}
+
+.role-blueprint-no-match {
+  margin: 18px 8px;
+  color: var(--muted);
+  font-size: 11px;
+  text-align: center;
+}
+
+.role-blueprint-detail {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+}
+
+.role-blueprint-hero {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  overflow: hidden;
+  padding: 22px;
+  background: radial-gradient(circle at 92% 12%, rgb(35 169 149 / 10%), transparent 34%), #fff;
+}
+
+.role-blueprint-hero-mark {
+  width: 54px;
+  height: 54px;
+  font-size: 17px;
+}
+
+.role-blueprint-hero h2 {
+  margin: 5px 0 6px;
+  color: #172c27;
+  font-size: 23px;
+  letter-spacing: -0.02em;
+}
+
+.role-blueprint-hero p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.role-blueprint-hero small {
+  display: block;
+  margin-top: 8px;
+  color: #91a09c;
+  font-size: 9px;
+}
+
+.role-blueprint-hero-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.role-definition-card,
+.role-version-governance {
+  overflow: hidden;
+}
+
+.role-definition-card > header,
+.role-version-governance > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 17px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.role-definition-card h3,
+.role-version-governance h3,
+.role-definition-collection h3 {
+  margin: 4px 0 0;
+  color: #223630;
+  font-size: 15px;
+}
+
+.role-version-governance > header p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.role-version-governance > header > span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.role-mission-panel {
+  margin: 18px 20px 0;
+  border-left: 3px solid var(--brand);
+  border-radius: 0 9px 9px 0;
+  padding: 14px 16px;
+  background: #f4faf8;
+}
+
+.role-mission-panel strong,
+.role-value-grid strong {
+  color: #31514a;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.role-mission-panel p,
+.role-value-grid p {
+  margin: 7px 0 0;
+  color: #415850;
+  font-size: 12px;
+  line-height: 1.75;
+}
+
+.role-value-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 20px 20px;
+}
+
+.role-value-grid > div {
+  min-width: 0;
+  border: 1px solid #e2ebe8;
+  border-radius: 9px;
+  padding: 12px;
+  background: #fbfdfc;
+}
+
+.role-value-grid ul {
+  display: grid;
+  margin: 7px 0 0;
+  padding-left: 17px;
+  color: #415850;
+  font-size: 11px;
+  line-height: 1.65;
+  gap: 3px;
+}
+
+.role-definition-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.role-definition-collection {
+  overflow: hidden;
+}
+
+.role-definition-collection:last-child {
+  grid-column: 1 / -1;
+}
+
+.role-definition-collection > header {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.role-definition-collection > header h3 {
+  margin: 0;
+}
+
+.role-definition-collection > header span {
+  display: grid;
+  min-width: 22px;
+  height: 22px;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.role-definition-collection > div {
+  display: grid;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 8px;
+  gap: 5px;
+}
+
+.role-definition-collection article {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 10px;
+  border: 1px solid #e8eeec;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fcfdfd;
+}
+
+.role-definition-collection article strong {
+  color: #30483f;
+  font-size: 11px;
+}
+
+.role-definition-collection article code {
+  color: #71837e;
+  font-size: 8px;
+}
+
+.role-definition-collection article p,
+.role-definition-collection article small {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #64756f;
+  font-size: 9px;
+  line-height: 1.6;
+}
+
+.role-definition-collection article small {
+  color: #327268;
+}
+
+.role-definition-empty {
+  margin: 0;
+  padding: 16px;
+  color: #91a09c;
+  font-size: 10px;
+}
+
+.role-version-list {
+  display: grid;
+  padding: 12px;
+  gap: 10px;
+}
+
+.role-version-card {
+  display: grid;
+  gap: 11px;
+  border: 1px solid #dfe8e5;
+  border-radius: 10px;
+  padding: 14px;
+  background: #fcfdfd;
+}
+
+.role-version-card > header,
+.role-version-title,
+.role-version-statuses,
+.role-version-card > footer {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.role-version-card > header {
+  justify-content: space-between;
+}
+
+.role-version-title > span {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 9px;
+  color: #fff;
+  background: #176e65;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.role-version-title > div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.role-version-title strong {
+  color: #2c403b;
+  font-size: 11px;
+}
+
+.role-version-title small {
+  color: #899894;
+  font-size: 9px;
+}
+
+.role-version-statuses {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.role-version-stage {
+  margin: 0;
+  color: #657771;
+  font-size: 10px;
+}
+
+.role-two-person-warning,
+.role-two-person-callout,
+.role-review-feedback,
+.role-transition-summary {
+  border: 1px solid #c8dded;
+  border-radius: 9px;
+  padding: 11px 12px;
+  color: #37657f;
+  background: #f2f8fc;
+}
+
+.role-two-person-warning {
+  display: grid;
+  gap: 4px;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.role-two-person-callout strong,
+.role-review-feedback strong,
+.role-transition-summary strong {
+  font-size: 12px;
+}
+
+.role-two-person-callout p,
+.role-review-feedback p,
+.role-transition-summary p {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.65;
+}
+
+.role-review-feedback {
+  border-color: #eadcb7;
+  color: #7f631f;
+  background: #fff9e9;
+}
+
+.role-review-feedback span {
+  display: block;
+  margin-top: 4px;
+  font-size: 9px;
+}
+
+.role-transition-summary.publish {
+  border-color: #bde4d8;
+  color: #176b57;
+  background: #edf9f5;
+}
+
+.role-transition-summary.retire,
+.role-transition-summary.rollback {
+  border-color: #efc4c9;
+  color: #9f3743;
+  background: #fff5f6;
+}
+
+.role-version-card blockquote {
+  margin: 0;
+  border-left: 3px solid #d6bd75;
+  padding: 8px 11px;
+  color: #68582f;
+  background: #fffaf0;
+  font-size: 10px;
+}
+
+.role-version-card blockquote p {
+  margin: 4px 0 0;
+  line-height: 1.55;
+}
+
+.role-rollback-origin {
+  margin: 0;
+  color: #697b75;
+  font-size: 9px;
+}
+
+.role-version-config {
+  border-top: 1px dashed #dfe7e4;
+  padding-top: 9px;
+}
+
+.role-version-diff {
+  border-top: 1px dashed #dfe7e4;
+  padding-top: 9px;
+}
+
+.role-version-diff > summary {
+  display: flex;
+  width: fit-content;
+  align-items: center;
+  gap: 8px;
+  color: var(--brand);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.role-version-diff > summary span {
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #64756f;
+  background: #edf2f0;
+  font-size: 8px;
+  font-weight: 650;
+}
+
+.role-version-diff-body {
+  display: grid;
+  margin-top: 10px;
+  gap: 10px;
+}
+
+.role-version-diff-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #dfe8e5;
+  border-radius: 8px;
+  padding: 10px 11px;
+  background: #f7faf9;
+}
+
+.role-version-diff-toolbar > div {
+  display: grid;
+  gap: 3px;
+}
+
+.role-version-diff-toolbar strong {
+  color: #34524a;
+  font-size: 11px;
+}
+
+.role-version-diff-toolbar small {
+  color: #7d8d88;
+  font-size: 9px;
+}
+
+.role-version-diff-toolbar label {
+  display: grid;
+  min-width: 170px;
+  gap: 4px;
+  color: #6a7b75;
+  font-size: 8px;
+}
+
+.role-version-diff-toolbar select {
+  min-height: 32px;
+  padding: 0 28px 0 9px;
+  font-size: 10px;
+}
+
+.role-version-diff-list {
+  display: grid;
+  gap: 8px;
+}
+
+.role-version-diff-item {
+  display: grid;
+  border: 1px solid #dfe8e5;
+  border-left: 3px solid #b7c7c2;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fff;
+  gap: 9px;
+}
+
+.role-version-diff-item.added {
+  border-left-color: #3eaa79;
+  background: #fbfffd;
+}
+
+.role-version-diff-item.removed {
+  border-left-color: #c76c72;
+  background: #fffcfc;
+}
+
+.role-version-diff-item.changed {
+  border-left-color: #c79636;
+  background: #fffefa;
+}
+
+.role-version-diff-item > header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.role-version-diff-item > header > span {
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #51635d;
+  background: #edf2f0;
+  font-size: 8px;
+  font-weight: 750;
+}
+
+.role-version-diff-item.added > header > span {
+  color: #176b4c;
+  background: #e8f7ef;
+}
+
+.role-version-diff-item.removed > header > span {
+  color: #983e46;
+  background: #fae9eb;
+}
+
+.role-version-diff-item.changed > header > span {
+  color: #805d18;
+  background: #fbf1d9;
+}
+
+.role-version-diff-item > header > div {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.role-version-diff-item > header strong {
+  color: #354942;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.role-version-diff-item > header small {
+  color: #87948f;
+  font-size: 8px;
+}
+
+.role-version-diff-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.role-version-diff-values section {
+  min-width: 0;
+}
+
+.role-version-diff-values section > strong {
+  color: #778681;
+  font-size: 8px;
+}
+
+.role-version-diff-values pre {
+  max-height: 150px;
+  overflow: auto;
+  margin: 4px 0 0;
+  border: 1px solid #e5ebe9;
+  border-radius: 6px;
+  padding: 8px;
+  color: #40534d;
+  background: #f7faf9;
+  font:
+    8px/1.6 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.role-version-diff-empty {
+  margin: 9px 0 0;
+  border: 1px dashed #dfe8e5;
+  border-radius: 8px;
+  padding: 11px;
+  color: #80908a;
+  background: #fafcfb;
+  font-size: 9px;
+}
+
+.role-version-config summary {
+  width: fit-content;
+  color: var(--brand);
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 750;
+}
+
+.role-version-config > div {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-top: 10px;
+  gap: 8px;
+}
+
+.role-version-config section:first-child {
+  grid-column: 1 / -1;
+}
+
+.role-version-config section {
+  min-width: 0;
+}
+
+.role-version-config section > strong {
+  color: #5e706a;
+  font-size: 9px;
+}
+
+.role-version-config pre,
+.role-policy-grid textarea {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.role-version-config pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 5px 0 0;
+  border: 1px solid #e5ebe9;
+  border-radius: 7px;
+  padding: 9px;
+  color: #40534d;
+  background: #f7faf9;
+  font-size: 8px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.role-version-card > footer {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+
+.modal:has(.role-blueprint-editor) {
+  width: min(100%, 1080px);
+}
+
+.modal:has(.role-version-editor) {
+  width: min(100%, 900px);
+}
+
+.role-blueprint-editor {
+  gap: 14px;
+}
+
+.role-editor-section {
+  display: grid;
+  border: 1px solid #dfe8e5;
+  border-radius: 10px;
+  padding: 16px;
+  background: #fbfdfc;
+  gap: 14px;
+}
+
+.role-editor-section > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid #e6edeb;
+  padding-bottom: 11px;
+}
+
+.role-editor-section > header > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.role-editor-section > header > div > span {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.role-editor-section h3 {
+  margin: 0;
+  color: #2b413b;
+  font-size: 13px;
+}
+
+.role-editor-section > header p {
+  max-width: 520px;
+  margin: 0;
+  color: #7c8d88;
+  font-size: 9px;
+  line-height: 1.6;
+  text-align: right;
+}
+
+.role-mission-input,
+.role-system-prompt {
+  min-height: 150px;
+}
+
+.structured-role-list {
+  display: grid;
+  gap: 10px;
+}
+
+.structured-role-item {
+  display: grid;
+  border: 1px solid #e3ebe8;
+  border-radius: 9px;
+  padding: 13px;
+  background: #fff;
+  gap: 12px;
+}
+
+.structured-role-item > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.structured-role-item > header strong {
+  color: #536760;
+  font-size: 10px;
+}
+
+.structured-empty {
+  margin: 0;
+  border: 1px dashed #d5e0dd;
+  border-radius: 8px;
+  padding: 14px;
+  color: #84958f;
+  font-size: 10px;
+  text-align: center;
+}
+
+.structured-add {
+  justify-self: start;
+}
+
+.role-editor-actions {
+  position: sticky;
+  bottom: -18px;
+  z-index: 2;
+  border-top: 1px solid var(--line);
+  padding-top: 13px;
+  background: #fff;
+}
+
+.role-editor-actions > span {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.role-policy-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.role-policy-grid label {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.role-policy-grid textarea {
+  min-height: 180px;
+  font-size: 10px;
+}
+
+.role-policy-grid small {
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.role-policy-note {
+  margin: 0;
+  border-left: 3px solid #78b7aa;
+  padding: 8px 11px;
+  color: #60736d;
+  background: #f3f8f7;
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.role-review-decisions {
+  display: grid;
+  margin: 0;
+  border: 0;
+  padding: 0;
+  gap: 8px;
+}
+
+.role-review-decisions legend {
+  margin-bottom: 8px;
+  color: #31433f;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.role-review-decisions > label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 11px;
+  cursor: pointer;
+}
+
+.role-review-decisions > label.selected {
+  border-color: #72b5a7;
+  background: #f0f9f6;
+}
+
+.role-review-decisions > label.selected.danger {
+  border-color: #e4aab1;
+  background: #fff5f6;
+}
+
+.role-review-decisions input {
+  width: auto;
+  min-height: auto;
+}
+
+.role-review-decisions span {
+  display: grid;
+  gap: 3px;
+}
+
+.role-review-decisions strong {
+  font-size: 11px;
+}
+
+.role-review-decisions small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+@media (max-width: 1180px) {
+  .role-blueprint-layout {
+    grid-template-columns: minmax(230px, 0.62fr) minmax(480px, 1.5fr);
+  }
+
+  .role-blueprint-hero {
+    grid-template-columns: 48px minmax(0, 1fr);
+  }
+
+  .role-blueprint-hero-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .role-value-grid,
+  .role-version-config > div,
+  .role-version-diff-values,
+  .role-policy-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .role-version-config section:first-child {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 900px) {
+  .role-blueprint-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .role-blueprint-index {
+    position: static;
+  }
+
+  .role-blueprint-list {
+    max-height: 320px;
+  }
+}
+
+@media (max-width: 640px) {
+  .role-blueprint-hero,
+  .role-definition-grid,
+  .role-value-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .role-blueprint-hero-actions,
+  .role-version-card > header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .role-blueprint-hero-actions .button {
+    width: 100%;
+  }
+
+  .role-definition-collection:last-child {
+    grid-column: auto;
+  }
+
+  .role-version-statuses {
+    justify-content: flex-start;
+  }
+
+  .role-editor-section > header {
+    display: grid;
+  }
+
+  .role-editor-section > header p {
+    text-align: left;
+  }
+
+  .role-editor-actions {
+    position: static;
+    flex-wrap: wrap;
+  }
+
+  .role-version-diff-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .role-version-diff-toolbar label {
+    min-width: 0;
+  }
+
+  .role-editor-actions > span {
+    width: 100%;
+  }
+}
+.knowledge-governance-review {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-soft);
+}
+
+.knowledge-governance-review > div:first-child {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.knowledge-governance-review small {
+  color: var(--text-muted);
 }

@@ -1,6 +1,8 @@
 import {
+  AGENT_RUN_STREAM_MAX_CURSOR,
   answerFeedbackSchema,
   agentRunResponseSchema,
+  agentRunStreamPageSchema,
   conversationListResponseSchema,
   conversationSchema,
   createConversationRequestSchema,
@@ -13,6 +15,7 @@ import {
   type AnswerFeedback,
   type Conversation,
   type AgentRunResponse,
+  type AgentRunStreamPage,
   type CreateConversationRequest,
   type CreateMessageRequest,
   type CurrentAnswerFeedbackResponse,
@@ -52,6 +55,28 @@ export async function retryAgentRun(
   signal?: AbortSignal,
 ): Promise<AgentRunResponse> {
   return runAction(conversationId, runId, 'retry', signal);
+}
+
+export async function listAgentRunStreamEvents(
+  conversationId: string,
+  runId: string,
+  cursor: number,
+  signal?: AbortSignal,
+  apiBaseUrl?: string,
+): Promise<AgentRunStreamPage> {
+  const validatedConversationId = resourceIdSchema.parse(conversationId);
+  const validatedRunId = resourceIdSchema.parse(runId);
+  if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > AGENT_RUN_STREAM_MAX_CURSOR) {
+    throw new Error('Agent Run stream cursor is invalid.');
+  }
+  return apiRequest(
+    `/api/v1/conversations/${encodeURIComponent(validatedConversationId)}/runs/${encodeURIComponent(validatedRunId)}/events?cursor=${cursor}&limit=128`,
+    {
+      schema: agentRunStreamPageSchema,
+      ...(signal ? { signal } : {}),
+      ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    },
+  );
 }
 
 async function runAction(
@@ -105,15 +130,17 @@ export async function listMessages(
 }
 
 export async function getKnowledgeCitationOriginal(
+  messageId: string,
   documentVersionId: string,
   chunkId: string,
   signal?: AbortSignal,
   apiBaseUrl?: string,
 ): Promise<KnowledgeCitationDetail> {
+  const validatedMessageId = resourceIdSchema.parse(messageId);
   const validatedVersionId = resourceIdSchema.parse(documentVersionId);
   const validatedChunkId = resourceIdSchema.parse(chunkId);
   return apiRequest(
-    `/api/v1/knowledge-citations/${encodeURIComponent(validatedVersionId)}/chunks/${encodeURIComponent(validatedChunkId)}`,
+    `/api/v1/knowledge-citations/${encodeURIComponent(validatedVersionId)}/chunks/${encodeURIComponent(validatedChunkId)}?messageId=${encodeURIComponent(validatedMessageId)}`,
     {
       schema: knowledgeCitationDetailSchema,
       ...(signal ? { signal } : {}),

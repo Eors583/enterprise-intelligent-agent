@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
+from time import monotonic
 from typing import Any
 
 import httpx
@@ -12,6 +14,7 @@ from enterprise_ai_runtime.adapters.knowledge_http import (
     non_negative_int,
     raise_for_provider_status,
 )
+from enterprise_ai_runtime.adapters.provider_readiness import ProviderReadinessEvidence
 from enterprise_ai_runtime.domain.errors import (
     ProviderResponseError,
     ProviderTimeoutError,
@@ -36,14 +39,22 @@ class OpenAIEmbeddingProvider:
         dimensions: int,
         timeout_seconds: float,
         client: httpx.AsyncClient | None = None,
+        readiness_success_ttl_seconds: float = 300.0,
+        readiness_failure_ttl_seconds: float = 30.0,
+        readiness_clock: Callable[[], float] = monotonic,
     ) -> None:
         self._endpoint = f"{base_url.rstrip('/')}/embeddings"
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
         self._timeout_seconds = timeout_seconds
-        self._client = client if client is not None else httpx.AsyncClient()
+        self._client = client if client is not None else httpx.AsyncClient(trust_env=False)
         self._closed = False
+        self._readiness = ProviderReadinessEvidence(
+            success_ttl_seconds=readiness_success_ttl_seconds,
+            failure_ttl_seconds=readiness_failure_ttl_seconds,
+            clock=readiness_clock,
+        )
 
     @property
     def model(self) -> str:
@@ -54,6 +65,15 @@ class OpenAIEmbeddingProvider:
         return self._dimensions
 
     async def embed(self, inputs: list[str], *, request_id: str) -> EmbeddingResponse:
+        try:
+            response = await self._embed(inputs, request_id=request_id)
+        except Exception:
+            self._readiness.record_failure()
+            raise
+        self._readiness.record_success()
+        return response
+
+    async def _embed(self, inputs: list[str], *, request_id: str) -> EmbeddingResponse:
         payload = json.dumps(
             {
                 "model": self._model,
@@ -72,13 +92,14 @@ class OpenAIEmbeddingProvider:
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
                     "X-Request-ID": request_id,
+                    "X-Correlation-ID": request_id,
                 },
                 timeout=httpx.Timeout(self._timeout_seconds),
             )
-        except httpx.TimeoutException as error:
-            raise ProviderTimeoutError() from error
-        except httpx.TransportError as error:
-            raise ProviderUnavailableError() from error
+        except httpx.TimeoutException:
+            raise ProviderTimeoutError() from None
+        except httpx.TransportError:
+            raise ProviderUnavailableError() from None
 
         raise_for_provider_status(response.status_code)
         try:
@@ -130,11 +151,19 @@ class OpenAIEmbeddingProvider:
             raise ProviderResponseError() from error
 
     async def is_ready(self) -> bool:
-        return not self._closed
+        if self._closed:
+            return False
+        return await self._readiness.resolve(
+            lambda: self.embed(
+                ["enterprise knowledge embedding readiness probe"],
+                request_id="knowledge-embedding-readiness",
+            )
+        )
 
     async def aclose(self) -> None:
         if not self._closed:
             self._closed = True
+            self._readiness.record_failure()
             await self._client.aclose()
 
 

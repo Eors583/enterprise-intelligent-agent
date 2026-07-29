@@ -9,7 +9,7 @@ import {
   latestKnowledgeVersion,
 } from './knowledge-ingestion-outcome';
 
-export type KnowledgeDocumentSourceFilter = 'ALL' | 'FILE' | 'TEXT' | 'MARKDOWN';
+export type KnowledgeDocumentSourceFilter = 'ALL' | 'FILE' | 'WEB' | 'TEXT' | 'MARKDOWN';
 export type KnowledgeDocumentStatusFilter =
   'ALL' | 'DRAFT' | 'PROCESSING' | 'READY' | 'FAILED' | 'ARCHIVED';
 

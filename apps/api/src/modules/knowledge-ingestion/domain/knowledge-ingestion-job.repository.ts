@@ -20,6 +20,11 @@ export abstract class KnowledgeIngestionJobRepository {
     readonly claimTtlMs: number;
   }): Promise<boolean>;
 
+  abstract ownsLease(input: {
+    readonly jobId: string;
+    readonly workerId: string;
+  }): Promise<boolean>;
+
   abstract releaseForRetry(input: {
     readonly jobId: string;
     readonly workerId: string;

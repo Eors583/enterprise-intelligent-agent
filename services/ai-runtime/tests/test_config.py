@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
 from enterprise_ai_runtime.adapters.noop_runtime import NoopRuntime
+from enterprise_ai_runtime.adapters.postgres_run_store import PostgresRunStore
 from enterprise_ai_runtime.adapters.provider_runtime import ProviderRuntime
 from enterprise_ai_runtime.config import (
     EmbeddingDriver,
+    ModelRouteCatalogEntry,
     RerankDriver,
     RuntimeDriver,
     RuntimeEnvironment,
@@ -59,6 +62,8 @@ def test_knowledge_providers_are_configured_independently_from_run_driver() -> N
         ("development", "not-a-url", "absolute HTTP"),
         ("development", "https://user:password@provider.example/v1", "credentials"),
         ("production", "http://provider.example/v1", "HTTPS"),
+        ("production", "https://provider.example/v1?tenant=secret", "query or fragment"),
+        ("production", "https://provider.example/v1#metadata", "query or fragment"),
     ],
 )
 def test_embedding_provider_rejects_unsafe_urls(
@@ -70,6 +75,15 @@ def test_embedding_provider_rejects_unsafe_urls(
         "AI_RUNTIME_ENVIRONMENT": environment,
         "AI_RUNTIME_DRIVER": "openai_compatible" if environment == "production" else "noop",
         "AI_RUNTIME_STORE_DRIVER": "postgres" if environment == "production" else "memory",
+        **(
+            {
+                "AI_RUNTIME_POSTGRES_DSN": (
+                    "postgresql://runtime:secret@db.example/runtime?sslmode=require"
+                )
+            }
+            if environment == "production"
+            else {}
+        ),
         "AI_RUNTIME_OPENAI_BASE_URL": "https://chat.example/v1",
         "AI_RUNTIME_OPENAI_API_KEY": "chat-secret",
         "AI_RUNTIME_OPENAI_MODEL": "chat-model",
@@ -150,6 +164,59 @@ def test_api_key_is_excluded_from_settings_repr() -> None:
     assert "top-secret-key" not in repr(settings)
 
 
+def test_model_route_catalog_is_strict_server_side_allowlist() -> None:
+    settings = RuntimeSettings.from_env(
+        {
+            "AI_RUNTIME_DRIVER": "openai_compatible",
+            "AI_RUNTIME_OPENAI_BASE_URL": "https://provider.example/v1",
+            "AI_RUNTIME_OPENAI_API_KEY": "top-secret-key",
+            "AI_RUNTIME_OPENAI_MODEL": "legacy-model",
+            "AI_RUNTIME_REQUIRE_TRUSTED_MODEL_ROUTE": "true",
+            "AI_RUNTIME_MODEL_ROUTE_CATALOG": (
+                '[{"route_key":"GENERAL.PRIMARY",'
+                '"catalog_version_id":"00000000-0000-7000-8000-000000000101",'
+                '"provider":"OPENAI_COMPATIBLE","model":"model-a",'
+                '"credential_reference":"vault://ai/general"}]'
+            ),
+        }
+    )
+    assert settings.require_trusted_model_route
+    assert settings.model_route_catalog[0].model == "model-a"
+    assert "top-secret-key" not in repr(settings)
+
+
+@pytest.mark.parametrize(
+    "catalog",
+    [
+        (
+            '[{"route_key":"GENERAL.PRIMARY",'
+            '"catalog_version_id":"00000000-0000-7000-8000-000000000101",'
+            '"provider":"OPENAI_COMPATIBLE","model":"model-a",'
+            '"credential_reference":"vault://ai/general",'
+            '"endpoint":"https://attacker.invalid/v1"}]'
+        ),
+        (
+            '[{"route_key":"GENERAL.PRIMARY",'
+            '"catalog_version_id":"00000000-0000-7000-8000-000000000101",'
+            '"provider":"OPENAI_COMPATIBLE","model":"model-a",'
+            '"credential_reference":"secret=plaintext"}]'
+        ),
+    ],
+)
+def test_model_route_catalog_rejects_endpoint_and_plaintext_secret(catalog: str) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="MODEL_ROUTE_CATALOG|credential"):
+        RuntimeSettings.from_env(
+            {
+                "AI_RUNTIME_DRIVER": "openai_compatible",
+                "AI_RUNTIME_OPENAI_BASE_URL": "https://provider.example/v1",
+                "AI_RUNTIME_OPENAI_API_KEY": "top-secret-key",
+                "AI_RUNTIME_OPENAI_MODEL": "legacy-model",
+                "AI_RUNTIME_REQUIRE_TRUSTED_MODEL_ROUTE": "true",
+                "AI_RUNTIME_MODEL_ROUTE_CATALOG": catalog,
+            }
+        )
+
+
 def test_manus_driver_requires_key_and_uses_safe_defaults() -> None:
     with pytest.raises(RuntimeConfigurationError, match="MANUS_API_KEY"):
         RuntimeSettings.from_env({"AI_RUNTIME_DRIVER": "manus"})
@@ -186,6 +253,50 @@ def test_manus_driver_accepts_an_explicit_http_proxy() -> None:
     runtime = build_runtime(settings)
     assert isinstance(runtime, ProviderRuntime)
     asyncio.run(runtime.aclose())
+
+
+def _production_manus_environment(proxy_url: str) -> dict[str, str]:
+    return {
+        "AI_RUNTIME_ENVIRONMENT": "production",
+        "AI_RUNTIME_DRIVER": "manus",
+        "AI_RUNTIME_STORE_DRIVER": "postgres",
+        "AI_RUNTIME_POSTGRES_DSN": (
+            "postgresql://runtime:secret@db.example/runtime?sslmode=require"
+        ),
+        "AI_RUNTIME_SERVICE_TOKEN": "runtime-service-token-at-least-32-characters",
+        "AI_RUNTIME_MODEL_ROUTE_CATALOG": (
+            '[{"route_key":"GENERAL.PRIMARY",'
+            '"catalog_version_id":"00000000-0000-7000-8000-000000000101",'
+            '"provider":"MANUS","model":"manus-1.6-lite",'
+            '"credential_reference":"vault://ai/manus"}]'
+        ),
+        "MANUS_API_KEY": "dummy-manus-key",
+        "MANUS_PROXY_URL": proxy_url,
+    }
+
+
+def test_manus_production_accepts_an_explicit_https_proxy() -> None:
+    settings = RuntimeSettings.from_env(_production_manus_environment("https://proxy.example"))
+    assert settings.manus_proxy_url == "https://proxy.example"
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "http://proxy.example",
+        "https://user:password@proxy.example",
+        "https://proxy.example?tenant=secret",
+        "https://proxy.example#metadata",
+        "https://127.0.0.1:8443",
+        "https://10.0.0.1:8443",
+        "https://169.254.169.254:8443",
+        "https://[::1]:8443",
+        "https://[::ffff:192.0.2.10]:8443",
+    ],
+)
+def test_manus_production_rejects_unsafe_explicit_proxy(proxy_url: str) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="MANUS_PROXY_URL"):
+        RuntimeSettings.from_env(_production_manus_environment(proxy_url))
 
 
 @pytest.mark.parametrize("proxy_url", ["127.0.0.1:10837", "socks5://127.0.0.1:10837"])
@@ -250,6 +361,7 @@ def test_development_dotenv_loads_without_overriding_injected_values(tmp_path: P
         "AI_RUNTIME_DRIVER=manus\n"
         "MANUS_API_KEY=dummy-file-key\n"
         "MANUS_AGENT_PROFILE=manus-1.6-max\n"
+        "AI_RUNTIME_OTEL_SERVICE_NAME=enterprise-ai-runtime-test\n"
         "DATABASE_URL=must-not-enter-ai-runtime\n",
         encoding="utf-8",
     )
@@ -259,6 +371,7 @@ def test_development_dotenv_loads_without_overriding_injected_values(tmp_path: P
     assert environ["AI_RUNTIME_DRIVER"] == "manus"
     assert environ["MANUS_API_KEY"] == "dummy-process-key"
     assert environ["MANUS_AGENT_PROFILE"] == "manus-1.6-max"
+    assert environ["AI_RUNTIME_OTEL_SERVICE_NAME"] == "enterprise-ai-runtime-test"
     assert "DATABASE_URL" not in environ
     settings = RuntimeSettings.from_env(environ)
     assert "dummy-file-key" not in repr(settings)
@@ -287,6 +400,9 @@ def test_production_openai_driver_requires_https_and_no_url_credentials() -> Non
         "AI_RUNTIME_ENVIRONMENT": "production",
         "AI_RUNTIME_DRIVER": "openai_compatible",
         "AI_RUNTIME_STORE_DRIVER": "postgres",
+        "AI_RUNTIME_POSTGRES_DSN": (
+            "postgresql://runtime:secret@db.example/runtime?sslmode=require"
+        ),
         "AI_RUNTIME_OPENAI_API_KEY": "secret",
         "AI_RUNTIME_OPENAI_MODEL": "model-a",
     }
@@ -298,6 +414,72 @@ def test_production_openai_driver_requires_https_and_no_url_credentials() -> Non
         RuntimeSettings.from_env(
             {**base, "AI_RUNTIME_OPENAI_BASE_URL": "https://user:pass@provider.example/v1"}
         )
+    for unsafe_url in (
+        "https://provider.example/v1?tenant=secret",
+        "https://provider.example/v1#metadata",
+    ):
+        with pytest.raises(RuntimeConfigurationError, match="query or fragment"):
+            RuntimeSettings.from_env({**base, "AI_RUNTIME_OPENAI_BASE_URL": unsafe_url})
+
+
+@pytest.mark.parametrize(
+    "unsafe_url",
+    [
+        "https://127.0.0.1/v1",
+        "https://127.1/v1",
+        "https://2130706433/v1",
+        "https://0x7f000001/v1",
+        "https://10.0.0.1/v1",
+        "https://169.254.169.254/v1",
+        "https://[::1]/v1",
+        "https://[::ffff:192.0.2.10]/v1",
+    ],
+)
+@pytest.mark.parametrize(
+    ("setting_name", "expected_name"),
+    [
+        ("AI_RUNTIME_OPENAI_BASE_URL", "AI_RUNTIME_OPENAI_BASE_URL"),
+        ("AI_RUNTIME_EMBEDDING_BASE_URL", "AI_RUNTIME_EMBEDDING_BASE_URL"),
+        ("AI_RUNTIME_RERANK_BASE_URL", "AI_RUNTIME_RERANK_BASE_URL"),
+    ],
+)
+def test_production_provider_urls_reject_non_public_literal_ips(
+    unsafe_url: str,
+    setting_name: str,
+    expected_name: str,
+) -> None:
+    values = {
+        "AI_RUNTIME_ENVIRONMENT": "production",
+        "AI_RUNTIME_DRIVER": "openai_compatible",
+        "AI_RUNTIME_STORE_DRIVER": "postgres",
+        "AI_RUNTIME_POSTGRES_DSN": (
+            "postgresql://runtime:secret@db.example/runtime?sslmode=require"
+        ),
+        "AI_RUNTIME_SERVICE_TOKEN": "runtime-service-token-at-least-32-characters",
+        "AI_RUNTIME_OPENAI_BASE_URL": "https://chat.example/v1",
+        "AI_RUNTIME_OPENAI_API_KEY": "chat-secret",
+        "AI_RUNTIME_OPENAI_MODEL": "chat-model",
+        "AI_RUNTIME_EMBEDDING_DRIVER": "openai_compatible",
+        "AI_RUNTIME_EMBEDDING_BASE_URL": "https://embedding.example/v1",
+        "AI_RUNTIME_EMBEDDING_API_KEY": "embedding-secret",
+        "AI_RUNTIME_EMBEDDING_MODEL": "embedding-model",
+        "AI_RUNTIME_RERANK_DRIVER": "cohere_compatible",
+        "AI_RUNTIME_RERANK_BASE_URL": "https://rerank.example/v2",
+        "AI_RUNTIME_RERANK_API_KEY": "rerank-secret",
+        "AI_RUNTIME_RERANK_MODEL": "rerank-model",
+        "AI_RUNTIME_MODEL_ROUTE_CATALOG": (
+            '[{"route_key":"GENERAL.PRIMARY",'
+            '"catalog_version_id":"00000000-0000-7000-8000-000000000101",'
+            '"provider":"OPENAI_COMPATIBLE","model":"model-a",'
+            '"credential_reference":"vault://ai/general"}]'
+        ),
+    }
+    values[setting_name] = unsafe_url
+    with pytest.raises(
+        RuntimeConfigurationError,
+        match=f"{expected_name}.*literal IP",
+    ):
+        RuntimeSettings.from_env(values)
 
 
 def test_memory_store_is_forbidden_in_production() -> None:
@@ -312,14 +494,63 @@ def test_memory_store_is_forbidden_in_production() -> None:
         )
 
 
-def test_unimplemented_postgres_store_fails_closed() -> None:
+def test_postgres_store_requires_a_dsn() -> None:
+    with pytest.raises(RuntimeConfigurationError, match="AI_RUNTIME_POSTGRES_DSN"):
+        RuntimeSettings(
+            environment=RuntimeEnvironment.DEVELOPMENT,
+            driver=RuntimeDriver.NOOP,
+            store_driver=StoreDriver.POSTGRES,
+        )
+
+
+def test_postgres_store_is_constructed_without_leaking_its_dsn() -> None:
     settings = RuntimeSettings(
         environment=RuntimeEnvironment.DEVELOPMENT,
         driver=RuntimeDriver.NOOP,
         store_driver=StoreDriver.POSTGRES,
+        postgres_dsn="postgresql://runtime:secret@db.example/runtime",
+        postgres_pool_min_size=2,
+        postgres_pool_max_size=8,
     )
-    with pytest.raises(RuntimeConfigurationError, match="not implemented"):
-        build_store(settings)
+    assert "secret" not in repr(settings)
+    store = build_store(settings)
+    assert isinstance(store, PostgresRunStore)
+
+
+@pytest.mark.parametrize(
+    "dsn",
+    [
+        "postgresql://runtime:secret@db.example/runtime",
+        "postgresql://runtime:secret@db.example/runtime?sslmode=prefer",
+        "postgresql://runtime:secret@db.example/runtime?sslmode=disable",
+        ("postgresql://runtime:secret@db.example/runtime?sslmode=require&sslmode=disable"),
+        "postgresql://runtime:secret@db.example/runtime?sslmode=require&ssl=false",
+    ],
+)
+def test_production_postgres_store_requires_tls(dsn: str) -> None:
+    with pytest.raises(RuntimeConfigurationError, match="must require TLS"):
+        RuntimeSettings(
+            environment=RuntimeEnvironment.PRODUCTION,
+            driver=RuntimeDriver.OPENAI_COMPATIBLE,
+            store_driver=StoreDriver.POSTGRES,
+            postgres_dsn=dsn,
+            openai_base_url="https://provider.example/v1",
+            openai_api_key="secret",
+            openai_model="model-a",
+        )
+
+
+def test_production_requires_a_long_service_token() -> None:
+    with pytest.raises(RuntimeConfigurationError, match="AI_RUNTIME_SERVICE_TOKEN"):
+        RuntimeSettings(
+            environment=RuntimeEnvironment.PRODUCTION,
+            driver=RuntimeDriver.OPENAI_COMPATIBLE,
+            store_driver=StoreDriver.POSTGRES,
+            postgres_dsn="postgresql://runtime:secret@db.example/runtime?sslmode=require",
+            openai_base_url="https://provider.example/v1",
+            openai_api_key="secret",
+            openai_model="model-a",
+        )
 
 
 class DurableStoreStub:
@@ -331,9 +562,21 @@ def test_injected_noop_runtime_is_also_forbidden_in_production() -> None:
         environment=RuntimeEnvironment.PRODUCTION,
         driver=RuntimeDriver.OPENAI_COMPATIBLE,
         store_driver=StoreDriver.POSTGRES,
+        postgres_dsn="postgresql://runtime:secret@db.example/runtime?sslmode=require",
+        service_token="runtime-service-token-at-least-32-characters",
         openai_base_url="https://provider.example/v1",
         openai_api_key="top-secret-key",
         openai_model="model-a",
+        require_trusted_model_route=True,
+        model_route_catalog=(
+            ModelRouteCatalogEntry(
+                route_key="GENERAL.PRIMARY",
+                catalog_version_id=UUID("00000000-0000-7000-8000-000000000101"),
+                provider="OPENAI_COMPATIBLE",
+                model="model-a",
+                credential_reference="vault://ai/general",
+            ),
+        ),
     )
     with pytest.raises(RuntimeConfigurationError, match="NoopRuntime"):
         create_app(

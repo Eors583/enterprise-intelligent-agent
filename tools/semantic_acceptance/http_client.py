@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import ipaddress
+import json
 import re
 import ssl
 import urllib.error
@@ -25,7 +25,6 @@ class AcceptanceHttpError(RuntimeError):
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
         del req, fp, code, msg, headers, newurl
-        return None
 
 
 class JsonHttpClient:

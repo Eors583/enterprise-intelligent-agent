@@ -4,6 +4,7 @@ import type { Prisma } from '@prisma/client';
 import { PrismaService } from '../../../../database/prisma.service.js';
 import type { MemberAgent } from '../../domain/agent.models.js';
 import { AgentRepository } from '../../domain/agent.repository.js';
+import { hasRoleAgentAssignmentMarker } from '../../domain/role-agent-assignment.policy.js';
 
 @Injectable()
 export class PrismaAgentRepository extends AgentRepository {
@@ -11,11 +12,29 @@ export class PrismaAgentRepository extends AgentRepository {
     super();
   }
 
-  listMemberAgents(tenantId: string): Promise<readonly MemberAgent[]> {
+  listMemberAgents(tenantId: string, principalUserId: string): Promise<readonly MemberAgent[]> {
     return this.prisma.withTenant(tenantId, async (transaction) => {
+      const now = new Date();
       const agents = await transaction.agentInstance.findMany({
         where: { tenantId, ownerUserId: { not: null } },
-        include: { version: { select: { status: true } } },
+        include: {
+          version: { select: { status: true } },
+          _count: { select: { roleAssignments: true } },
+          roleAssignments: {
+            where: {
+              tenantId,
+              userId: principalUserId,
+              status: 'ACTIVE',
+              effectiveFrom: { lte: now },
+              AND: [
+                { OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }] },
+                { employment: { is: { userId: principalUserId, status: 'ACTIVE' } } },
+              ],
+            },
+            select: { id: true },
+            take: 1,
+          },
+        },
         orderBy: { name: 'asc' },
       });
 
@@ -30,6 +49,9 @@ export class PrismaAgentRepository extends AgentRepository {
           status: agent.status.toLowerCase() as MemberAgent['status'],
           versionStatus: agent.version.status.toLowerCase() as MemberAgent['versionStatus'],
           visibility: readVisibility(agent.settings),
+          assignedToPrincipal: agent.roleAssignments.length > 0,
+          requiresActiveAssignment:
+            hasRoleAgentAssignmentMarker(agent.settings) || agent._count.roleAssignments > 0,
           ...(agent.summary === null ? {} : { summary: agent.summary }),
         });
       }

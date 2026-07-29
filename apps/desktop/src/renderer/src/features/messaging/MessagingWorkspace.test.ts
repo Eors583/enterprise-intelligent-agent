@@ -5,6 +5,9 @@ import { describe, expect, it } from 'vitest';
 import { ApiClientError } from '../../shared/api/client';
 import {
   AgentRunFailureNotice,
+  AgentRunStreamingBubble,
+  agentRunStreamPhaseLabel,
+  agentRunWaitingMessage,
   answerFeedbackReasonLabel,
   agentRunFailureMessage,
   citationDisplayMetadata,
@@ -54,6 +57,37 @@ describe('conversationTitle', () => {
   });
 });
 
+describe('Agent Run streaming labels', () => {
+  it('distinguishes live, replaying, offline recovery, and honest terminal-only output', () => {
+    expect(agentRunStreamPhaseLabel('live')).toBe('正在实时生成');
+    expect(agentRunStreamPhaseLabel('replaying')).toBe('正在恢复实时事件');
+    expect(agentRunStreamPhaseLabel('offline')).toContain('正在续传');
+    expect(agentRunStreamPhaseLabel('terminal_only')).toBe('供应商仅返回终态');
+  });
+
+  it('shows an honest wait state before a terminal-only provider completes', () => {
+    expect(agentRunWaitingMessage({ streamMode: 'terminal_only' })).toContain('等待供应商终态');
+    expect(agentRunWaitingMessage({ streamMode: 'terminal_only' })).toContain('不提供增量输出');
+    expect(agentRunWaitingMessage({ streamMode: 'live' })).not.toContain('供应商终态');
+    expect(agentRunWaitingMessage({ streamMode: null })).not.toContain('供应商终态');
+  });
+
+  it('renders partial content with an explicit reconnect state instead of a fake final message', () => {
+    const html = renderToStaticMarkup(
+      createElement(AgentRunStreamingBubble, {
+        agentName: 'Finance Agent',
+        content: 'Partial trusted answer',
+        phase: 'offline',
+      }),
+    );
+
+    expect(html).toContain('data-stream-state="offline"');
+    expect(html).toContain('连接中断，正在续传');
+    expect(html).toContain('Partial trusted answer');
+    expect(html).not.toContain('供应商仅返回终态');
+  });
+});
+
 describe('citationDisplayMetadata', () => {
   it('展示知识来源的章节路径、文件类型和更新时间', () => {
     const metadata = citationDisplayMetadata({
@@ -68,7 +102,7 @@ describe('citationDisplayMetadata', () => {
       sourceType: 'FILE',
       excerpt: '摘要',
       updatedAt: '2026-07-20T02:00:00.000Z',
-      verificationStatus: 'VERIFIED',
+      verificationStatus: 'LINEAGE_VERIFIED',
     });
 
     expect(metadata.heading).toBe('人事制度 / 年假');
@@ -90,7 +124,7 @@ describe('citationDisplayMetadata', () => {
         sourceType: 'TEXT',
         excerpt: '摘要',
         updatedAt: '2026-07-20T02:00:00.000Z',
-        verificationStatus: 'VERIFIED',
+        verificationStatus: 'LINEAGE_VERIFIED',
       }).heading,
     ).toBe('未标注章节');
   });
@@ -123,6 +157,7 @@ describe('MessageCitationCard', () => {
   it('为可核验引用提供按需查看原文入口', () => {
     const html = renderToStaticMarkup(
       createElement(MessageCitationCard, {
+        messageId: '00000000-0000-7000-8000-000000000530',
         index: 0,
         citation: {
           documentId: '00000000-0000-7000-8000-000000000531',
@@ -136,18 +171,20 @@ describe('MessageCitationCard', () => {
           sourceType: 'MARKDOWN',
           excerpt: '年假申请摘要',
           updatedAt: '2026-07-20T02:00:00.000Z',
-          verificationStatus: 'VERIFIED',
+          verificationStatus: 'LINEAGE_VERIFIED',
         },
       }),
     );
 
     expect(html).toContain('查看原文');
+    expect(html).toContain('来源链路已核验（非内容真实性判定）');
     expect(html).not.toContain('无法查看原文');
   });
 
   it('旧引用明确提示不可完整核验并禁用原文入口', () => {
     const html = renderToStaticMarkup(
       createElement(MessageCitationCard, {
+        messageId: '00000000-0000-7000-8000-000000000540',
         index: 0,
         citation: {
           documentId: '00000000-0000-7000-8000-000000000541',
@@ -191,6 +228,7 @@ describe('Agent Run failure presentation', () => {
     outputMessageId: null,
     agentId: '00000000-0000-7000-8000-000000000803',
     agentName: '制度助手',
+    streamMode: null,
     status: 'FAILED' as const,
     errorCode: 'PROVIDER_INVALID_RESPONSE',
     errorMessage: 'Provider returned an invalid response.',

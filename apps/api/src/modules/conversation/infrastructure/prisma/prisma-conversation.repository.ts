@@ -1,6 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
+  trustedModelRouteSnapshotSchema,
   textMessageContentSchema,
   type Conversation,
   type ConversationAgentRun,
@@ -10,6 +11,8 @@ import {
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../../../../database/prisma.service.js';
+import { hasRoleAgentAssignmentMarker } from '../../../agent-control/domain/role-agent-assignment.policy.js';
+import { buildAgentRunPolicySnapshot } from '../../../agent-run/domain/agent-run-policy-snapshot.js';
 import {
   ActiveAgentRunConflictError,
   AgentUnavailableForRunError,
@@ -213,7 +216,14 @@ export class PrismaConversationRepository extends ConversationRepository {
         }),
         transaction.agentRun.findMany({
           where: { tenantId, conversationId },
-          include: { agent: { select: { name: true } } },
+          include: {
+            agent: { select: { name: true } },
+            streamEvents: {
+              select: { type: true },
+              orderBy: { sequence: 'desc' },
+              take: 1,
+            },
+          },
           orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
         }),
       ]);
@@ -396,6 +406,10 @@ function mapConversationRun(run: {
   readonly outputMessageId: string | null;
   readonly agentId: string;
   readonly agent: { readonly name: string };
+  readonly modelRouteSnapshot: Prisma.JsonValue | null;
+  readonly streamEvents: ReadonlyArray<{
+    readonly type: 'DELTA' | 'TERMINAL' | 'TERMINAL_ONLY' | 'TERMINAL_RECONCILED';
+  }>;
   readonly status:
     'QUEUED' | 'DISPATCHING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED';
   readonly errorCode: string | null;
@@ -410,14 +424,33 @@ function mapConversationRun(run: {
     outputMessageId: run.outputMessageId,
     agentId: run.agentId,
     agentName: run.agent.name,
+    streamMode: resolveConversationRunStreamMode(run.modelRouteSnapshot, run.streamEvents),
     status: run.status,
     errorCode: run.errorCode,
     errorMessage: run.errorMessage,
-    retryable: run.status === 'FAILED' || run.status === 'UNKNOWN' || run.status === 'CANCELLED',
+    retryable: run.status === 'FAILED' || run.status === 'CANCELLED',
     createdAt: run.createdAt.toISOString(),
     startedAt: run.startedAt?.toISOString() ?? null,
     finishedAt: run.finishedAt?.toISOString() ?? null,
   };
+}
+
+function resolveConversationRunStreamMode(
+  modelRouteSnapshot: Prisma.JsonValue | null,
+  streamEvents: ReadonlyArray<{
+    readonly type: 'DELTA' | 'TERMINAL' | 'TERMINAL_ONLY' | 'TERMINAL_RECONCILED';
+  }>,
+): ConversationAgentRun['streamMode'] {
+  const latestEvent = streamEvents[0]?.type;
+  if (latestEvent === 'DELTA' || latestEvent === 'TERMINAL') return 'live';
+  if (latestEvent === 'TERMINAL_ONLY') return 'terminal_only';
+
+  const route = trustedModelRouteSnapshotSchema.safeParse(modelRouteSnapshot);
+  if (!route.success) return null;
+  const firstCandidate = route.data.candidates.reduce((first, candidate) =>
+    candidate.ordinal < first.ordinal ? candidate : first,
+  );
+  return firstCandidate.provider === 'MANUS' ? 'terminal_only' : 'live';
 }
 
 function mapConversation(source: ConversationWithParticipants, viewerUserId: string): Conversation {
@@ -511,17 +544,50 @@ async function enqueueInitialAgentRun(
     turnLimit > 1 && conversation.relayAgentAId !== null && conversation.relayAgentBId !== null
       ? [conversation.relayAgentAId, conversation.relayAgentBId]
       : [agentId];
+  const now = new Date();
   const executableAgents = await transaction.agentInstance.findMany({
     where: { id: { in: requiredAgentIds }, tenantId: input.tenantId },
-    include: { version: true },
+    include: {
+      version: { include: { template: true } },
+      _count: { select: { roleAssignments: true } },
+      roleAssignments: {
+        where: {
+          tenantId: input.tenantId,
+          userId: input.senderUserId,
+          status: 'ACTIVE',
+          effectiveFrom: { lte: now },
+          AND: [
+            { OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }] },
+            { employment: { is: { userId: input.senderUserId, status: 'ACTIVE' } } },
+          ],
+        },
+        select: {
+          id: true,
+          roleTemplateId: true,
+          roleVersionId: true,
+        },
+        take: 1,
+      },
+    },
   });
   if (
     executableAgents.length !== new Set(requiredAgentIds).size ||
     executableAgents.some(
       (candidate) =>
         candidate.status !== 'ONLINE' ||
-        candidate.version.status !== 'PUBLISHED' ||
-        !isAgentVisibleToUser(candidate.settings, candidate.ownerUserId, input.senderUserId),
+        (candidate.version.status !== 'PUBLISHED' &&
+          !(
+            candidate.version.status === 'RETIRED' &&
+            candidate.roleAssignments.length > 0 &&
+            candidate._count.roleAssignments > 0
+          )) ||
+        !isAgentVisibleToUser(
+          candidate.settings,
+          candidate.ownerUserId,
+          input.senderUserId,
+          candidate.roleAssignments.length > 0,
+          candidate._count.roleAssignments > 0,
+        ),
     )
   ) {
     throw new AgentUnavailableForRunError();
@@ -543,14 +609,11 @@ async function enqueueInitialAgentRun(
       turnIndex: 1,
       turnLimit,
       idempotencyKey: `message:${messageId}:agent:${agent.id}`,
-      policySnapshot: {
-        agentVersionId: agent.versionId,
-        version: agent.version.version,
-        modelPolicy: agent.version.modelPolicy,
-        toolPolicy: agent.version.toolPolicy,
-        knowledgeScope: agent.version.knowledgeScope,
-        relay: turnLimit > 1,
-      },
+      policySnapshot: buildAgentRunPolicySnapshot({
+        agentVersion: agent.version,
+        roleAssignment: agent.roleAssignments[0] ?? null,
+        extra: { relay: turnLimit > 1 },
+      }),
     },
   });
   await transaction.outboxEvent.create({
@@ -581,11 +644,14 @@ async function enqueueInitialAgentRun(
   });
 }
 
-function isAgentVisibleToUser(
+export function isAgentVisibleToUser(
   settings: Prisma.JsonValue,
   ownerUserId: string | null,
   userId: string,
+  hasActiveAssignment = false,
+  hasAnyRoleAssignment = hasActiveAssignment,
 ): boolean {
+  if (hasRoleAgentAssignmentMarker(settings) || hasAnyRoleAssignment) return hasActiveAssignment;
   if (
     typeof settings === 'object' &&
     settings !== null &&

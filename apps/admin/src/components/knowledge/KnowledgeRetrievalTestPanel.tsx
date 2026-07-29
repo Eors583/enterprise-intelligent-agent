@@ -5,6 +5,14 @@ import { testKnowledgeRetrieval } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { EmptyState, FieldError, Notice, Spinner } from '@/components/ui';
 
+import {
+  hasStrongRelationshipRetrieval,
+  knowledgeRetrievalDiagnosticStageLabel,
+  knowledgeRetrievalDiagnosticStatusLabel,
+  relationshipEvidencePath,
+  relationshipPathEdgeLabel,
+} from './knowledge-graph-view';
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function score(value: number): string {
@@ -14,16 +22,36 @@ function score(value: number): string {
 export function KnowledgeRetrievalTestPanel({
   knowledgeBaseId,
   knowledgeBaseStatus,
+  documents,
 }: {
   knowledgeBaseId: string;
   knowledgeBaseStatus: KnowledgeBase['status'];
+  documents: KnowledgeBase['documents'];
 }): ReactNode {
   const [query, setQuery] = useState('');
   const [userId, setUserId] = useState('');
   const [limit, setLimit] = useState(8);
+  const [documentVersionId, setDocumentVersionId] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<KnowledgeRetrievalTestResponse | null>(null);
+  const candidateVersions = documents.flatMap((document) =>
+    document.versions
+      .filter(
+        (version) =>
+          version.status === 'READY' &&
+          version.publishedAt === null &&
+          version.chunkCount > 0 &&
+          version.governance.reviewStatus === 'APPROVED' &&
+          (version.sourceType !== 'FILE' && version.sourceType !== 'WEB'
+            ? true
+            : version.parseReviewStatus === 'APPROVED'),
+      )
+      .map((version) => ({
+        id: version.id,
+        label: `${document.title} · 候选 v${version.versionNumber}`,
+      })),
+  );
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
@@ -47,6 +75,7 @@ export function KnowledgeRetrievalTestPanel({
           query: normalizedQuery,
           limit,
           ...(normalizedUserId ? { userId: normalizedUserId } : {}),
+          ...(documentVersionId ? { documentVersionId } : {}),
         }),
       );
     } catch (caught) {
@@ -61,7 +90,7 @@ export function KnowledgeRetrievalTestPanel({
       <header className="card-header">
         <div>
           <h2>检索测试</h2>
-          <p>用真实权限和已发布版本验证智能体能否检索到正确切片。</p>
+          <p>用真实权限验证已发布版本，或精确预览一个已审核候选版本。</p>
         </div>
       </header>
       {knowledgeBaseStatus === 'DRAFT' ? (
@@ -104,7 +133,26 @@ export function KnowledgeRetrievalTestPanel({
               ))}
             </select>
           </label>
+          <label>
+            <span>检索版本</span>
+            <select
+              value={documentVersionId}
+              onChange={(event) => setDocumentVersionId(event.target.value)}
+            >
+              <option value="">当前已发布版本（正式口径）</option>
+              {candidateVersions.map((version) => (
+                <option value={version.id} key={version.id}>
+                  {version.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
+        {documentVersionId ? (
+          <Notice tone="info">
+            当前为管理员候选预览：仅检索所选版本的词法/向量索引；候选图谱在发布前不会进入可信关系扩展。
+          </Notice>
+        ) : null}
         <FieldError message={error} />
         <div className="editor-footer align-end">
           <button className="button primary" type="submit" disabled={submitting}>
@@ -141,12 +189,42 @@ export function KnowledgeRetrievalTestPanel({
             <span>
               向量覆盖 <strong>{Math.round(result.semanticCoverage * 100)}%</strong>
             </span>
+            <span>
+              关系候选 <strong>{result.relationshipCandidateCount ?? 0}</strong> / 扩展{' '}
+              <strong>{result.relationshipExpandedCount ?? 0}</strong>
+            </span>
           </div>
+          {result.diagnostics ? (
+            <div className="knowledge-retrieval-diagnostics" aria-label="检索阶段诊断">
+              {result.diagnostics.map((diagnostic) => (
+                <article
+                  key={diagnostic.stage}
+                  className={`status-${diagnostic.status.toLowerCase()}`}
+                >
+                  <header>
+                    <strong>{knowledgeRetrievalDiagnosticStageLabel(diagnostic.stage)}</strong>
+                    <span>{knowledgeRetrievalDiagnosticStatusLabel(diagnostic.status)}</span>
+                  </header>
+                  <p>{diagnostic.code}</p>
+                  <small>{diagnostic.candidateCount.toLocaleString()} 个候选</small>
+                </article>
+              ))}
+            </div>
+          ) : null}
           {result.degradedReason ? (
             <Notice tone="info">
               语义检索已安全降级（{result.degradedReason}）。当前结果不可标记为完整语义 RAG。
             </Notice>
           ) : null}
+          {!hasStrongRelationshipRetrieval(result) ? (
+            <Notice tone="info">
+              本次查询没有完成可验证的关系扩展。结果可能仍来自关键词或向量匹配，不能作为“强关系检索”验收通过。
+            </Notice>
+          ) : (
+            <Notice tone="success">
+              本次查询已执行关系扩展，命中结果包含可追溯到来源切片的一至两跳关系证据。
+            </Notice>
+          )}
           {result.noAnswer || result.items.length === 0 ? (
             <Notice tone="info">
               未找到达到阈值且当前用户有权访问的内容。智能体应返回“暂无可信答案”，不会拼接无依据回复。
@@ -177,8 +255,46 @@ export function KnowledgeRetrievalTestPanel({
                     <span>
                       Reranker {item.rerankerScore === null ? '—' : score(item.rerankerScore)}
                     </span>
+                    <span>
+                      关系{' '}
+                      {item.relationshipScore === undefined ? '—' : score(item.relationshipScore)}
+                    </span>
                     <code>{item.chunkId}</code>
                   </footer>
+                  {item.relationshipEvidence && item.relationshipEvidence.length > 0 ? (
+                    <details className="knowledge-result-relationship-evidence">
+                      <summary>关系扩展证据（{item.relationshipEvidence.length}）</summary>
+                      <div>
+                        {item.relationshipEvidence.map((evidence) => (
+                          <article
+                            key={`${evidence.relationId}-${evidence.sourceChunkId}-${evidence.direction}`}
+                          >
+                            <header>
+                              <strong>{relationshipEvidencePath(evidence)}</strong>
+                              <span>{evidence.hopDistance} 跳</span>
+                            </header>
+                            <ol
+                              className="knowledge-relationship-path"
+                              aria-label={`${evidence.hopDistance} 跳完整关系路径`}
+                            >
+                              {evidence.path.map((edge, edgeIndex) => (
+                                <li key={`${edge.relationId}-${edgeIndex}`}>
+                                  <span>第 {edgeIndex + 1} 跳</span>
+                                  <strong>{relationshipPathEdgeLabel(edge)}</strong>
+                                  <code>{edge.relationId}</code>
+                                </li>
+                              ))}
+                            </ol>
+                            <footer>
+                              <span>置信度 {score(evidence.confidence)}</span>
+                              <span>排序贡献 {score(evidence.contribution)}</span>
+                              <code>source:{evidence.sourceChunkId}</code>
+                            </footer>
+                          </article>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
                 </article>
               ))}
             </div>

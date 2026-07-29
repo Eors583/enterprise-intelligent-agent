@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
-from urllib.parse import urlsplit
+from socket import inet_aton
+from urllib.parse import SplitResult, parse_qs, urlsplit
+from uuid import UUID
 
 from dotenv import dotenv_values
 
@@ -44,10 +49,24 @@ class RerankDriver(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ModelRouteCatalogEntry:
+    route_key: str
+    catalog_version_id: UUID
+    provider: str
+    model: str
+    credential_reference: str
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeSettings:
     environment: RuntimeEnvironment
     driver: RuntimeDriver
     store_driver: StoreDriver = StoreDriver.MEMORY
+    postgres_dsn: str | None = field(default=None, repr=False)
+    postgres_pool_min_size: int = 1
+    postgres_pool_max_size: int = 10
+    postgres_command_timeout_seconds: float = 10.0
+    service_token: str | None = field(default=None, repr=False)
     openai_base_url: str | None = None
     openai_api_key: str | None = field(default=None, repr=False)
     openai_model: str | None = None
@@ -69,6 +88,9 @@ class RuntimeSettings:
     rerank_api_key: str | None = field(default=None, repr=False)
     rerank_model: str | None = None
     rerank_timeout_seconds: float = 30.0
+    model_route_catalog: tuple[ModelRouteCatalogEntry, ...] = ()
+    require_trusted_model_route: bool = False
+    evaluation_attestation_secret: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.environment == RuntimeEnvironment.PRODUCTION and self.driver == RuntimeDriver.NOOP:
@@ -83,11 +105,103 @@ class RuntimeSettings:
                 "AI_RUNTIME_STORE_DRIVER=memory is forbidden in the production environment"
             )
 
+        self._validate_store()
         if self.driver == RuntimeDriver.OPENAI_COMPATIBLE:
             self._validate_openai_compatible()
         elif self.driver == RuntimeDriver.MANUS:
             self._validate_manus()
         self._validate_knowledge_providers()
+        if self.environment == RuntimeEnvironment.PRODUCTION and (
+            self.service_token is None or len(self.service_token) < 32
+        ):
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_SERVICE_TOKEN must contain at least 32 characters in production"
+            )
+        self._validate_model_route_catalog()
+        if (
+            self.evaluation_attestation_secret is not None
+            and len(self.evaluation_attestation_secret) < 32
+        ):
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_EVALUATION_ATTESTATION_SECRET must contain at least 32 characters"
+            )
+
+    def _validate_model_route_catalog(self) -> None:
+        if (
+            self.environment == RuntimeEnvironment.PRODUCTION
+            and not self.require_trusted_model_route
+        ):
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_REQUIRE_TRUSTED_MODEL_ROUTE must be enabled in production"
+            )
+        if self.require_trusted_model_route and not self.model_route_catalog:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_MODEL_ROUTE_CATALOG must define at least one server-side route"
+            )
+        if self.model_route_catalog and self.driver == RuntimeDriver.NOOP:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_MODEL_ROUTE_CATALOG cannot use the noop runtime driver"
+            )
+        expected_provider = (
+            "OPENAI_COMPATIBLE"
+            if self.driver == RuntimeDriver.OPENAI_COMPATIBLE
+            else "MANUS"
+            if self.driver == RuntimeDriver.MANUS
+            else None
+        )
+        route_keys: set[str] = set()
+        catalog_ids: set[UUID] = set()
+        for entry in self.model_route_catalog:
+            if entry.route_key in route_keys or entry.catalog_version_id in catalog_ids:
+                raise RuntimeConfigurationError(
+                    "AI_RUNTIME_MODEL_ROUTE_CATALOG routes and catalog versions must be unique"
+                )
+            route_keys.add(entry.route_key)
+            catalog_ids.add(entry.catalog_version_id)
+            if entry.provider != expected_provider:
+                raise RuntimeConfigurationError(
+                    "AI_RUNTIME_MODEL_ROUTE_CATALOG provider must match AI_RUNTIME_DRIVER"
+                )
+            if self.driver == RuntimeDriver.MANUS and entry.model not in MANUS_AGENT_PROFILES:
+                raise RuntimeConfigurationError(
+                    "MANUS model routes must use an allowlisted Manus agent profile"
+                )
+
+    def _validate_store(self) -> None:
+        if self.store_driver != StoreDriver.POSTGRES:
+            return
+        if not self.postgres_dsn:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_POSTGRES_DSN is required when AI_RUNTIME_STORE_DRIVER=postgres"
+            )
+        parsed = urlsplit(self.postgres_dsn)
+        if parsed.scheme not in {"postgres", "postgresql"} or not parsed.netloc:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_POSTGRES_DSN must be an absolute PostgreSQL URL"
+            )
+        if self.environment == RuntimeEnvironment.PRODUCTION:
+            query = parse_qs(parsed.query, keep_blank_values=True)
+            ssl_modes = {value.lower() for value in query.get("sslmode", [])}
+            ssl_values = {value.lower() for value in query.get("ssl", [])}
+            safe_ssl_modes = {"require", "verify-ca", "verify-full"}
+            truthy_ssl_values = {"true", "1", "yes", "on"}
+            tls_required = (
+                bool(ssl_modes)
+                and ssl_modes.issubset(safe_ssl_modes)
+                and (not ssl_values or ssl_values.issubset(truthy_ssl_values))
+            ) or (not ssl_modes and bool(ssl_values) and ssl_values.issubset(truthy_ssl_values))
+            if not tls_required:
+                raise RuntimeConfigurationError(
+                    "AI_RUNTIME_POSTGRES_DSN must require TLS in production"
+                )
+        if not 1 <= self.postgres_pool_min_size <= self.postgres_pool_max_size <= 100:
+            raise RuntimeConfigurationError(
+                "AI Runtime PostgreSQL pool sizes must satisfy 1 <= min <= max <= 100"
+            )
+        if not 0.1 <= self.postgres_command_timeout_seconds <= 300:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_POSTGRES_COMMAND_TIMEOUT_SECONDS must be between 0.1 and 300"
+            )
 
     def _validate_openai_compatible(self) -> None:
         missing = [
@@ -104,18 +218,18 @@ class RuntimeSettings:
                 f"missing configuration for openai_compatible driver: {', '.join(missing)}"
             )
 
-        parsed = urlsplit(self.openai_base_url or "")
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise RuntimeConfigurationError(
-                "AI_RUNTIME_OPENAI_BASE_URL must be an absolute HTTP(S) URL"
-            )
-        if parsed.username or parsed.password:
+        parsed = _parse_provider_url(
+            "AI_RUNTIME_OPENAI_BASE_URL",
+            self.openai_base_url or "",
+        )
+        if parsed.username is not None or parsed.password is not None:
             raise RuntimeConfigurationError(
                 "AI_RUNTIME_OPENAI_BASE_URL must not contain credentials"
             )
-        if self.environment == RuntimeEnvironment.PRODUCTION and parsed.scheme != "https":
-            raise RuntimeConfigurationError(
-                "AI_RUNTIME_OPENAI_BASE_URL must use HTTPS in production"
+        if self.environment == RuntimeEnvironment.PRODUCTION:
+            _validate_production_provider_url(
+                "AI_RUNTIME_OPENAI_BASE_URL",
+                parsed,
             )
 
     def _validate_manus(self) -> None:
@@ -140,9 +254,9 @@ class RuntimeSettings:
                 "MANUS_AGENT_PROFILE must be manus-1.6, manus-1.6-lite, or manus-1.6-max"
             )
         if self.manus_proxy_url is not None:
-            proxy = urlsplit(self.manus_proxy_url)
-            if proxy.scheme not in {"http", "https"} or not proxy.hostname:
-                raise RuntimeConfigurationError("MANUS_PROXY_URL must be an absolute HTTP(S) URL")
+            proxy = _parse_provider_url("MANUS_PROXY_URL", self.manus_proxy_url)
+            if self.environment == RuntimeEnvironment.PRODUCTION:
+                _validate_production_provider_url("MANUS_PROXY_URL", proxy)
         if not 1.0 <= self.manus_poll_interval_seconds <= 60.0:
             raise RuntimeConfigurationError("MANUS_POLL_INTERVAL_SECONDS must be between 1 and 60")
         if not self.manus_poll_interval_seconds <= self.manus_max_wait_seconds <= 3_600.0:
@@ -206,15 +320,13 @@ class RuntimeSettings:
             )
 
     def _validate_provider_url(self, name: str, value: str) -> None:
-        parsed = urlsplit(value)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise RuntimeConfigurationError(f"{name} must be an absolute HTTP(S) URL")
-        if parsed.username or parsed.password:
+        parsed = _parse_provider_url(name, value)
+        if parsed.username is not None or parsed.password is not None:
             raise RuntimeConfigurationError(f"{name} must not contain credentials")
         if parsed.query or parsed.fragment:
             raise RuntimeConfigurationError(f"{name} must not contain a query or fragment")
-        if self.environment == RuntimeEnvironment.PRODUCTION and parsed.scheme != "https":
-            raise RuntimeConfigurationError(f"{name} must use HTTPS in production")
+        if self.environment == RuntimeEnvironment.PRODUCTION:
+            _validate_production_provider_url(name, parsed)
 
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> RuntimeSettings:
@@ -266,6 +378,23 @@ class RuntimeSettings:
             environment=environment,
             driver=driver,
             store_driver=store_driver,
+            postgres_dsn=_optional(values.get("AI_RUNTIME_POSTGRES_DSN")),
+            postgres_pool_min_size=_positive_int(
+                values.get("AI_RUNTIME_POSTGRES_POOL_MIN_SIZE"),
+                default=1,
+                name="AI_RUNTIME_POSTGRES_POOL_MIN_SIZE",
+            ),
+            postgres_pool_max_size=_positive_int(
+                values.get("AI_RUNTIME_POSTGRES_POOL_MAX_SIZE"),
+                default=10,
+                name="AI_RUNTIME_POSTGRES_POOL_MAX_SIZE",
+            ),
+            postgres_command_timeout_seconds=_positive_float(
+                values.get("AI_RUNTIME_POSTGRES_COMMAND_TIMEOUT_SECONDS"),
+                default=10.0,
+                name="AI_RUNTIME_POSTGRES_COMMAND_TIMEOUT_SECONDS",
+            ),
+            service_token=_optional(values.get("AI_RUNTIME_SERVICE_TOKEN")),
             openai_base_url=_optional(values.get("AI_RUNTIME_OPENAI_BASE_URL")),
             openai_api_key=_optional(values.get("AI_RUNTIME_OPENAI_API_KEY")),
             openai_model=_optional(values.get("AI_RUNTIME_OPENAI_MODEL")),
@@ -307,6 +436,14 @@ class RuntimeSettings:
                 values.get("AI_RUNTIME_RERANK_TIMEOUT_SECONDS"),
                 default=30.0,
                 name="AI_RUNTIME_RERANK_TIMEOUT_SECONDS",
+            ),
+            model_route_catalog=_model_route_catalog(values.get("AI_RUNTIME_MODEL_ROUTE_CATALOG")),
+            require_trusted_model_route=_truthy(
+                values.get("AI_RUNTIME_REQUIRE_TRUSTED_MODEL_ROUTE")
+            )
+            or environment == RuntimeEnvironment.PRODUCTION,
+            evaluation_attestation_secret=_optional(
+                values.get("AI_RUNTIME_EVALUATION_ATTESTATION_SECRET")
             ),
         )
 
@@ -353,6 +490,55 @@ def _optional(value: str | None) -> str | None:
     return stripped or None
 
 
+def _parse_provider_url(name: str, value: str) -> SplitResult:
+    try:
+        parsed = urlsplit(value)
+        hostname = parsed.hostname
+        # Accessing ``port`` detects malformed or out-of-range explicit ports.
+        _ = parsed.port
+    except ValueError:
+        raise RuntimeConfigurationError(f"{name} must be an absolute HTTP(S) URL") from None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not hostname:
+        raise RuntimeConfigurationError(f"{name} must be an absolute HTTP(S) URL")
+    return parsed
+
+
+def _validate_production_provider_url(name: str, parsed: SplitResult) -> None:
+    if parsed.scheme != "https":
+        raise RuntimeConfigurationError(f"{name} must use HTTPS in production")
+    if parsed.username is not None or parsed.password is not None:
+        raise RuntimeConfigurationError(f"{name} must not contain credentials in production")
+    if parsed.query or parsed.fragment:
+        raise RuntimeConfigurationError(
+            f"{name} must not contain a query or fragment in production"
+        )
+
+    hostname = parsed.hostname
+    if hostname is None:
+        raise RuntimeConfigurationError(f"{name} must be an absolute HTTP(S) URL")
+    try:
+        literal_address = ip_address(hostname)
+    except ValueError:
+        try:
+            # ``inet_aton`` also recognizes legacy shorthand, integer, octal,
+            # and hexadecimal IPv4 literals that resolvers may map to a private
+            # address even though ``ip_address`` intentionally rejects them.
+            literal_address = IPv4Address(inet_aton(hostname))
+        except OSError:
+            return
+    is_mapped = isinstance(literal_address, IPv6Address) and literal_address.ipv4_mapped is not None
+    if (
+        is_mapped
+        or literal_address.is_private
+        or literal_address.is_loopback
+        or literal_address.is_link_local
+    ):
+        raise RuntimeConfigurationError(
+            f"{name} must not use a private, loopback, link-local, "
+            "or IPv4-mapped literal IP in production"
+        )
+
+
 def _positive_float(value: str | None, *, default: float, name: str) -> float:
     if value is None or not value.strip():
         return default
@@ -379,6 +565,68 @@ def _positive_int(value: str | None, *, default: int, name: str) -> int:
 
 def _truthy(value: str | None) -> bool:
     return value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _model_route_catalog(value: str | None) -> tuple[ModelRouteCatalogEntry, ...]:
+    if value is None or not value.strip():
+        return ()
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise RuntimeConfigurationError(
+            "AI_RUNTIME_MODEL_ROUTE_CATALOG must be valid JSON"
+        ) from error
+    if not isinstance(parsed, list) or not 1 <= len(parsed) <= 100:
+        raise RuntimeConfigurationError(
+            "AI_RUNTIME_MODEL_ROUTE_CATALOG must contain between 1 and 100 routes"
+        )
+    allowed = {
+        "route_key",
+        "catalog_version_id",
+        "provider",
+        "model",
+        "credential_reference",
+    }
+    entries: list[ModelRouteCatalogEntry] = []
+    for item in parsed:
+        if not isinstance(item, dict) or set(item) != allowed:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_MODEL_ROUTE_CATALOG entries have an invalid shape"
+            )
+        route_key = item.get("route_key")
+        provider = item.get("provider")
+        model = item.get("model")
+        credential_reference = item.get("credential_reference")
+        if not isinstance(route_key, str) or not re.fullmatch(
+            r"[A-Z0-9][A-Z0-9._-]{0,119}", route_key
+        ):
+            raise RuntimeConfigurationError("model route_key is invalid")
+        if provider not in {"OPENAI_COMPATIBLE", "MANUS"}:
+            raise RuntimeConfigurationError("model route provider is invalid")
+        if not isinstance(model, str) or not 1 <= len(model) <= 256:
+            raise RuntimeConfigurationError("model route model is invalid")
+        if not isinstance(credential_reference, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,299}", credential_reference
+        ):
+            raise RuntimeConfigurationError("model route credential_reference is invalid")
+        if re.search(r"(?:secret|token|key)=", credential_reference, re.IGNORECASE):
+            raise RuntimeConfigurationError(
+                "model route credentials must be references, not plaintext values"
+            )
+        try:
+            catalog_version_id = UUID(str(item.get("catalog_version_id")))
+        except ValueError as error:
+            raise RuntimeConfigurationError("model route catalog_version_id is invalid") from error
+        entries.append(
+            ModelRouteCatalogEntry(
+                route_key=route_key,
+                catalog_version_id=catalog_version_id,
+                provider=provider,
+                model=model,
+                credential_reference=credential_reference,
+            )
+        )
+    return tuple(entries)
 
 
 def _repository_dotenv_path() -> Path | None:

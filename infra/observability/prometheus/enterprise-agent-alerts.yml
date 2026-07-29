@@ -1,0 +1,146 @@
+groups:
+  - name: enterprise-agent-core
+    interval: 30s
+    rules:
+      - alert: EnterpriseAgentMonitoringSnapshotStale
+        expr: enterprise_agent_monitoring_snapshot_age_seconds > 180
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Enterprise Agent monitoring snapshot is stale
+          runbook: docs/runbooks/生产可观测性与灾备验收.md#监控快照中断
+      - alert: EnterpriseAgentCoreProbeFailed
+        expr: enterprise_agent_core_probe_healthy != 1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Database, queue, RAG, or continuity core probe is not healthy
+          runbook: docs/runbooks/数据库备份恢复与核心告警.md
+      - alert: EnterpriseAgentOutboxUnknown
+        expr: enterprise_agent_outbox_events{state="unknown"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Outbox delivery state is unknown
+      - alert: EnterpriseAgentOutboxStale
+        expr: enterprise_agent_outbox_events{state="stale_pending"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Outbox has stale pending events
+      - alert: EnterpriseAgentRunUnknown
+        expr: enterprise_agent_agent_runs{state="unknown"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Agent Run completion state is unknown
+      - alert: EnterpriseAgentRunStale
+        expr: enterprise_agent_agent_runs{state=~"stale_queued|stale_active"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent Run queue or execution is stale
+      - alert: EnterpriseAgentProcessRuntimeStale
+        expr: enterprise_agent_process_runtime{signal=~"stale_instances|overdue_steps"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Process instance or process step exceeded its runtime objective
+      - alert: EnterpriseAgentProcessRuntimeSchemaMissing
+        expr: enterprise_agent_process_runtime{signal="schema_available"} != 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Process runtime schema is not available to the production probe
+      - alert: EnterpriseAgentProcessRuntimeFailure
+        expr: enterprise_agent_process_runtime{signal="failed_steps_24h"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Process runtime recorded failed, timed-out, or failed-compensation steps
+      - alert: EnterpriseAgentToolUnknown
+        expr: enterprise_agent_tool_gateway{signal="unknown"} > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Tool Gateway has an invocation with unknown external effect
+      - alert: EnterpriseAgentToolGatewaySchemaMissing
+        expr: enterprise_agent_tool_gateway{signal="schema_available"} != 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Tool Gateway schema is not available to the production probe
+      - alert: EnterpriseAgentToolStale
+        expr: enterprise_agent_tool_gateway{signal="stale_executing"} > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tool Gateway execution or compensation is stale
+      - alert: EnterpriseAgentToolFailure
+        expr: enterprise_agent_tool_gateway{signal="failed_24h"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Tool Gateway recorded a failed execution in the last 24 hours
+      - alert: EnterpriseAgentRagIngestionFailure
+        expr: enterprise_agent_rag{signal="ingestion_failures_24h"} > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: RAG ingestion failed in the last 24 hours
+      - alert: EnterpriseAgentRagEmbeddingGap
+        expr: enterprise_agent_rag{signal="missing_embeddings"} != 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Current knowledge chunks are missing required embeddings
+      - alert: EnterpriseAgentAiDependencyDegraded
+        expr: enterprise_agent_ai_dependency_status{status=~"degraded|unavailable"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: AI model, Embedding, Reranker, or run store is degraded
+      - alert: EnterpriseAgentRequiredAiDependencyDisabled
+        expr: enterprise_agent_ai_dependency_status{component=~"model|embedding|reranker",status="disabled"} == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: A production model, Embedding, or Reranker capability is disabled
+      - alert: EnterpriseAgentBackupNotFresh
+        expr: enterprise_agent_backup_fresh != 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Protected database backup is missing, invalid, or stale
+      - alert: EnterpriseAgentRestoreRehearsalNotVerified
+        expr: enterprise_agent_restore_rehearsal_verified != 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Isolated restore rehearsal is missing, invalid, or stale
+      - alert: EnterpriseAgentDisasterRecoveryObjectivesNotVerified
+        expr: enterprise_agent_disaster_recovery_objectives_verified != 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Isolated database rehearsal has no fresh RPO/RTO objectives-met report

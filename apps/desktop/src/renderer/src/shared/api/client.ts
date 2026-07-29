@@ -31,6 +31,10 @@ export function setExpectedDesktopSessionId(sessionId: string | null): void {
   expectedDesktopSessionId = sessionId;
 }
 
+export function getExpectedDesktopSessionId(): string | null {
+  return expectedDesktopSessionId;
+}
+
 interface ApiRequestOptions<T> {
   method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   body?: unknown;

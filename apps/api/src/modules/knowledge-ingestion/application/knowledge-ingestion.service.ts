@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   forwardRef,
@@ -6,12 +7,20 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import type {
+  KnowledgeDocumentGovernancePolicy,
+  KnowledgeGraphRebuildResponse,
+} from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { AdminPrismaService } from '../../../database/admin-prisma.service.js';
 import { AdminAccessService, type AdminPrincipal } from '../../admin/admin-access.service.js';
 import { recordAdminAudit } from '../../admin/admin-audit.js';
+import {
+  isExternalKnowledgeAiApproved,
+  knowledgeClassificationToAi,
+} from '../../ai-safety-model-routing/ai-data-classification.js';
 import {
   KnowledgeAiRuntimeClient,
   KnowledgeAiRuntimeError,
@@ -20,9 +29,18 @@ import {
   KNOWLEDGE_DOCUMENT_PARSER,
   type KnowledgeDocumentParser,
 } from './knowledge-document-parser.port.js';
+import { KnowledgeIngestionAvailabilityService } from './knowledge-ingestion-availability.service.js';
 import type { ClaimedKnowledgeIngestionJob } from '../domain/knowledge-ingestion-job.repository.js';
 import { chunkKnowledgeDocument } from '../domain/knowledge-document.chunker.js';
-import { shouldPromoteKnowledgeVersion } from '../domain/knowledge-version-publication.policy.js';
+import {
+  projectKnowledgeGraph,
+  type KnowledgeGraphProjection,
+} from '../domain/knowledge-graph.projector.js';
+import { assessKnowledgeParseQuality } from '../domain/knowledge-parse-quality.js';
+import {
+  ControlledKnowledgeWebFetcher,
+  KnowledgeWebFetchError,
+} from '../infrastructure/controlled-knowledge-web-fetcher.js';
 import {
   DocumentParsingError,
   PDF_PARSER_NAME,
@@ -45,6 +63,8 @@ import {
 } from '../infrastructure/knowledge-file-scanner.js';
 
 const FILE_UPLOAD_RECOVERY_DELAY_MS = 5 * 60_000;
+const MAX_PERSISTED_ENTITY_ALIASES = 32;
+const MAX_PERSISTED_ENTITY_ALIAS_LENGTH = 160;
 
 interface IngestionIdentity {
   readonly tenantId: string;
@@ -53,7 +73,9 @@ interface IngestionIdentity {
   readonly documentVersionId: string;
   readonly jobId: string | null;
   readonly versionNumber: number;
-  readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE';
+  readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
+  readonly classification: string;
+  readonly governanceHash: string;
   readonly mimeType: string;
   readonly fileName: string | null;
   readonly actorUserId: string;
@@ -71,6 +93,11 @@ export interface KnowledgeIngestionFailure {
   readonly code: string;
   readonly message: string;
   readonly retryable: boolean;
+}
+
+export interface KnowledgeIngestionLeaseControl {
+  readonly signal: AbortSignal;
+  readonly assertOwned: () => Promise<void>;
 }
 
 export class KnowledgeIngestionLeaseLostError extends Error {
@@ -97,6 +124,16 @@ export interface KnowledgeEmbeddingRebuildResult {
   readonly chunkCount: number;
 }
 
+export interface KnowledgeGraphPersistenceIdentity {
+  readonly tenantId: string;
+  readonly knowledgeBaseId: string;
+  readonly documentId: string;
+  readonly documentVersionId: string;
+  readonly actorUserId: string;
+}
+
+export type KnowledgeGraphRebuildResult = KnowledgeGraphRebuildResponse;
+
 /**
  * Request-scoped command facade. It is intentionally the only ingestion
  * provider that depends on AdminAccessService/TenantContext.
@@ -110,10 +147,11 @@ export class KnowledgeIngestionService {
       KnowledgeIngestionProcessor,
       | 'createTextVersion'
       | 'upload'
+      | 'importWeb'
       | 'uploadFileVersion'
       | 'retry'
-      | 'publishDraftVersion'
       | 'rebuildEmbeddings'
+      | 'rebuildKnowledgeGraph'
     >,
   ) {}
 
@@ -125,6 +163,7 @@ export class KnowledgeIngestionService {
     readonly content: string;
     readonly publish: boolean;
     readonly changeSummary?: string;
+    readonly governance?: KnowledgeDocumentGovernancePolicy;
   }): Promise<string> {
     return this.processor.createTextVersion(this.access.requireKnowledgeWrite(), input);
   }
@@ -136,6 +175,7 @@ export class KnowledgeIngestionService {
     readonly mimeType: string;
     readonly fileName: string;
     readonly changeSummary?: string;
+    readonly governance?: KnowledgeDocumentGovernancePolicy;
   }): Promise<string> {
     return this.processor.upload(this.access.requireKnowledgeWrite(), input);
   }
@@ -148,19 +188,23 @@ export class KnowledgeIngestionService {
     readonly mimeType: string;
     readonly fileName: string;
     readonly changeSummary?: string;
+    readonly governance?: KnowledgeDocumentGovernancePolicy;
   }): Promise<string> {
     return this.processor.uploadFileVersion(this.access.requireKnowledgeWrite(), input);
   }
 
-  retry(documentVersionId: string): Promise<string> {
-    return this.processor.retry(this.access.requireKnowledgeWrite(), documentVersionId);
+  importWeb(input: {
+    readonly knowledgeBaseId: string;
+    readonly sourceUri: string;
+    readonly title?: string;
+    readonly changeSummary?: string;
+    readonly governance?: KnowledgeDocumentGovernancePolicy;
+  }): Promise<string> {
+    return this.processor.importWeb(this.access.requireKnowledgeWrite(), input);
   }
 
-  publishDraftVersion(documentVersionId: string): Promise<string> {
-    return this.processor.publishDraftVersion(
-      this.access.requireKnowledgeWrite(),
-      documentVersionId,
-    );
+  retry(documentVersionId: string): Promise<string> {
+    return this.processor.retry(this.access.requireKnowledgeWrite(), documentVersionId);
   }
 
   rebuildEmbeddings(input: {
@@ -169,6 +213,14 @@ export class KnowledgeIngestionService {
     readonly documentVersionId: string;
   }): Promise<KnowledgeEmbeddingRebuildResult> {
     return this.processor.rebuildEmbeddings(this.access.requireKnowledgeWrite(), input);
+  }
+
+  rebuildKnowledgeGraph(input: {
+    readonly knowledgeBaseId: string;
+    readonly documentId: string;
+    readonly documentVersionId: string;
+  }): Promise<KnowledgeGraphRebuildResult> {
+    return this.processor.rebuildKnowledgeGraph(this.access.requireKnowledgeWrite(), input);
   }
 }
 
@@ -180,6 +232,10 @@ export class KnowledgeIngestionProcessor {
     @Inject(KNOWLEDGE_OBJECT_STORE) private readonly objects: KnowledgeObjectStore,
     @Inject(KNOWLEDGE_FILE_SCANNER) private readonly scanner: KnowledgeFileScanner,
     @Inject(KnowledgeAiRuntimeClient) private readonly semantic: KnowledgeAiRuntimeClient,
+    @Inject(ControlledKnowledgeWebFetcher)
+    private readonly webFetcher: ControlledKnowledgeWebFetcher,
+    @Inject(KnowledgeIngestionAvailabilityService)
+    private readonly availability: KnowledgeIngestionAvailabilityService,
   ) {}
 
   async createTextVersion(
@@ -192,8 +248,10 @@ export class KnowledgeIngestionProcessor {
       readonly content: string;
       readonly publish: boolean;
       readonly changeSummary?: string;
+      readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
   ): Promise<string> {
+    this.availability.assertPersistentWritesAvailable();
     const identity = await this.createVersionRecord({
       tenantId: principal.tenantId,
       actorUserId: principal.userId,
@@ -206,6 +264,7 @@ export class KnowledgeIngestionProcessor {
       fileName: null,
       processing: input.publish,
       enqueue: input.publish,
+      ...(input.governance === undefined ? {} : { governance: input.governance }),
       ...(input.changeSummary === undefined ? {} : { changeSummary: input.changeSummary }),
     });
     return identity.documentId;
@@ -220,8 +279,10 @@ export class KnowledgeIngestionProcessor {
       readonly mimeType: string;
       readonly fileName: string;
       readonly changeSummary?: string;
+      readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
   ): Promise<string> {
+    this.availability.assertPersistentWritesAvailable();
     return this.uploadFile(principal, input);
   }
 
@@ -235,9 +296,79 @@ export class KnowledgeIngestionProcessor {
       readonly mimeType: string;
       readonly fileName: string;
       readonly changeSummary?: string;
+      readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
   ): Promise<string> {
+    this.availability.assertPersistentWritesAvailable();
     return this.uploadFile(principal, input);
+  }
+
+  async importWeb(
+    principal: AdminPrincipal,
+    input: {
+      readonly knowledgeBaseId: string;
+      readonly sourceUri: string;
+      readonly title?: string;
+      readonly changeSummary?: string;
+      readonly governance?: KnowledgeDocumentGovernancePolicy;
+    },
+  ): Promise<string> {
+    this.availability.assertPersistentWritesAvailable();
+    await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const knowledgeBase = await transaction.knowledgeBase.findFirst({
+        where: { tenantId: principal.tenantId, id: input.knowledgeBaseId },
+        select: { status: true },
+      });
+      if (knowledgeBase === null || knowledgeBase.status === 'ARCHIVED') {
+        throw new NotFoundException('The active knowledge base was not found.');
+      }
+    });
+    let page;
+    try {
+      page = await this.webFetcher.fetch(input.sourceUri);
+    } catch (error) {
+      if (error instanceof KnowledgeWebFetchError) {
+        if (
+          error.code === 'KNOWLEDGE_WEB_URL_INVALID' ||
+          error.code === 'KNOWLEDGE_WEB_HOST_NOT_ALLOWED' ||
+          error.code === 'KNOWLEDGE_WEB_ADDRESS_FORBIDDEN' ||
+          error.code === 'KNOWLEDGE_WEB_REDIRECT_FORBIDDEN' ||
+          error.code === 'KNOWLEDGE_WEB_CONTENT_TYPE_FORBIDDEN' ||
+          error.code === 'KNOWLEDGE_WEB_RESPONSE_TOO_LARGE'
+        ) {
+          throw new BadRequestException(error.code);
+        }
+        throw new BadGatewayException(error.code);
+      }
+      throw error;
+    }
+    const url = new URL(page.sourceUri);
+    const pathLeaf = url.pathname.split('/').filter(Boolean).pop() ?? '';
+    let decodedPathLeaf = pathLeaf;
+    try {
+      decodedPathLeaf = decodeURIComponent(pathLeaf);
+    } catch {
+      // Preserve the canonical escaped path when it contains a malformed
+      // percent sequence rather than leaking a URI decoder exception.
+    }
+    const fallbackTitle = (decodedPathLeaf.trim() || url.hostname).slice(0, 300);
+    const identity = await this.createVersionRecord({
+      tenantId: principal.tenantId,
+      actorUserId: principal.userId,
+      knowledgeBaseId: input.knowledgeBaseId,
+      title: input.title ?? fallbackTitle,
+      sourceType: 'WEB',
+      sourceUri: page.sourceUri,
+      mimeType: page.mimeType,
+      fileName: null,
+      processing: true,
+      enqueue: true,
+      queueAvailableAt: new Date(Date.now() + FILE_UPLOAD_RECOVERY_DELAY_MS),
+      ...(input.governance === undefined ? {} : { governance: input.governance }),
+      ...(input.changeSummary === undefined ? {} : { changeSummary: input.changeSummary }),
+    });
+    await this.persistObjectAndActivate(identity, page.bytes);
+    return identity.documentId;
   }
 
   private async uploadFile(
@@ -250,6 +381,7 @@ export class KnowledgeIngestionProcessor {
       readonly mimeType: string;
       readonly fileName: string;
       readonly changeSummary?: string;
+      readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
   ): Promise<string> {
     const identity = await this.createVersionRecord({
@@ -264,15 +396,24 @@ export class KnowledgeIngestionProcessor {
       processing: true,
       enqueue: true,
       queueAvailableAt: new Date(Date.now() + FILE_UPLOAD_RECOVERY_DELAY_MS),
+      ...(input.governance === undefined ? {} : { governance: input.governance }),
       ...(input.changeSummary === undefined ? {} : { changeSummary: input.changeSummary }),
     });
+    await this.persistObjectAndActivate(identity, input.bytes);
+    return identity.documentId;
+  }
+
+  private async persistObjectAndActivate(
+    identity: IngestionIdentity,
+    bytes: Buffer,
+  ): Promise<void> {
     let storedObject: StoredKnowledgeObject | undefined;
     try {
       const stored = await this.objects.putObject({
         tenantId: identity.tenantId,
         documentId: identity.documentId,
         versionId: identity.documentVersionId,
-        body: input.bytes,
+        body: bytes,
       });
       storedObject = stored;
       await this.prisma.withTenant(identity.tenantId, async (transaction) => {
@@ -307,7 +448,6 @@ export class KnowledgeIngestionProcessor {
           throw new ConflictException('The file ingestion job can no longer be activated.');
         }
       });
-      return identity.documentId;
     } catch (error) {
       if (storedObject === undefined) {
         await this.failBeforeEnqueue(identity, error);
@@ -315,11 +455,11 @@ export class KnowledgeIngestionProcessor {
       // Once putObject succeeds, retain the deterministic object and delayed
       // queue row. A worker can reconstruct the key and atomically restore the
       // missing object ledger; deleting here would create a crash-window race.
-      return identity.documentId;
     }
   }
 
   async retry(principal: AdminPrincipal, documentVersionId: string): Promise<string> {
+    this.availability.assertPersistentWritesAvailable();
     const documentId = await this.findDocumentIdForVersion(principal.tenantId, documentVersionId);
     const identity = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
       await lockKnowledgeDocument(transaction, principal.tenantId, documentId);
@@ -357,63 +497,9 @@ export class KnowledgeIngestionProcessor {
         jobId: job.id,
         versionNumber: version.versionNumber,
         sourceType: version.sourceType,
+        classification: version.classification,
+        governanceHash: version.governanceHash,
         mimeType: version.mimeType ?? 'text/plain',
-        fileName: version.fileName,
-        actorUserId: principal.userId,
-      };
-    });
-    return identity.documentId;
-  }
-
-  async publishDraftVersion(principal: AdminPrincipal, documentVersionId: string): Promise<string> {
-    const documentId = await this.findDocumentIdForVersion(principal.tenantId, documentVersionId);
-    const identity = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
-      await lockKnowledgeDocument(transaction, principal.tenantId, documentId);
-      const version = await transaction.knowledgeDocumentVersion.findFirst({
-        where: { tenantId: principal.tenantId, id: documentVersionId, documentId },
-        include: {
-          ingestionJobs: { orderBy: { createdAt: 'desc' }, take: 1 },
-        },
-      });
-      if (version === null) throw new NotFoundException('The document version was not found.');
-      await requireActiveDocumentAndKnowledgeBase(
-        transaction,
-        principal.tenantId,
-        version.knowledgeBaseId,
-        documentId,
-      );
-      if (version.sourceType === 'FILE') {
-        throw new BadRequestException('File versions are published through file ingestion.');
-      }
-      if (version.status !== 'DRAFT') {
-        throw new ConflictException('Only a draft text or Markdown version can be published.');
-      }
-      const document = await transaction.knowledgeDocument.findFirstOrThrow({
-        where: { tenantId: principal.tenantId, id: documentId },
-        select: { currentVersionId: true, documentVersion: true },
-      });
-      if (document.currentVersionId !== null && version.versionNumber <= document.documentVersion) {
-        throw new ConflictException(
-          'The draft is not newer than the current published version. Refresh and try again.',
-        );
-      }
-      const job = await transaction.knowledgeIngestionJob.create({
-        data: pendingJob(principal.tenantId, version.id),
-      });
-      await transaction.knowledgeDocumentVersion.update({
-        where: { id: version.id },
-        data: { status: 'PROCESSING' },
-      });
-      return {
-        tenantId: principal.tenantId,
-        knowledgeBaseId: version.knowledgeBaseId,
-        documentId: version.documentId,
-        documentVersionId: version.id,
-        jobId: job.id,
-        versionNumber: version.versionNumber,
-        sourceType: version.sourceType,
-        mimeType:
-          version.mimeType ?? (version.sourceType === 'MARKDOWN' ? 'text/markdown' : 'text/plain'),
         fileName: version.fileName,
         actorUserId: principal.userId,
       };
@@ -429,6 +515,7 @@ export class KnowledgeIngestionProcessor {
       readonly documentVersionId: string;
     },
   ): Promise<KnowledgeEmbeddingRebuildResult> {
+    this.availability.assertPersistentWritesAvailable();
     if (!this.semantic.semanticEnabled) {
       throw new ConflictException('Semantic indexing is not enabled for this environment.');
     }
@@ -454,18 +541,22 @@ export class KnowledgeIngestionProcessor {
       if (version.chunks.length === 0) {
         throw new ConflictException('The document version has no chunks to embed.');
       }
-      return version.chunks.map((chunk) => ({
-        id: chunk.id,
-        content: chunk.content,
-        contentHash: chunk.contentHash,
-      }));
+      return {
+        classification: knowledgeClassificationToAi(version.classification),
+        chunks: version.chunks.map((chunk) => ({
+          id: chunk.id,
+          content: chunk.content,
+          contentHash: chunk.contentHash,
+        })),
+      };
     });
 
     const embeddingBatch = await this.semantic.embedAll(
       principal.tenantId,
-      snapshot.map((chunk) => chunk.content),
+      snapshot.chunks.map((chunk) => chunk.content),
+      snapshot.classification,
     );
-    if (embeddingBatch.vectors.length !== snapshot.length) {
+    if (embeddingBatch.vectors.length !== snapshot.chunks.length) {
       throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH', true);
     }
 
@@ -482,15 +573,16 @@ export class KnowledgeIngestionProcessor {
         select: { id: true, contentHash: true },
       });
       if (
-        currentChunks.length !== snapshot.length ||
+        currentChunks.length !== snapshot.chunks.length ||
         currentChunks.some(
           (chunk, index) =>
-            chunk.id !== snapshot[index]?.id || chunk.contentHash !== snapshot[index]?.contentHash,
+            chunk.id !== snapshot.chunks[index]?.id ||
+            chunk.contentHash !== snapshot.chunks[index]?.contentHash,
         )
       ) {
         throw new ConflictException('Document chunks changed while embeddings were generated.');
       }
-      for (const [index, chunk] of snapshot.entries()) {
+      for (const [index, chunk] of snapshot.chunks.entries()) {
         const vector = embeddingBatch.vectors[index];
         if (vector === undefined) {
           throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH', true);
@@ -526,7 +618,7 @@ export class KnowledgeIngestionProcessor {
           documentId: input.documentId,
           embeddingModel: embeddingBatch.model,
           dimensions: embeddingBatch.dimensions,
-          chunkCount: snapshot.length,
+          chunkCount: snapshot.chunks.length,
         },
       );
     });
@@ -534,8 +626,100 @@ export class KnowledgeIngestionProcessor {
       documentVersionId: input.documentVersionId,
       embeddingModel: embeddingBatch.model,
       dimensions: embeddingBatch.dimensions,
-      chunkCount: snapshot.length,
+      chunkCount: snapshot.chunks.length,
     };
+  }
+
+  async rebuildKnowledgeGraph(
+    principal: AdminPrincipal,
+    input: {
+      readonly knowledgeBaseId: string;
+      readonly documentId: string;
+      readonly documentVersionId: string;
+    },
+  ): Promise<KnowledgeGraphRebuildResult> {
+    this.availability.assertPersistentWritesAvailable();
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await lockKnowledgeDocument(transaction, principal.tenantId, input.documentId);
+      await requireActiveDocumentAndKnowledgeBase(
+        transaction,
+        principal.tenantId,
+        input.knowledgeBaseId,
+        input.documentId,
+      );
+      const [document, version] = await Promise.all([
+        transaction.knowledgeDocument.findFirst({
+          where: {
+            tenantId: principal.tenantId,
+            knowledgeBaseId: input.knowledgeBaseId,
+            id: input.documentId,
+          },
+          select: { title: true },
+        }),
+        transaction.knowledgeDocumentVersion.findFirst({
+          where: {
+            tenantId: principal.tenantId,
+            knowledgeBaseId: input.knowledgeBaseId,
+            documentId: input.documentId,
+            id: input.documentVersionId,
+            status: { in: ['READY', 'ARCHIVED'] },
+          },
+          include: { chunks: { orderBy: [{ chunkIndex: 'asc' }, { id: 'asc' }] } },
+        }),
+      ]);
+      if (document === null || version === null) {
+        throw new NotFoundException('The indexed document version was not found.');
+      }
+      if (version.publishedAt !== null) {
+        throw new ConflictException(
+          'An active graph projection is immutable. Create and govern a new document version.',
+        );
+      }
+      if (version.chunks.length === 0) {
+        throw new ConflictException('The document version has no chunks to project.');
+      }
+      const projection = projectKnowledgeGraph({
+        documentId: input.documentId,
+        documentTitle: document.title,
+        chunks: version.chunks,
+      });
+      await persistKnowledgeGraphProjection(
+        transaction,
+        {
+          tenantId: principal.tenantId,
+          knowledgeBaseId: input.knowledgeBaseId,
+          documentId: input.documentId,
+          documentVersionId: input.documentVersionId,
+          actorUserId: principal.userId,
+        },
+        projection,
+      );
+      const evidenceCount = projection.relations.reduce(
+        (count, relation) => count + relation.evidence.length,
+        0,
+      );
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.knowledge-document-version.graph-rebuilt',
+        'knowledge_document_version',
+        input.documentVersionId,
+        {
+          documentId: input.documentId,
+          entityCount: projection.entities.length,
+          relationCount: projection.relations.length,
+          mentionCount: projection.mentions.length,
+          evidenceCount,
+        },
+      );
+      return {
+        documentVersionId: input.documentVersionId,
+        entityCount: projection.entities.length,
+        relationCount: projection.relations.length,
+        mentionCount: projection.mentions.length,
+        evidenceCount,
+      };
+    });
   }
 
   private async findDocumentIdForVersion(
@@ -558,7 +742,8 @@ export class KnowledgeIngestionProcessor {
     readonly knowledgeBaseId: string;
     readonly documentId?: string;
     readonly title: string;
-    readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE';
+    readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
+    readonly sourceUri?: string;
     readonly mimeType: string;
     readonly fileName: string | null;
     readonly contentText?: string;
@@ -566,6 +751,7 @@ export class KnowledgeIngestionProcessor {
     readonly enqueue: boolean;
     readonly queueAvailableAt?: Date;
     readonly changeSummary?: string;
+    readonly governance?: KnowledgeDocumentGovernancePolicy;
   }): Promise<IngestionIdentity> {
     return this.prisma.withTenant(input.tenantId, async (transaction) => {
       await lockKnowledgeDocument(transaction, input.tenantId, input.documentId ?? input.title);
@@ -606,9 +792,34 @@ export class KnowledgeIngestionProcessor {
       const latest = await transaction.knowledgeDocumentVersion.findFirst({
         where: { tenantId: input.tenantId, documentId: document.id },
         orderBy: { versionNumber: 'desc' },
-        select: { versionNumber: true },
+        select: {
+          id: true,
+          versionNumber: true,
+          governanceOwnerUserId: true,
+          classification: true,
+          scopeMode: true,
+          organizationScopeIds: true,
+          projectScopeIds: true,
+          taskScopeIds: true,
+          roleTemplateScopeIds: true,
+          dataLabels: true,
+          retentionUntil: true,
+          retentionAction: true,
+        },
       });
       const versionNumber = (latest?.versionNumber ?? 0) + 1;
+      const governance = knowledgeGovernanceCreateData(input.governance, latest, input.actorUserId);
+      const owner = await transaction.user.findFirst({
+        where: {
+          tenantId: input.tenantId,
+          id: governance.governanceOwnerUserId,
+          status: 'ACTIVE',
+        },
+        select: { id: true },
+      });
+      if (owner === null) {
+        throw new BadRequestException('The knowledge governance owner must be an active user.');
+      }
       const version = await transaction.knowledgeDocumentVersion.create({
         data: {
           tenantId: input.tenantId,
@@ -618,10 +829,12 @@ export class KnowledgeIngestionProcessor {
           sourceType: input.sourceType,
           mimeType: input.mimeType,
           fileName: input.fileName,
+          sourceUri: input.sourceUri ?? null,
           status: input.processing ? 'PROCESSING' : 'DRAFT',
           changeSummary: input.changeSummary ?? null,
+          ...governance,
           createdById: input.actorUserId,
-          ...(input.sourceType !== 'FILE'
+          ...(input.sourceType === 'TEXT' || input.sourceType === 'MARKDOWN'
             ? {
                 contentText: input.contentText ?? '',
                 checksum: sha256(input.contentText ?? ''),
@@ -637,7 +850,8 @@ export class KnowledgeIngestionProcessor {
       await transaction.knowledgeDocument.update({
         where: { id: document.id },
         data: {
-          ...(input.sourceType === 'FILE' && document.currentVersionId !== null
+          ...((input.sourceType === 'FILE' || input.sourceType === 'WEB') &&
+          document.currentVersionId !== null
             ? {}
             : {
                 title: input.title,
@@ -662,6 +876,8 @@ export class KnowledgeIngestionProcessor {
         jobId: job?.id ?? null,
         versionNumber,
         sourceType: input.sourceType,
+        classification: version.classification,
+        governanceHash: version.governanceHash,
         mimeType: input.mimeType,
         fileName: input.fileName,
         actorUserId: input.actorUserId,
@@ -674,7 +890,12 @@ export class KnowledgeIngestionProcessor {
    * returns identifiers only; all source/content reads happen behind the
    * tenant-scoped admin capability here.
    */
-  async executeClaim(claim: ClaimedKnowledgeIngestionJob, workerId: string): Promise<void> {
+  async executeClaim(
+    claim: ClaimedKnowledgeIngestionJob,
+    workerId: string,
+    lease: KnowledgeIngestionLeaseControl,
+  ): Promise<void> {
+    assertKnowledgeIngestionLeaseActive(lease);
     const source = await this.prisma.withTenant(claim.tenantId, async (transaction) => {
       const owned = await hasOwnedClaim(transaction, claim.id, workerId);
       if (!owned) throw new KnowledgeIngestionLeaseLostError();
@@ -690,6 +911,8 @@ export class KnowledgeIngestionProcessor {
           documentId: true,
           versionNumber: true,
           sourceType: true,
+          classification: true,
+          governanceHash: true,
           mimeType: true,
           fileName: true,
           objectKey: true,
@@ -709,6 +932,8 @@ export class KnowledgeIngestionProcessor {
           jobId: claim.id,
           versionNumber: version.versionNumber,
           sourceType: version.sourceType,
+          classification: version.classification,
+          governanceHash: version.governanceHash,
           mimeType:
             version.mimeType ??
             (version.sourceType === 'MARKDOWN' ? 'text/markdown' : 'text/plain'),
@@ -721,8 +946,10 @@ export class KnowledgeIngestionProcessor {
         contentText: version.contentText,
       };
     });
-    const bytes = await this.readSourceBytes(source, workerId);
-    await this.process(source.identity, bytes, workerId);
+    await lease.assertOwned();
+    const bytes = await this.readSourceBytes(source, workerId, lease);
+    await lease.assertOwned();
+    await this.process(source.identity, bytes, workerId, lease);
   }
 
   async failClaim(
@@ -785,8 +1012,13 @@ export class KnowledgeIngestionProcessor {
     });
   }
 
-  private async readSourceBytes(source: IngestionSource, workerId: string): Promise<Buffer> {
-    if (source.identity.sourceType !== 'FILE') {
+  private async readSourceBytes(
+    source: IngestionSource,
+    workerId: string,
+    lease: KnowledgeIngestionLeaseControl,
+  ): Promise<Buffer> {
+    assertKnowledgeIngestionLeaseActive(lease);
+    if (source.identity.sourceType !== 'FILE' && source.identity.sourceType !== 'WEB') {
       return Buffer.from(source.contentText ?? '', 'utf8');
     }
     const objectKey =
@@ -813,7 +1045,21 @@ export class KnowledgeIngestionProcessor {
         'Knowledge object provider checksum does not match its persisted ledger.',
       );
     }
-    const bytes = await collectReadable(object.body, object.size, object.size);
+    const abortRead = (): void => {
+      object.body.destroy(new KnowledgeIngestionLeaseLostError());
+    };
+    lease.signal.addEventListener('abort', abortRead, { once: true });
+    let bytes: Buffer;
+    try {
+      if (lease.signal.aborted) abortRead();
+      bytes = await collectReadable(object.body, object.size, object.size);
+    } catch (error) {
+      if (lease.signal.aborted) throw new KnowledgeIngestionLeaseLostError();
+      throw error;
+    } finally {
+      lease.signal.removeEventListener('abort', abortRead);
+    }
+    await lease.assertOwned();
     const contentSha256 = sha256(bytes);
     if (source.objectSha256 !== null && contentSha256 !== source.objectSha256.toLowerCase()) {
       throw new KnowledgeObjectIntegrityError(
@@ -860,19 +1106,23 @@ export class KnowledgeIngestionProcessor {
     identity: IngestionIdentity,
     bytes: Buffer,
     workerId: string,
+    lease: KnowledgeIngestionLeaseControl,
   ): Promise<void> {
+    assertKnowledgeIngestionLeaseActive(lease);
     await this.advance(identity, workerId, 'SECURITY_CHECK', 15);
     let securityScan: {
       readonly verdict: 'clean' | 'not_scanned';
       readonly scanner: string | null;
     } | null = null;
-    if (identity.sourceType === 'FILE') {
+    if (identity.sourceType === 'FILE' || identity.sourceType === 'WEB') {
+      await lease.assertOwned();
       const scan = await this.scanner.scan({
         bytes,
         fileName: identity.fileName ?? 'document.bin',
         mimeType: identity.mimeType,
         sha256: sha256(bytes),
       });
+      assertKnowledgeIngestionLeaseActive(lease);
       if (scan.verdict === 'infected') {
         throw new KnowledgeFileSecurityError('KNOWLEDGE_FILE_INFECTED', false);
       }
@@ -890,22 +1140,43 @@ export class KnowledgeIngestionProcessor {
       }
     }
     await this.advance(identity, workerId, 'PARSING', 30);
+    await lease.assertOwned();
+    const aiClassification = knowledgeClassificationToAi(identity.classification);
+    if (
+      isRemoteDocumentParserMimeType(identity.mimeType) &&
+      !isExternalKnowledgeAiApproved(aiClassification)
+    ) {
+      throw new Error('KNOWLEDGE_DOCLING_CLASSIFICATION_NOT_APPROVED');
+    }
     const parsed = await this.parser.parse({
       bytes,
       mimeType: identity.mimeType,
       ...(identity.fileName === null ? {} : { fileName: identity.fileName }),
+      signal: lease.signal,
     });
+    assertKnowledgeIngestionLeaseActive(lease);
+    await lease.assertOwned();
     await this.advance(identity, workerId, 'CHUNKING', 55);
     const chunks = chunkParsedKnowledgeDocument(parsed);
     if (chunks.length === 0) throw new Error('DOCUMENT_TEXT_EMPTY');
+    const parseQuality = assessKnowledgeParseQuality({
+      parsed,
+      sourceByteLength: bytes.byteLength,
+      chunkCount: chunks.length,
+    });
     const storedChunks = chunks.map((chunk) => ({ id: randomUUID(), ...chunk }));
     await this.advance(identity, workerId, 'INDEXING', 80);
+    await lease.assertOwned();
     const embeddingBatch = this.semantic.semanticEnabled
       ? await this.semantic.embedAll(
           identity.tenantId,
           storedChunks.map((chunk) => chunk.content),
+          aiClassification,
+          lease.signal,
         )
       : null;
+    assertKnowledgeIngestionLeaseActive(lease);
+    await lease.assertOwned();
 
     await this.prisma.withTenant(identity.tenantId, async (transaction) => {
       await lockKnowledgeDocument(transaction, identity.tenantId, identity.documentId);
@@ -924,7 +1195,7 @@ export class KnowledgeIngestionProcessor {
       if (latestJob?.id !== jobId) throw new KnowledgeIngestionLeaseLostError();
       const activeDocument = await transaction.knowledgeDocument.findFirstOrThrow({
         where: { tenantId: identity.tenantId, id: identity.documentId },
-        select: { status: true },
+        select: { status: true, title: true },
       });
       const activeKnowledgeBase = await transaction.knowledgeBase.findFirstOrThrow({
         where: { tenantId: identity.tenantId, id: identity.knowledgeBaseId },
@@ -954,6 +1225,12 @@ export class KnowledgeIngestionProcessor {
           metadata: chunk.metadata,
         })),
       });
+      const graphProjection = projectKnowledgeGraph({
+        documentId: identity.documentId,
+        documentTitle: activeDocument.title,
+        chunks: storedChunks,
+      });
+      await persistKnowledgeGraphProjection(transaction, identity, graphProjection);
       if (embeddingBatch !== null) {
         if (embeddingBatch.vectors.length !== storedChunks.length) {
           throw new Error('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH');
@@ -983,19 +1260,10 @@ export class KnowledgeIngestionProcessor {
           `;
         }
       }
-      const publishedAt = new Date();
+      const indexedAt = new Date();
       const document = await transaction.knowledgeDocument.findFirstOrThrow({
         where: { tenantId: identity.tenantId, id: identity.documentId },
-        select: { currentVersionId: true, documentVersion: true },
-      });
-      const shouldPublish = shouldPromoteKnowledgeVersion({
-        currentVersionId: document.currentVersionId,
-        currentVersionNumber: document.documentVersion,
-        candidateVersionNumber: identity.versionNumber,
-      });
-      const storedVersion = await transaction.knowledgeDocumentVersion.findFirstOrThrow({
-        where: { tenantId: identity.tenantId, id: identity.documentVersionId },
-        select: { objectKey: true },
+        select: { currentVersionId: true },
       });
       await transaction.knowledgeDocumentVersion.update({
         where: { id: identity.documentVersionId },
@@ -1003,21 +1271,25 @@ export class KnowledgeIngestionProcessor {
           contentText: parsed.text,
           checksum: sha256(bytes),
           status: 'READY',
-          publishedAt: shouldPublish ? publishedAt : null,
+          publishedAt: null,
+          parserName: parseQuality.parserName,
+          parseQualityScore: parseQuality.score,
+          parseReviewStatus:
+            identity.sourceType === 'FILE' || identity.sourceType === 'WEB'
+              ? 'PENDING'
+              : 'NOT_REQUIRED',
+          parseReviewRevision: { increment: 1 },
+          parseReviewedById: null,
+          parseReviewedAt: null,
+          parseReviewNote: null,
+          parseDiagnostics: parseQuality.diagnostics,
         },
       });
-      if (shouldPublish) {
+      if (document.currentVersionId === null) {
         await transaction.knowledgeDocument.update({
           where: { id: identity.documentId },
           data: {
-            currentVersionId: identity.documentVersionId,
             status: 'READY',
-            documentVersion: identity.versionNumber,
-            contentText: parsed.text,
-            checksum: sha256(bytes),
-            objectKey: storedVersion.objectKey,
-            mimeType: identity.mimeType,
-            fileName: identity.fileName,
           },
         });
       }
@@ -1029,7 +1301,7 @@ export class KnowledgeIngestionProcessor {
           progress: 100,
           claimedBy: null,
           leaseExpiresAt: null,
-          finishedAt: publishedAt,
+          finishedAt: indexedAt,
           errorCode: null,
           errorMessage: null,
         },
@@ -1040,18 +1312,26 @@ export class KnowledgeIngestionProcessor {
           tenantId: identity.tenantId,
           userId: identity.actorUserId,
         },
-        shouldPublish
-          ? 'admin.knowledge-document-version.published'
-          : 'admin.knowledge-document-version.indexed',
+        'admin.knowledge-document-version.indexed',
         'knowledge_document_version',
         identity.documentVersionId,
         {
           documentId: identity.documentId,
           version: identity.versionNumber,
           chunkCount: storedChunks.length,
+          graphEntityCount: graphProjection.entities.length,
+          graphRelationCount: graphProjection.relations.length,
+          graphEvidenceCount: graphProjection.relations.reduce(
+            (count, relation) => count + relation.evidence.length,
+            0,
+          ),
           semanticIndexed: embeddingBatch !== null,
           embeddingModel: embeddingBatch?.model ?? null,
-          current: shouldPublish,
+          current: false,
+          publicationRequired: true,
+          parseQualityScore: parseQuality.score,
+          parseReviewRequired: identity.sourceType === 'FILE' || identity.sourceType === 'WEB',
+          parseLowQualityReasons: parseQuality.diagnostics.lowQualityReasons,
           securityScanVerdict: securityScan?.verdict ?? 'not_applicable',
           securityScanner: securityScan?.scanner ?? null,
         },
@@ -1130,6 +1410,795 @@ export class KnowledgeIngestionProcessor {
   }
 }
 
+export interface ActivatedKnowledgeGraphProjection {
+  readonly projectionId: string;
+  readonly graphHash: string;
+}
+
+/**
+ * Promotes the exact governed candidate while the caller holds the document
+ * advisory lock. Because this runs on the caller's Prisma transaction, the
+ * document current-version CAS and graph lifecycle switch commit atomically.
+ */
+export async function activateKnowledgeGraphProjection(
+  transaction: Prisma.TransactionClient,
+  identity: Omit<KnowledgeGraphPersistenceIdentity, 'actorUserId'>,
+): Promise<ActivatedKnowledgeGraphProjection> {
+  const candidates = await transaction.$queryRaw<
+    Array<{ readonly id: string; readonly graph_hash: string }>
+  >(Prisma.sql`
+    SELECT "id"::text AS id, "graph_hash"
+    FROM public."knowledge_graph_projections"
+    WHERE "tenant_id" = ${identity.tenantId}::uuid
+      AND "knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+      AND "document_id" = ${identity.documentId}::uuid
+      AND "document_version_id" = ${identity.documentVersionId}::uuid
+      AND "status" = 'CANDIDATE'::"KnowledgeGraphProjectionStatus"
+    FOR UPDATE
+  `);
+  const candidate = candidates[0];
+  if (candidate === undefined || candidates.length !== 1) {
+    throw new ConflictException(
+      'The document version has no unique candidate graph projection to publish.',
+    );
+  }
+  const [readiness] = await transaction.$queryRaw<
+    Array<{
+      readonly open_schema_gap_count: number;
+      readonly ungoverned_relation_count: number;
+    }>
+  >(Prisma.sql`
+    SELECT
+      (
+        SELECT count(*)::int
+        FROM public."knowledge_graph_conflicts" conflict
+        WHERE conflict."tenant_id" = ${identity.tenantId}::uuid
+          AND conflict."knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+          AND conflict."projection_id" = ${candidate.id}::uuid
+          AND conflict."status" IN ('OPEN', 'IN_REVIEW')
+      ) AS open_schema_gap_count,
+      (
+        SELECT count(DISTINCT evidence."relation_id")::int
+        FROM public."knowledge_relation_evidence" evidence
+        LEFT JOIN public."knowledge_relation_governance" governance
+          ON governance."tenant_id" = evidence."tenant_id"
+         AND governance."knowledge_base_id" = evidence."knowledge_base_id"
+         AND governance."relation_id" = evidence."relation_id"
+        LEFT JOIN public."knowledge_ontology_versions" ontology_version
+          ON ontology_version."tenant_id" = governance."tenant_id"
+         AND ontology_version."knowledge_base_id" = governance."knowledge_base_id"
+         AND ontology_version."id" = governance."ontology_version_id"
+         AND ontology_version."status" = 'PUBLISHED'
+        WHERE evidence."tenant_id" = ${identity.tenantId}::uuid
+          AND evidence."knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+          AND evidence."projection_id" = ${candidate.id}::uuid
+          AND (
+            governance."relation_id" IS NULL
+            OR ontology_version."id" IS NULL
+          )
+      ) AS ungoverned_relation_count
+  `);
+  if ((readiness?.open_schema_gap_count ?? 0) > 0) {
+    throw new ConflictException(
+      'The candidate graph has unresolved ontology schema gaps. Govern or reject them before publication.',
+    );
+  }
+  if ((readiness?.ungoverned_relation_count ?? 0) > 0) {
+    throw new ConflictException(
+      'The candidate graph contains relations without independently approved ontology governance.',
+    );
+  }
+
+  await transaction.$executeRaw(Prisma.sql`
+    UPDATE public."knowledge_graph_projections"
+    SET
+      "status" = 'OBSOLETE'::"KnowledgeGraphProjectionStatus",
+      "obsoleted_at" = CURRENT_TIMESTAMP,
+      "updated_at" = CURRENT_TIMESTAMP
+    WHERE "tenant_id" = ${identity.tenantId}::uuid
+      AND "knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+      AND "document_id" = ${identity.documentId}::uuid
+      AND "status" = 'ACTIVE'::"KnowledgeGraphProjectionStatus"
+  `);
+  const activated = await transaction.$executeRaw(Prisma.sql`
+    UPDATE public."knowledge_graph_projections"
+    SET
+      "status" = 'ACTIVE'::"KnowledgeGraphProjectionStatus",
+      "activated_at" = CURRENT_TIMESTAMP,
+      "updated_at" = CURRENT_TIMESTAMP
+    WHERE "tenant_id" = ${identity.tenantId}::uuid
+      AND "knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+      AND "document_id" = ${identity.documentId}::uuid
+      AND "document_version_id" = ${identity.documentVersionId}::uuid
+      AND "id" = ${candidate.id}::uuid
+      AND "status" = 'CANDIDATE'::"KnowledgeGraphProjectionStatus"
+  `);
+  if (activated !== 1) {
+    throw new ConflictException(
+      'The candidate graph lifecycle changed. Refresh and run publication again.',
+    );
+  }
+  return {
+    projectionId: candidate.id,
+    graphHash: candidate.graph_hash.trim(),
+  };
+}
+
+export async function persistKnowledgeGraphProjection(
+  transaction: Prisma.TransactionClient,
+  identity: KnowledgeGraphPersistenceIdentity,
+  projection: KnowledgeGraphProjection,
+): Promise<void> {
+  const projectionId = randomUUID();
+  const graphHash = stableIngestionHash({
+    documentVersionId: identity.documentVersionId,
+    entities: projection.entities,
+    mentions: projection.mentions,
+    relations: projection.relations,
+  });
+  const evidenceCount = projection.relations.reduce(
+    (count, relation) => count + relation.evidence.length,
+    0,
+  );
+
+  // Each projection is an immutable candidate snapshot. Rebuilding or uploading
+  // a newer candidate retires the prior draft instead of mutating its governance
+  // history, so stale conflicts can never block the current publication.
+  await transaction.$executeRaw(Prisma.sql`
+    UPDATE public."knowledge_graph_projections"
+    SET
+      "status" = 'OBSOLETE'::"KnowledgeGraphProjectionStatus",
+      "obsoleted_at" = CURRENT_TIMESTAMP,
+      "updated_at" = CURRENT_TIMESTAMP
+    WHERE "tenant_id" = ${identity.tenantId}::uuid
+      AND "knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+      AND "document_id" = ${identity.documentId}::uuid
+      AND "status" = 'CANDIDATE'::"KnowledgeGraphProjectionStatus"
+  `);
+  await transaction.$executeRaw(Prisma.sql`
+    INSERT INTO public."knowledge_graph_projections"(
+      "id",
+      "tenant_id",
+      "knowledge_base_id",
+      "document_id",
+      "document_version_id",
+      "status",
+      "graph_hash",
+      "entity_count",
+      "mention_count",
+      "relation_count",
+      "evidence_count",
+      "created_by_user_id"
+    ) VALUES (
+      ${projectionId}::uuid,
+      ${identity.tenantId}::uuid,
+      ${identity.knowledgeBaseId}::uuid,
+      ${identity.documentId}::uuid,
+      ${identity.documentVersionId}::uuid,
+      'CANDIDATE'::"KnowledgeGraphProjectionStatus",
+      ${graphHash},
+      ${projection.entities.length},
+      ${projection.mentions.length},
+      ${projection.relations.length},
+      ${evidenceCount},
+      ${identity.actorUserId}::uuid
+    )
+  `);
+
+  const entityIdByKey = new Map<string, string>();
+  for (const entity of projection.entities) {
+    const boundedAliases = normalizeKnowledgeEntityAliases(entity.canonicalName, entity.aliases);
+    const aliasesSql =
+      boundedAliases.length === 0
+        ? Prisma.sql`ARRAY[]::text[]`
+        : Prisma.sql`ARRAY[${Prisma.join(boundedAliases)}]::text[]`;
+    const identityConflict =
+      entity.externalKey === null
+        ? Prisma.sql`
+            ON CONFLICT (
+              "tenant_id",
+              "knowledge_base_id",
+              "entity_type",
+              "normalized_name"
+            ) WHERE "external_key" IS NULL
+          `
+        : Prisma.sql`
+            ON CONFLICT (
+              "tenant_id",
+              "knowledge_base_id",
+              "entity_type",
+              "external_key"
+            ) WHERE "external_key" IS NOT NULL
+          `;
+    const rows = await transaction.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      INSERT INTO public."knowledge_entities" (
+        "id",
+        "tenant_id",
+        "knowledge_base_id",
+        "entity_type",
+        "canonical_name",
+        "normalized_name",
+        "external_key",
+        "description",
+        "aliases",
+        "attributes",
+        "confidence"
+      ) VALUES (
+        ${randomUUID()}::uuid,
+        ${identity.tenantId}::uuid,
+        ${identity.knowledgeBaseId}::uuid,
+        ${entity.entityType},
+        ${entity.canonicalName},
+        ${entity.normalizedName},
+        ${entity.externalKey},
+        ${entity.description},
+        ${aliasesSql},
+        ${JSON.stringify(entity.attributes)}::jsonb,
+        ${entity.confidence}
+      )
+      ${identityConflict}
+      DO UPDATE SET
+        "canonical_name" = EXCLUDED."canonical_name",
+        "normalized_name" = EXCLUDED."normalized_name",
+        "aliases" = ARRAY(
+          SELECT merged.alias
+          FROM (
+            SELECT candidate.alias, min(candidate.ordinality) AS first_position
+            FROM unnest(
+              public."knowledge_entities"."aliases"
+              || CASE
+                WHEN public."knowledge_entities"."canonical_name" <> EXCLUDED."canonical_name"
+                  THEN ARRAY[public."knowledge_entities"."canonical_name"]::text[]
+                ELSE ARRAY[]::text[]
+              END
+              || EXCLUDED."aliases"
+            ) WITH ORDINALITY AS candidate(alias, ordinality)
+            WHERE char_length(candidate.alias) BETWEEN 2 AND ${MAX_PERSISTED_ENTITY_ALIAS_LENGTH}
+              AND candidate.alias = btrim(candidate.alias)
+              AND candidate.alias <> EXCLUDED."canonical_name"
+            GROUP BY candidate.alias
+          ) AS merged
+          ORDER BY merged.first_position, merged.alias
+          LIMIT ${MAX_PERSISTED_ENTITY_ALIASES}
+        ),
+        "attributes" = public."knowledge_entities"."attributes" || EXCLUDED."attributes",
+        "confidence" = greatest(
+          public."knowledge_entities"."confidence",
+          EXCLUDED."confidence"
+        ),
+        "updated_at" = now()
+      RETURNING "id"::text AS id
+    `);
+    const id = rows[0]?.id;
+    if (id === undefined) throw new Error('KNOWLEDGE_GRAPH_ENTITY_UPSERT_FAILED');
+    entityIdByKey.set(entity.key, id);
+  }
+
+  for (const mention of projection.mentions) {
+    const entityId = entityIdByKey.get(mention.entityKey);
+    if (entityId === undefined) throw new Error('KNOWLEDGE_GRAPH_ENTITY_REFERENCE_MISSING');
+    await transaction.$executeRaw(Prisma.sql`
+      INSERT INTO public."knowledge_entity_mentions" (
+        "id",
+        "tenant_id",
+        "knowledge_base_id",
+        "projection_id",
+        "entity_id",
+        "document_id",
+        "document_version_id",
+        "chunk_id",
+        "surface_form",
+        "start_offset",
+        "end_offset",
+        "confidence",
+        "extractor",
+        "metadata"
+      ) VALUES (
+        ${randomUUID()}::uuid,
+        ${identity.tenantId}::uuid,
+        ${identity.knowledgeBaseId}::uuid,
+        ${projectionId}::uuid,
+        ${entityId}::uuid,
+        ${identity.documentId}::uuid,
+        ${identity.documentVersionId}::uuid,
+        ${mention.chunkId}::uuid,
+        ${mention.surfaceForm},
+        ${mention.startOffset},
+        ${mention.endOffset},
+        ${mention.confidence},
+        ${mention.extractor},
+        ${JSON.stringify(mention.metadata)}::jsonb
+      )
+      ON CONFLICT DO NOTHING
+    `);
+  }
+
+  for (const relation of projection.relations) {
+    const subjectEntityId = entityIdByKey.get(relation.subjectEntityKey);
+    const objectEntityId = entityIdByKey.get(relation.objectEntityKey);
+    if (subjectEntityId === undefined || objectEntityId === undefined) {
+      throw new Error('KNOWLEDGE_GRAPH_RELATION_REFERENCE_MISSING');
+    }
+    const rows = await transaction.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+      INSERT INTO public."knowledge_relations" (
+        "id",
+        "tenant_id",
+        "knowledge_base_id",
+        "subject_entity_id",
+        "predicate",
+        "normalized_predicate",
+        "object_entity_id",
+        "attributes",
+        "confidence"
+      ) VALUES (
+        ${randomUUID()}::uuid,
+        ${identity.tenantId}::uuid,
+        ${identity.knowledgeBaseId}::uuid,
+        ${subjectEntityId}::uuid,
+        ${relation.predicate},
+        ${relation.normalizedPredicate},
+        ${objectEntityId}::uuid,
+        ${JSON.stringify(relation.attributes)}::jsonb,
+        ${relation.confidence}
+      )
+      ON CONFLICT (
+        "tenant_id",
+        "knowledge_base_id",
+        "subject_entity_id",
+        "normalized_predicate",
+        "object_entity_id"
+      )
+      DO UPDATE SET
+        "predicate" = EXCLUDED."predicate",
+        "attributes" = public."knowledge_relations"."attributes" || EXCLUDED."attributes",
+        "confidence" = greatest(
+          public."knowledge_relations"."confidence",
+          EXCLUDED."confidence"
+        ),
+        "updated_at" = now()
+      RETURNING "id"::text AS id
+    `);
+    const relationId = rows[0]?.id;
+    if (relationId === undefined) throw new Error('KNOWLEDGE_GRAPH_RELATION_UPSERT_FAILED');
+
+    for (const evidence of relation.evidence) {
+      await transaction.$executeRaw(Prisma.sql`
+        INSERT INTO public."knowledge_relation_evidence" (
+          "id",
+          "tenant_id",
+          "knowledge_base_id",
+          "projection_id",
+          "relation_id",
+          "document_id",
+          "document_version_id",
+          "chunk_id",
+          "excerpt",
+          "start_offset",
+          "end_offset",
+          "confidence",
+          "extractor",
+          "metadata"
+        ) VALUES (
+          ${randomUUID()}::uuid,
+          ${identity.tenantId}::uuid,
+          ${identity.knowledgeBaseId}::uuid,
+          ${projectionId}::uuid,
+          ${relationId}::uuid,
+          ${identity.documentId}::uuid,
+          ${identity.documentVersionId}::uuid,
+          ${evidence.chunkId}::uuid,
+          ${evidence.excerpt},
+          ${evidence.startOffset},
+          ${evidence.endOffset},
+          ${evidence.confidence},
+          ${evidence.extractor},
+          ${JSON.stringify(evidence.metadata)}::jsonb
+        )
+        ON CONFLICT DO NOTHING
+      `);
+    }
+
+    await ensureProjectedRelationGovernanceCandidate(transaction, identity, {
+      projectionId,
+      relationId,
+      subjectEntityId,
+      objectEntityId,
+      normalizedPredicate: relation.normalizedPredicate,
+      confidence: relation.confidence,
+      evidence: relation.evidence,
+    });
+  }
+
+  await transaction.$executeRaw(Prisma.sql`
+    DELETE FROM public."knowledge_relations" AS relation
+    WHERE relation."tenant_id" = ${identity.tenantId}::uuid
+      AND relation."knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public."knowledge_relation_evidence" AS evidence
+        WHERE evidence."tenant_id" = relation."tenant_id"
+          AND evidence."knowledge_base_id" = relation."knowledge_base_id"
+          AND evidence."relation_id" = relation."id"
+      )
+  `);
+  await transaction.$executeRaw(Prisma.sql`
+    DELETE FROM public."knowledge_entities" AS entity
+    WHERE entity."tenant_id" = ${identity.tenantId}::uuid
+      AND entity."knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public."knowledge_entity_mentions" AS mention
+        WHERE mention."tenant_id" = entity."tenant_id"
+          AND mention."knowledge_base_id" = entity."knowledge_base_id"
+          AND mention."entity_id" = entity."id"
+      )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public."knowledge_relations" AS relation
+        WHERE relation."tenant_id" = entity."tenant_id"
+          AND relation."knowledge_base_id" = entity."knowledge_base_id"
+          AND (
+            relation."subject_entity_id" = entity."id"
+            OR relation."object_entity_id" = entity."id"
+          )
+      )
+  `);
+}
+
+interface ProjectedRelationGovernanceInput {
+  readonly projectionId: string;
+  readonly relationId: string;
+  readonly subjectEntityId: string;
+  readonly objectEntityId: string;
+  readonly normalizedPredicate: string;
+  readonly confidence: number;
+  readonly evidence: KnowledgeGraphProjection['relations'][number]['evidence'];
+}
+
+interface PublishedRelationMappingRow {
+  readonly ontology_version_id: string;
+  readonly predicate_definition_id: string;
+  readonly relation_created_at: Date;
+  readonly subject_type: string;
+  readonly object_type: string;
+}
+
+/**
+ * Extracted graph edges are candidates, never trusted retrieval facts. A relation that
+ * matches a published ontology is queued as a maker/checker correction; an unmapped
+ * relation is surfaced as an explicit conflict. Only an independently approved and
+ * applied correction can populate knowledge_relation_governance.
+ */
+async function ensureProjectedRelationGovernanceCandidate(
+  transaction: Prisma.TransactionClient,
+  identity: KnowledgeGraphPersistenceIdentity,
+  relation: ProjectedRelationGovernanceInput,
+): Promise<void> {
+  const existing = await transaction.$queryRaw<Array<{ readonly present: boolean }>>(Prisma.sql`
+    SELECT true AS present
+    FROM public.knowledge_relation_governance
+    WHERE tenant_id = ${identity.tenantId}::uuid
+      AND knowledge_base_id = ${identity.knowledgeBaseId}::uuid
+      AND relation_id = ${relation.relationId}::uuid
+    LIMIT 1
+  `);
+  if (existing[0]?.present === true) return;
+
+  const mappings = await transaction.$queryRaw<PublishedRelationMappingRow[]>(Prisma.sql`
+    SELECT
+      version.id::text AS ontology_version_id,
+      predicate.id::text AS predicate_definition_id,
+      relation.created_at AS relation_created_at,
+      subject.entity_type AS subject_type,
+      object.entity_type AS object_type
+    FROM public.knowledge_relations relation
+    JOIN public.knowledge_entities subject
+      ON subject.tenant_id = relation.tenant_id
+     AND subject.knowledge_base_id = relation.knowledge_base_id
+     AND subject.id = relation.subject_entity_id
+    JOIN public.knowledge_entities object
+      ON object.tenant_id = relation.tenant_id
+     AND object.knowledge_base_id = relation.knowledge_base_id
+     AND object.id = relation.object_entity_id
+    JOIN public.knowledge_ontology_versions version
+      ON version.tenant_id = relation.tenant_id
+     AND version.knowledge_base_id = relation.knowledge_base_id
+     AND version.status = 'PUBLISHED'
+    JOIN public.knowledge_ontology_predicates predicate
+      ON predicate.tenant_id = version.tenant_id
+     AND predicate.knowledge_base_id = version.knowledge_base_id
+     AND predicate.ontology_version_id = version.id
+     AND predicate.predicate = relation.normalized_predicate
+     AND predicate.domain_type_key = CASE
+       WHEN regexp_replace(upper(subject.entity_type), '[^A-Z0-9]+', '_', 'g') = ''
+         THEN 'TYPE_' || substr(md5(subject.entity_type), 1, 8)
+       ELSE left(regexp_replace(upper(subject.entity_type), '[^A-Z0-9]+', '_', 'g'), 120)
+     END
+     AND predicate.range_type_key = CASE
+       WHEN regexp_replace(upper(object.entity_type), '[^A-Z0-9]+', '_', 'g') = ''
+         THEN 'TYPE_' || substr(md5(object.entity_type), 1, 8)
+       ELSE left(regexp_replace(upper(object.entity_type), '[^A-Z0-9]+', '_', 'g'), 120)
+     END
+    WHERE relation.tenant_id = ${identity.tenantId}::uuid
+      AND relation.knowledge_base_id = ${identity.knowledgeBaseId}::uuid
+      AND relation.id = ${relation.relationId}::uuid
+      AND relation.subject_entity_id = ${relation.subjectEntityId}::uuid
+      AND relation.object_entity_id = ${relation.objectEntityId}::uuid
+    ORDER BY version.system_bootstrap ASC,
+      version.published_at DESC NULLS LAST,
+      version.version_number DESC,
+      version.id
+    LIMIT 1
+  `);
+  const mapping = mappings[0];
+  if (mapping !== undefined) {
+    await queueMappedRelationCorrection(transaction, identity, relation, mapping);
+    return;
+  }
+
+  const types = await transaction.$queryRaw<
+    Array<{ readonly subject_type: string; readonly object_type: string }>
+  >(Prisma.sql`
+    SELECT subject.entity_type AS subject_type, object.entity_type AS object_type
+    FROM public.knowledge_relations relation
+    JOIN public.knowledge_entities subject
+      ON subject.tenant_id = relation.tenant_id
+     AND subject.knowledge_base_id = relation.knowledge_base_id
+     AND subject.id = relation.subject_entity_id
+    JOIN public.knowledge_entities object
+      ON object.tenant_id = relation.tenant_id
+     AND object.knowledge_base_id = relation.knowledge_base_id
+     AND object.id = relation.object_entity_id
+    WHERE relation.tenant_id = ${identity.tenantId}::uuid
+      AND relation.knowledge_base_id = ${identity.knowledgeBaseId}::uuid
+      AND relation.id = ${relation.relationId}::uuid
+  `);
+  await queueUnmappedRelationConflict(transaction, identity, relation, types[0]);
+}
+
+async function queueMappedRelationCorrection(
+  transaction: Prisma.TransactionClient,
+  identity: KnowledgeGraphPersistenceIdentity,
+  relation: ProjectedRelationGovernanceInput,
+  mapping: PublishedRelationMappingRow,
+): Promise<void> {
+  const patch = {
+    relationId: relation.relationId,
+    ontologyVersionId: mapping.ontology_version_id,
+    predicateDefinitionId: mapping.predicate_definition_id,
+    validFrom: mapping.relation_created_at.toISOString(),
+    validTo: null,
+  };
+  const evidence = projectedRelationReviewEvidence(identity, relation);
+  const requestHash = stableIngestionHash({
+    action: 'UPSERT_RELATION_VALIDITY',
+    patch,
+    evidence,
+  });
+  const idempotencyKey = `kg-auto-correction:${relation.relationId}`;
+  const rows = await transaction.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
+    INSERT INTO public.knowledge_graph_corrections(
+      tenant_id, knowledge_base_id, action, patch, evidence, evidence_hash,
+      proposed_by_user_id, idempotency_key, request_hash
+    ) VALUES (
+      ${identity.tenantId}::uuid,
+      ${identity.knowledgeBaseId}::uuid,
+      'UPSERT_RELATION_VALIDITY',
+      ${JSON.stringify(patch)}::jsonb,
+      ${JSON.stringify(evidence)}::jsonb,
+      ${stableIngestionHash(evidence)},
+      ${identity.actorUserId}::uuid,
+      ${idempotencyKey},
+      ${requestHash}
+    )
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+    RETURNING id::text AS id
+  `);
+  const correctionId = rows[0]?.id;
+  if (correctionId === undefined) return;
+
+  await recordProjectedGraphGovernanceMutation(transaction, identity, {
+    commandType: 'AUTO_PROPOSE_RELATION_GOVERNANCE',
+    idempotencyKey: `kg-auto-command:${relation.relationId}`,
+    requestHash,
+    resourceType: 'knowledge_graph_correction',
+    resourceId: correctionId,
+    action: 'admin.knowledge-graph-correction.auto-proposed',
+    metadata: {
+      relationId: relation.relationId,
+      ontologyVersionId: mapping.ontology_version_id,
+      predicateDefinitionId: mapping.predicate_definition_id,
+      status: 'DRAFT',
+      trustedForRetrieval: false,
+    },
+  });
+}
+
+async function queueUnmappedRelationConflict(
+  transaction: Prisma.TransactionClient,
+  identity: KnowledgeGraphPersistenceIdentity,
+  relation: ProjectedRelationGovernanceInput,
+  types: { readonly subject_type: string; readonly object_type: string } | undefined,
+): Promise<void> {
+  const subjectType = types?.subject_type ?? 'UNKNOWN';
+  const objectType = types?.object_type ?? 'UNKNOWN';
+  const schemaSignature = stableIngestionHash({
+    projectionId: relation.projectionId,
+    predicate: relation.normalizedPredicate,
+    subjectType,
+    objectType,
+  });
+  const conflictKey = `SCHEMA_GAP:${relation.projectionId}:${schemaSignature.slice(0, 32)}`;
+  const details = {
+    projectionId: relation.projectionId,
+    documentVersionId: identity.documentVersionId,
+    exampleRelationId: relation.relationId,
+    predicate: relation.normalizedPredicate,
+    subjectEntityType: subjectType,
+    objectEntityType: objectType,
+    occurrenceCount: 1,
+    remediation:
+      'Publish an ontology predicate for this domain/range pair, then submit and independently approve a relation-validity correction.',
+  };
+  const evidence = projectedRelationReviewEvidence(identity, relation);
+  const requestHash = stableIngestionHash({
+    conflictKey,
+    projectionId: relation.projectionId,
+    predicate: relation.normalizedPredicate,
+    subjectType,
+    objectType,
+  });
+  const idempotencyKey = `kg-schema-gap:${relation.projectionId}:${schemaSignature.slice(0, 32)}`;
+  const rows = await transaction.$queryRaw<
+    Array<{ readonly id: string; readonly revision: number }>
+  >(Prisma.sql`
+    INSERT INTO public.knowledge_graph_conflicts(
+      tenant_id, knowledge_base_id, projection_id, document_version_id,
+      target_type, target_id, conflict_key, conflict_type,
+      schema_predicate, schema_subject_type, schema_object_type,
+      occurrence_count, details, evidence,
+      detected_by_user_id, idempotency_key, request_hash
+    ) VALUES (
+      ${identity.tenantId}::uuid,
+      ${identity.knowledgeBaseId}::uuid,
+      ${relation.projectionId}::uuid,
+      ${identity.documentVersionId}::uuid,
+      'RELATION',
+      ${relation.relationId}::uuid,
+      ${conflictKey},
+      'ONTOLOGY.SCHEMA.GAP',
+      ${relation.normalizedPredicate},
+      ${subjectType},
+      ${objectType},
+      1,
+      ${JSON.stringify(details)}::jsonb,
+      ${JSON.stringify(evidence)}::jsonb,
+      ${identity.actorUserId}::uuid,
+      ${idempotencyKey},
+      ${requestHash}
+    )
+    ON CONFLICT (tenant_id, knowledge_base_id, conflict_key)
+    DO UPDATE SET
+      occurrence_count = public.knowledge_graph_conflicts.occurrence_count + 1,
+      details = jsonb_set(
+        public.knowledge_graph_conflicts.details,
+        '{occurrenceCount}',
+        to_jsonb(public.knowledge_graph_conflicts.occurrence_count + 1),
+        true
+      ),
+      evidence = (
+        SELECT coalesce(jsonb_agg(sample.value ORDER BY sample.ordinality), '[]'::jsonb)
+        FROM jsonb_array_elements(
+          public.knowledge_graph_conflicts.evidence || EXCLUDED.evidence
+        ) WITH ORDINALITY AS sample(value, ordinality)
+        WHERE sample.ordinality <= 100
+      ),
+      revision = public.knowledge_graph_conflicts.revision + 1,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE public.knowledge_graph_conflicts.status = 'OPEN'
+      AND public.knowledge_graph_conflicts.projection_id = EXCLUDED.projection_id
+      AND public.knowledge_graph_conflicts.schema_predicate = EXCLUDED.schema_predicate
+      AND public.knowledge_graph_conflicts.schema_subject_type = EXCLUDED.schema_subject_type
+      AND public.knowledge_graph_conflicts.schema_object_type = EXCLUDED.schema_object_type
+    RETURNING id::text AS id, revision
+  `);
+  const conflict = rows[0];
+  if (conflict === undefined || conflict.revision !== 1) return;
+
+  await recordProjectedGraphGovernanceMutation(transaction, identity, {
+    commandType: 'AUTO_DETECT_ONTOLOGY_MAPPING_GAP',
+    idempotencyKey: `kg-auto-command-conflict:${relation.projectionId}:${schemaSignature.slice(0, 32)}`,
+    requestHash,
+    resourceType: 'knowledge_graph_conflict',
+    resourceId: conflict.id,
+    action: 'admin.knowledge-graph-conflict.auto-detected',
+    metadata: {
+      projectionId: relation.projectionId,
+      documentVersionId: identity.documentVersionId,
+      exampleRelationId: relation.relationId,
+      predicate: relation.normalizedPredicate,
+      subjectEntityType: subjectType,
+      objectEntityType: objectType,
+      status: 'OPEN',
+      occurrenceCount: 1,
+      trustedForRetrieval: false,
+    },
+  });
+}
+
+function projectedRelationReviewEvidence(
+  identity: KnowledgeGraphPersistenceIdentity,
+  relation: ProjectedRelationGovernanceInput,
+): ReadonlyArray<Record<string, unknown>> {
+  return [
+    {
+      source: 'KNOWLEDGE_GRAPH_PROJECTION',
+      projectionId: relation.projectionId,
+      documentId: identity.documentId,
+      documentVersionId: identity.documentVersionId,
+      relationId: relation.relationId,
+      confidence: relation.confidence,
+      excerpts: relation.evidence.slice(0, 20),
+    },
+  ];
+}
+
+async function recordProjectedGraphGovernanceMutation(
+  transaction: Prisma.TransactionClient,
+  identity: KnowledgeGraphPersistenceIdentity,
+  input: {
+    readonly commandType: string;
+    readonly idempotencyKey: string;
+    readonly requestHash: string;
+    readonly resourceType: string;
+    readonly resourceId: string;
+    readonly action: string;
+    readonly metadata: Readonly<Record<string, unknown>>;
+  },
+): Promise<void> {
+  await transaction.$executeRaw(Prisma.sql`
+    INSERT INTO public.knowledge_graph_commands(
+      tenant_id, knowledge_base_id, command_type, idempotency_key,
+      request_hash, resource_type, resource_id, result_revision, actor_user_id
+    ) VALUES (
+      ${identity.tenantId}::uuid,
+      ${identity.knowledgeBaseId}::uuid,
+      ${input.commandType},
+      ${input.idempotencyKey},
+      ${input.requestHash},
+      ${input.resourceType},
+      ${input.resourceId}::uuid,
+      1,
+      ${identity.actorUserId}::uuid
+    )
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+  `);
+  await transaction.auditEvent.create({
+    data: {
+      tenantId: identity.tenantId,
+      actorType: 'USER',
+      actorId: identity.actorUserId,
+      action: input.action,
+      resourceType: input.resourceType,
+      resourceId: input.resourceId,
+      metadata: input.metadata as Prisma.InputJsonObject,
+    },
+  });
+  await transaction.outboxEvent.create({
+    data: {
+      tenantId: identity.tenantId,
+      aggregateType: input.resourceType,
+      aggregateId: input.resourceId,
+      eventType: input.action,
+      payload: {
+        ...input.metadata,
+        knowledgeBaseId: identity.knowledgeBaseId,
+        revision: 1,
+      } as Prisma.InputJsonObject,
+    },
+  });
+}
+
 async function lockKnowledgeDocument(
   transaction: Prisma.TransactionClient,
   tenantId: string,
@@ -1166,8 +2235,45 @@ async function requireActiveDocumentAndKnowledgeBase(
   }
 }
 
+export function normalizeKnowledgeEntityAliases(
+  canonicalName: string,
+  candidates: readonly string[],
+): readonly string[] {
+  const aliases: string[] = [];
+  const seen = new Set<string>();
+  for (const candidate of candidates) {
+    const alias = candidate
+      .replace(/\s+/g, ' ')
+      .replace(
+        /^[\s"'“”‘’「」『』【】()\[\]，,。；;：:]+|[\s"'“”‘’「」『』【】()\[\]，,。；;：:]+$/gu,
+        '',
+      )
+      .trim()
+      .slice(0, MAX_PERSISTED_ENTITY_ALIAS_LENGTH);
+    if (alias.length < 2 || alias === canonicalName || seen.has(alias)) continue;
+    seen.add(alias);
+    aliases.push(alias);
+    if (aliases.length === MAX_PERSISTED_ENTITY_ALIASES) break;
+  }
+  return aliases;
+}
+
 function sha256(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');
+}
+
+function stableIngestionHash(value: unknown): string {
+  return sha256(stableIngestionJson(value));
+}
+
+function stableIngestionJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(stableIngestionJson).join(',')}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${stableIngestionJson(record[key])}`)
+    .join(',')}}`;
 }
 
 function chunkParsedKnowledgeDocument(parsed: ParsedKnowledgeDocument): Array<
@@ -1236,6 +2342,14 @@ function vectorLiteral(vector: readonly number[]): string {
   return `[${vector.join(',')}]`;
 }
 
+function isRemoteDocumentParserMimeType(mimeType: string): boolean {
+  return (
+    mimeType === 'application/pdf' ||
+    mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  );
+}
+
 function requireIngestionJobId(identity: IngestionIdentity): string {
   if (identity.jobId === null) throw new Error('KNOWLEDGE_INGESTION_JOB_MISSING');
   return identity.jobId;
@@ -1251,6 +2365,78 @@ function pendingJob(tenantId: string, documentVersionId: string, availableAt = n
     attempts: 0,
     availableAt,
   };
+}
+
+function knowledgeGovernanceCreateData(
+  requested: KnowledgeDocumentGovernancePolicy | undefined,
+  previous: {
+    readonly id: string;
+    readonly governanceOwnerUserId: string | null;
+    readonly classification: string;
+    readonly scopeMode: string;
+    readonly organizationScopeIds: readonly string[];
+    readonly projectScopeIds: readonly string[];
+    readonly taskScopeIds: readonly string[];
+    readonly roleTemplateScopeIds: readonly string[];
+    readonly dataLabels: readonly string[];
+    readonly retentionUntil: Date | null;
+    readonly retentionAction: string;
+  } | null,
+  actorUserId: string,
+) {
+  if (requested !== undefined) {
+    return {
+      governanceOwnerUserId: requested.ownerUserId,
+      classification: requested.classification,
+      scopeMode: requested.scopeMode,
+      organizationScopeIds: sortedUnique(requested.organizationScopeIds),
+      projectScopeIds: sortedUnique(requested.projectScopeIds),
+      taskScopeIds: sortedUnique(requested.taskScopeIds),
+      roleTemplateScopeIds: sortedUnique(requested.roleTemplateScopeIds),
+      dataLabels: sortedUnique(requested.dataLabels),
+      effectiveFrom: new Date(requested.effectiveFrom),
+      expiresAt: requested.expiresAt === null ? null : new Date(requested.expiresAt),
+      retentionUntil: requested.retentionUntil === null ? null : new Date(requested.retentionUntil),
+      retentionAction: requested.retentionAction,
+      supersedesVersionId: requested.supersedesVersionId,
+    };
+  }
+  if (previous !== null) {
+    return {
+      governanceOwnerUserId: previous.governanceOwnerUserId ?? actorUserId,
+      classification: previous.classification,
+      scopeMode: previous.scopeMode,
+      organizationScopeIds: [...previous.organizationScopeIds],
+      projectScopeIds: [...previous.projectScopeIds],
+      taskScopeIds: [...previous.taskScopeIds],
+      roleTemplateScopeIds: [...previous.roleTemplateScopeIds],
+      dataLabels: [...previous.dataLabels],
+      effectiveFrom: new Date(),
+      expiresAt: null,
+      retentionUntil: previous.retentionUntil,
+      retentionAction: previous.retentionAction,
+      supersedesVersionId: previous.id,
+    };
+  }
+  return {
+    governanceOwnerUserId: actorUserId,
+    classification: 'INTERNAL',
+    scopeMode: 'TENANT',
+    organizationScopeIds: [],
+    projectScopeIds: [],
+    taskScopeIds: [],
+    roleTemplateScopeIds: [],
+    dataLabels: [],
+    effectiveFrom: new Date(),
+    expiresAt: null,
+    retentionUntil: null,
+    retentionAction: 'ARCHIVE',
+    supersedesVersionId: null,
+  };
+}
+
+function sortedUnique(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
 }
 
 async function hasOwnedClaim(
@@ -1286,6 +2472,10 @@ async function lockOwnedClaim(
     FOR UPDATE
   `);
   return rows.length === 1;
+}
+
+function assertKnowledgeIngestionLeaseActive(lease: KnowledgeIngestionLeaseControl): void {
+  if (lease.signal.aborted) throw new KnowledgeIngestionLeaseLostError();
 }
 
 export function describeKnowledgeIngestionError(error: unknown): KnowledgeIngestionFailure {
@@ -1358,8 +2548,18 @@ function safeErrorMessage(code: string): string {
     KNOWLEDGE_EMBEDDING_DIMENSION_MISMATCH: 'Embedding dimensions do not match the index.',
     KNOWLEDGE_EMBEDDING_COUNT_MISMATCH: 'Embedding response did not match the document chunks.',
     KNOWLEDGE_EMBEDDING_MODEL_CHANGED: 'Embedding model changed during the indexing job.',
+    KNOWLEDGE_EMBEDDING_CLASSIFICATION_NOT_APPROVED:
+      'Document classification is not approved for the configured Embedding route.',
+    KNOWLEDGE_DOCLING_CLASSIFICATION_NOT_APPROVED:
+      'Document classification is not approved for the configured document parser route.',
     KNOWLEDGE_SEMANTIC_DISABLED: 'Semantic indexing is disabled.',
     KNOWLEDGE_EMBEDDING_BATCH_INVALID: 'Embedding request exceeded supported limits.',
+    KNOWLEDGE_GRAPH_ENTITY_UPSERT_FAILED: 'Knowledge graph entity indexing failed.',
+    KNOWLEDGE_GRAPH_ENTITY_REFERENCE_MISSING:
+      'Knowledge graph mention referenced an unknown entity.',
+    KNOWLEDGE_GRAPH_RELATION_REFERENCE_MISSING:
+      'Knowledge graph relation referenced an unknown entity.',
+    KNOWLEDGE_GRAPH_RELATION_UPSERT_FAILED: 'Knowledge graph relation indexing failed.',
   };
   const semanticMessage = semanticMessages[code];
   if (semanticMessage !== undefined) return semanticMessage;

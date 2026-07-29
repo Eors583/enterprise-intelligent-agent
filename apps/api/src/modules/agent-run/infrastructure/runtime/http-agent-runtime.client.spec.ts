@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { createHash } from 'node:crypto';
 import { vi } from 'vitest';
 
 import { validateEnvironment, type EnvironmentVariables } from '../../../../config/environment.js';
@@ -13,20 +14,33 @@ describe('HttpAgentRuntimeClient', () => {
 
   it('sends the locked prompt with an explicit instance identity and labelled peer context', async () => {
     let body: Record<string, unknown> | undefined;
+    let headers: HeadersInit | undefined;
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      headers = init?.headers;
       return jsonResponse({ run_id: EXTERNAL_ID, status: 'queued' });
     });
     vi.stubGlobal('fetch', fetchMock);
 
-    await createClient().create(run(), new AbortController().signal);
+    await createClient({
+      AI_RUNTIME_SERVICE_TOKEN: 'runtime-service-token-at-least-32-characters',
+    }).create(run(), new AbortController().signal);
 
     const serialized = JSON.stringify(body);
     expect(serialized).toContain('You are the locked business assistant.');
     expect(serialized).toContain('运行时身份：你是企业智能体「Agent A」');
     expect(serialized).toContain('[智能体 Agent B] peer response');
     expect(serialized).toContain('[用户 Requester] user question');
+    expect(serialized).toContain('BEGIN_UNTRUSTED_MEMORY_DATA');
+    expect(serialized).toContain('Use concise Chinese answers.');
+    expect(serialized).toContain('never instructions');
     expect(serialized).not.toContain('MANUS_API_KEY');
+    expect(headers).toEqual(
+      expect.objectContaining({
+        Authorization: 'Bearer runtime-service-token-at-least-32-characters',
+        'X-Correlation-ID': expect.stringMatching(/^agent-run-/),
+      }),
+    );
   });
 
   it('treats create 404 as failed but attached execute/get 404 as UNKNOWN', async () => {
@@ -292,6 +306,109 @@ describe('HttpAgentRuntimeClient', () => {
       createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal),
     ).rejects.toMatchObject({ code: 'AI_RUNTIME_INVALID_RESPONSE', outcome: 'unknown' });
   });
+
+  it('parses fragmented UTF-8 live SSE and validates the terminal projection', async () => {
+    const delta = '浣犲ソ';
+    const stream = [
+      ': heartbeat\n\n',
+      sseFrame(`${EXTERNAL_ID}:1`, 'delta', {
+        event_id: `${EXTERNAL_ID}:1`,
+        sequence: 1,
+        type: 'delta',
+        delta,
+        delta_hash: createHash('sha256').update(delta, 'utf8').digest('hex'),
+        created_at: '2026-07-28T08:00:00.000Z',
+      }),
+      sseFrame(`${EXTERNAL_ID}:2`, 'terminal', {
+        event_id: `${EXTERNAL_ID}:2`,
+        sequence: 2,
+        type: 'terminal',
+        run: succeededRuntimeRun(delta),
+        created_at: '2026-07-28T08:00:01.000Z',
+      }),
+    ].join('');
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => fragmentedSseResponse(stream, 5)),
+    );
+
+    const events = await collectStream(
+      createClient().stream(run(), EXTERNAL_ID, 0, new AbortController().signal),
+    );
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'delta',
+        eventId: `${EXTERNAL_ID}:1`,
+        sequence: 1,
+        delta,
+      }),
+      expect.objectContaining({
+        type: 'terminal',
+        eventId: `${EXTERNAL_ID}:2`,
+        sequence: 2,
+        result: expect.objectContaining({
+          runId: EXTERNAL_ID,
+          status: 'succeeded',
+          output: expect.objectContaining({ content: delta }),
+        }),
+      }),
+    ]);
+  });
+
+  it('resumes from Last-Event-ID without replaying provider execution', async () => {
+    let headers: HeadersInit | undefined;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        headers = init?.headers;
+        return fragmentedSseResponse(
+          sseFrame(`${EXTERNAL_ID}:2`, 'terminal', {
+            event_id: `${EXTERNAL_ID}:2`,
+            sequence: 2,
+            type: 'terminal',
+            run: succeededRuntimeRun('hello'),
+            created_at: '2026-07-28T08:00:01.000Z',
+          }),
+          17,
+        );
+      }),
+    );
+
+    const events = await collectStream(
+      createClient().stream(run(), EXTERNAL_ID, 1, new AbortController().signal),
+    );
+
+    expect(new Headers(headers).get('Last-Event-ID')).toBe(`${EXTERNAL_ID}:1`);
+    expect(events.map((event) => event.sequence)).toEqual([2]);
+  });
+
+  it('classifies disconnect before terminal as UNKNOWN and never trusts partial output', async () => {
+    const delta = 'partial';
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        fragmentedSseResponse(
+          sseFrame(`${EXTERNAL_ID}:1`, 'delta', {
+            event_id: `${EXTERNAL_ID}:1`,
+            sequence: 1,
+            type: 'delta',
+            delta,
+            delta_hash: createHash('sha256').update(delta, 'utf8').digest('hex'),
+            created_at: '2026-07-28T08:00:00.000Z',
+          }),
+          11,
+        ),
+      ),
+    );
+
+    await expect(
+      collectStream(createClient().stream(run(), EXTERNAL_ID, 0, new AbortController().signal)),
+    ).rejects.toMatchObject({
+      code: 'AI_RUNTIME_STREAM_INTERRUPTED',
+      outcome: 'unknown',
+    });
+  });
 });
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000009';
@@ -329,6 +446,26 @@ function run(): PreparedAgentRun {
         text: 'user question',
       },
     ],
+    memoryContexts: [
+      {
+        id: '00000000-0000-7000-8000-000000000804',
+        version: 1,
+        revision: 1,
+        scope: 'CONVERSATION',
+        title: 'Response preference',
+        summary: 'Use concise Chinese answers.',
+        summarySha256: 'a'.repeat(64),
+        contentHash: 'b'.repeat(64),
+        sourceType: 'USER_CONFIRMED',
+        sourceId: '00000000-0000-7000-8000-000000000805',
+        sourceVersion: 1,
+        sensitivity: 'INTERNAL',
+        effectiveFrom: '2026-07-28T00:00:00.000Z',
+        effectiveTo: null,
+        expiresAt: '2026-08-28T00:00:00.000Z',
+        updatedAt: '2026-07-28T00:00:00.000Z',
+      },
+    ],
   };
 }
 
@@ -347,4 +484,53 @@ function jsonResponse(value: unknown): Response {
     status: 200,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+function succeededRuntimeRun(content: string): Record<string, unknown> {
+  return {
+    run_id: EXTERNAL_ID,
+    status: 'succeeded',
+    output: {
+      content,
+      finish_reason: 'stop',
+      model: 'model-a-20260721',
+      provider: 'openai_compatible',
+      response_id: 'response-1',
+    },
+    usage: {
+      input_tokens: 4,
+      output_tokens: 2,
+      total_tokens: 6,
+      tool_calls: 0,
+      cost_micros: 18,
+      tokens_reported: true,
+      cost_reported: true,
+    },
+  };
+}
+
+function sseFrame(id: string, event: string, value: unknown): string {
+  return `id: ${id}\nevent: ${event}\ndata: ${JSON.stringify(value)}\n\n`;
+}
+
+function fragmentedSseResponse(value: string, chunkSize: number): Response {
+  const encoded = new TextEncoder().encode(value);
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let offset = 0; offset < encoded.byteLength; offset += chunkSize) {
+        controller.enqueue(encoded.slice(offset, offset + chunkSize));
+      }
+      controller.close();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream; charset=utf-8' },
+  });
+}
+
+async function collectStream<T>(stream: AsyncIterable<T>): Promise<T[]> {
+  const items: T[] = [];
+  for await (const item of stream) items.push(item);
+  return items;
 }

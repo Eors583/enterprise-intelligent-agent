@@ -45,5 +45,81 @@ describe('admin api client', () => {
     const init = fetchMock.mock.calls[0]?.[1];
     expect(init?.body).toBe(body);
     expect(new Headers(init?.headers).has('Content-Type')).toBe(false);
+    expect(init?.credentials).toBe('include');
+    expect(new Headers(init?.headers).has('Authorization')).toBe(false);
+  });
+
+  it('uses the browser CSRF proof for authenticated mutations without exposing bearer tokens', async () => {
+    const fetchMock = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(
+        new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('document', { cookie: 'ea_csrf=csrf%20proof' });
+
+    await request('/admin/organization', {
+      method: 'POST',
+      body: { name: '安全会话企业' },
+      schema: z.object({}),
+    });
+
+    const init = fetchMock.mock.calls[0]?.[1];
+    const headers = new Headers(init?.headers);
+    expect(init?.credentials).toBe('include');
+    expect(headers.get('X-CSRF-Token')).toBe('csrf proof');
+    expect(headers.has('Authorization')).toBe(false);
+  });
+
+  it('accepts an explicit JSON null for a nullable response contract', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response('null', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    await expect(
+      request('/admin/integrations/feishu/organization-sync/preview', {
+        schema: z.string().nullable(),
+        authenticated: false,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it('does not reinterpret HTTP 204 as a JSON null', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(new Response(null, { status: 204 })),
+    );
+
+    await expect(
+      request('/admin/integrations/feishu/organization-sync/preview', {
+        schema: z.string().nullable(),
+        authenticated: false,
+      }),
+    ).rejects.toThrow('服务响应与客户端契约不一致');
+  });
+
+  it('reports an empty HTTP 200 body as invalid JSON instead of a nullable empty state', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn<typeof fetch>().mockResolvedValue(
+        new Response('', {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      ),
+    );
+
+    await expect(
+      request('/admin/integrations/feishu/organization-sync/preview', {
+        schema: z.string().nullable(),
+        authenticated: false,
+      }),
+    ).rejects.toThrow('服务响应不是有效的 JSON');
   });
 });

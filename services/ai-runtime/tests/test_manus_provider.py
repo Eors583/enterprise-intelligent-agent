@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from dataclasses import replace
 from typing import Any
 from uuid import UUID
@@ -41,7 +42,11 @@ def completion_request(*, run_id: UUID = RUN_ID) -> ProviderCompletionRequest:
     )
 
 
-def success_body(task_id: str, *, content: str = "Project summary") -> dict[str, Any]:
+def success_body(
+    task_id: str,
+    *,
+    content: str = "Project summary",
+) -> dict[str, Any]:
     return {
         "ok": True,
         "request_id": "manus-request-list",
@@ -50,18 +55,92 @@ def success_body(task_id: str, *, content: str = "Project summary") -> dict[str,
             {
                 "id": f"event-status-{task_id}",
                 "type": "status_update",
-                "timestamp": 2,
+                "timestamp": "1785259942341",
                 "status_update": {"agent_status": "stopped"},
             },
             {
                 "id": f"event-answer-{task_id}",
                 "type": "assistant_message",
-                "timestamp": 1,
+                "timestamp": "1785259942340",
                 "assistant_message": {"content": content, "attachments": []},
             },
         ],
         "has_more": False,
     }
+
+
+def test_manus_readiness_uses_cached_authenticated_task_list_probe() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.url.path == "/v2/task.list"
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "request_id": "readiness-list",
+                "data": [
+                    {
+                        "id": "task-readiness",
+                        "status": "stopped",
+                        "created_at": 1,
+                        "updated_at": 2,
+                        "title": "redacted",
+                        "credit_usage": 0,
+                        "task_url": "https://manus.im/app/task-readiness",
+                    }
+                ],
+                "has_more": False,
+            },
+        )
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert await provider.is_ready() is True
+        assert await provider.is_ready() is True
+        await provider.aclose()
+        assert await provider.is_ready() is False
+
+    asyncio.run(scenario())
+    assert len(requests) == 1
+    assert requests[0].url.params["limit"] == "1"
+    assert requests[0].url.params["order"] == "desc"
+    assert requests[0].headers["x-manus-api-key"] == "dummy-manus-key"
+
+
+def test_manus_readiness_fails_closed_for_invalid_task_list_envelope() -> None:
+    request_count = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_count
+        request_count += 1
+        return httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "request_id": "readiness-invalid",
+                "data": [{"id": "task-without-status"}],
+                "has_more": False,
+            },
+        )
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        assert await provider.is_ready() is False
+        assert await provider.is_ready() is False
+        await provider.aclose()
+
+    asyncio.run(scenario())
+    assert request_count == 1
 
 
 def test_manus_creates_private_isolated_task_and_polls_until_stopped() -> None:
@@ -142,8 +221,11 @@ def test_manus_creates_private_isolated_task_and_polls_until_stopped() -> None:
     assert payload["project_id"] == "project-approved"
     assert payload["title"] == f"enterprise-run-{RUN_ID}"
     assert payload["message"]["connectors"] == []
+    assert payload["locale"] == "zh-CN"
+    assert "structured_output_schema" not in payload
     assert "agent-default-main_task" not in create_request.content.decode()
-    message_envelope = payload["message"]["content"]
+    assert payload["message"]["content"][0]["type"] == "text"
+    message_envelope = payload["message"]["content"][0]["text"]
     assert '"role":"system"' in message_envelope
     assert '"role":"user"' in message_envelope
     assert captured[1].url.params["task_id"] == "task-isolated-1"
@@ -251,9 +333,12 @@ def test_manus_retries_transient_incomplete_task_reads_without_creating_again(
                     json={
                         "ok": True,
                         "request_id": "private malformed status",
+                        "task_id": "task-incomplete",
                         "messages": [
                             {
+                                "id": "event-malformed-status",
                                 "type": "status_update",
+                                "timestamp": 1,
                                 "status_update": {"private": "dummy-manus-key"},
                             }
                         ],
@@ -265,13 +350,18 @@ def test_manus_retries_transient_incomplete_task_reads_without_creating_again(
                     json={
                         "ok": True,
                         "request_id": "private malformed answer",
+                        "task_id": "task-incomplete",
                         "messages": [
                             {
+                                "id": "event-stopped-with-malformed-answer",
                                 "type": "status_update",
+                                "timestamp": 2,
                                 "status_update": {"agent_status": "stopped"},
                             },
                             {
+                                "id": "event-malformed-answer",
                                 "type": "assistant_message",
+                                "timestamp": 1,
                                 "assistant_message": {"content": {"private": "dummy-manus-key"}},
                             },
                         ],
@@ -384,7 +474,10 @@ def test_every_run_creates_a_distinct_task_and_never_uses_shared_agent_thread() 
             )
         if request.url.path == "/v2/task.listMessages":
             task_id = request.url.params["task_id"]
-            return httpx.Response(200, json=success_body(task_id, content=f"answer-{task_id}"))
+            return httpx.Response(
+                200,
+                json=success_body(task_id, content=f"answer-{task_id}"),
+            )
         raise AssertionError(f"unexpected Manus path {request.url.path}")
 
     async def scenario() -> None:
@@ -392,6 +485,7 @@ def test_every_run_creates_a_distinct_task_and_never_uses_shared_agent_thread() 
             base_url="https://api.manus.ai",
             api_key="dummy-manus-key",
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_incomplete_response_retries=0,
         )
         first = await provider.complete(completion_request())
         second = await provider.complete(
@@ -406,6 +500,153 @@ def test_every_run_creates_a_distinct_task_and_never_uses_shared_agent_thread() 
     assert created_task_ids == ["task-1", "task-2"]
     assert create_payloads[0]["title"] != create_payloads[1]["title"]
     assert all("task_id" not in payload for payload in create_payloads)
+
+
+def test_manus_rejects_stopped_task_without_a_terminal_assistant_message() -> None:
+    stopped: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/task.create":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "request_id": "create-empty",
+                    "task_id": "task-empty",
+                    "task_title": f"enterprise-run-{RUN_ID}",
+                },
+            )
+        if request.url.path == "/v2/task.listMessages":
+            body = success_body("task-empty")
+            body["messages"] = body["messages"][:1]
+            return httpx.Response(
+                200,
+                json=body,
+            )
+        if request.url.path == "/v2/task.stop":
+            stopped.append(json.loads(request.content)["task_id"])
+            return httpx.Response(200, json={"ok": True, "request_id": "stop-empty"})
+        raise AssertionError(f"unexpected Manus path {request.url.path}")
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_incomplete_response_retries=0,
+        )
+        with pytest.raises(ProviderResponseError):
+            await provider.complete(completion_request())
+        await provider.aclose()
+
+    asyncio.run(scenario())
+    assert stopped == ["task-empty"]
+
+
+def test_manus_rejects_list_messages_envelope_for_a_different_task() -> None:
+    stopped: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/task.create":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "request_id": "create-correlated",
+                    "task_id": "task-created-for-run",
+                    "task_title": f"enterprise-run-{RUN_ID}",
+                },
+            )
+        if request.url.path == "/v2/task.listMessages":
+            return httpx.Response(200, json=success_body("agent-default-main_task"))
+        if request.url.path == "/v2/task.stop":
+            stopped.append(json.loads(request.content)["task_id"])
+            return httpx.Response(200, json={"ok": True, "request_id": "stop-correlated"})
+        raise AssertionError(f"unexpected Manus path {request.url.path}")
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_incomplete_response_retries=0,
+        )
+        with pytest.raises(ProviderResponseError):
+            await provider.complete(completion_request())
+        await provider.aclose()
+
+    asyncio.run(scenario())
+    assert stopped == ["task-created-for-run"]
+
+
+def test_manus_rejects_messages_that_are_not_in_declared_descending_order() -> None:
+    stopped: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/task.create":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "request_id": "create-order",
+                    "task_id": "task-order",
+                },
+            )
+        if request.url.path == "/v2/task.listMessages":
+            body = success_body("task-order")
+            body["messages"] = list(reversed(body["messages"]))
+            return httpx.Response(200, json=body)
+        if request.url.path == "/v2/task.stop":
+            stopped.append(json.loads(request.content)["task_id"])
+            return httpx.Response(200, json={"ok": True, "request_id": "stop-order"})
+        raise AssertionError(f"unexpected Manus path {request.url.path}")
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_incomplete_response_retries=0,
+        )
+        with pytest.raises(ProviderResponseError):
+            await provider.complete(completion_request())
+        await provider.aclose()
+
+    asyncio.run(scenario())
+    assert stopped == ["task-order"]
+
+
+def test_manus_rejects_event_timestamps_without_an_explicit_timezone() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v2/task.create":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "request_id": "create-timestamp",
+                    "task_id": "task-timestamp",
+                },
+            )
+        if request.url.path == "/v2/task.listMessages":
+            body = success_body("task-timestamp")
+            body["messages"][0]["timestamp"] = "2026-07-29T01:00:02"
+            return httpx.Response(200, json=body)
+        if request.url.path == "/v2/task.stop":
+            return httpx.Response(200, json={"ok": True, "request_id": "stop-timestamp"})
+        raise AssertionError(f"unexpected Manus path {request.url.path}")
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            max_incomplete_response_retries=0,
+        )
+        with pytest.raises(ProviderResponseError):
+            await provider.complete(completion_request())
+        await provider.aclose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(
@@ -578,8 +819,14 @@ def test_manus_suppresses_http_exception_with_secret_request_headers(
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if failure == "timeout":
-            raise httpx.ReadTimeout("dummy-manus-key private timeout", request=request)
-        raise httpx.ConnectError("dummy-manus-key private transport", request=request)
+            raise httpx.ReadTimeout(
+                "Authorization: dummy-manus-key private timeout",
+                request=request,
+            )
+        raise httpx.ConnectError(
+            "Authorization: dummy-manus-key private transport",
+            request=request,
+        )
 
     provider = ManusProvider(
         base_url="https://api.manus.ai",
@@ -588,10 +835,26 @@ def test_manus_suppresses_http_exception_with_secret_request_headers(
     )
     with pytest.raises(expected_error) as raised:
         asyncio.run(provider.complete(completion_request()))
+    rendered = "".join(traceback.format_exception(raised.type, raised.value, raised.tb))
     assert raised.value.__cause__ is None
+    assert "Authorization" not in rendered
     assert "dummy-manus-key" not in str(raised.value)
+    assert "dummy-manus-key" not in rendered
     assert "dummy-manus-key" not in caplog.text
     asyncio.run(provider.aclose())
+
+
+def test_manus_owned_client_ignores_environment_proxy_but_accepts_explicit_proxy() -> None:
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            proxy_url="http://127.0.0.1:10837",
+        )
+        assert provider._client.trust_env is False
+        await provider.aclose()
+
+    asyncio.run(scenario())
 
 
 def test_manus_retries_429_with_backoff_then_succeeds() -> None:
@@ -741,8 +1004,9 @@ def test_manus_timeout_best_effort_stops_remote_task() -> None:
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
         )
         request = replace(completion_request(), timeout_ms=20)
-        with pytest.raises(ProviderTimeoutError):
+        with pytest.raises(ProviderTimeoutError) as raised:
             await provider.complete(request)
+        assert raised.value.__cause__ is None
         await provider.aclose()
 
     asyncio.run(scenario())

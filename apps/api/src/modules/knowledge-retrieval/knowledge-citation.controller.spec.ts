@@ -8,6 +8,7 @@ import { KnowledgeCitationService } from './knowledge-citation.service.js';
 
 const VERSION_ID = '00000000-0000-7000-8000-000000000501';
 const CHUNK_ID = '00000000-0000-7000-8000-000000000601';
+const MESSAGE_ID = '00000000-0000-7000-8000-000000000701';
 
 describe('KnowledgeCitationController', () => {
   let app: INestApplication;
@@ -43,16 +44,22 @@ describe('KnowledgeCitationController', () => {
     });
 
     const response = await request(app.getHttpServer())
-      .get(`/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}`)
+      .get(`/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}?messageId=${MESSAGE_ID}`)
       .expect(200);
 
     expect(knowledgeCitationDetailSchema.safeParse(response.body).success).toBe(true);
-    expect(getOriginal).toHaveBeenCalledWith(VERSION_ID, CHUNK_ID);
+    expect(getOriginal).toHaveBeenCalledWith(MESSAGE_ID, VERSION_ID, CHUNK_ID);
   });
 
   it('rejects malformed resource identifiers before invoking the service', async () => {
     await request(app.getHttpServer())
-      .get(`/api/v1/knowledge-citations/not-a-uuid/chunks/${CHUNK_ID}`)
+      .get(`/api/v1/knowledge-citations/not-a-uuid/chunks/${CHUNK_ID}?messageId=${MESSAGE_ID}`)
+      .expect(400);
+  });
+
+  it('requires a message-bound citation context', async () => {
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}`)
       .expect(400);
   });
 });

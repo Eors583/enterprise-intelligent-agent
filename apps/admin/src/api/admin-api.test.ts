@@ -4,11 +4,21 @@ import {
   changePasswordRequestSchema,
   changePasswordResponseSchema,
   createKnowledgeBaseRequestSchema,
+  feishuDirectoryPreviewSchema,
+  feishuDirectorySyncRunDetailSchema,
   feishuOrganizationSyncStatusSchema,
   knowledgeBaseIndexReadinessSchema,
   knowledgeBaseSchema,
   knowledgeDocumentSchema,
   knowledgeDocumentVersionDetailSchema,
+  knowledgeParseReviewQueueResponseSchema,
+  importKnowledgeWebDocumentRequestSchema,
+  issueMemberInvitationResponseSchema,
+  reviewKnowledgeDocumentParseRequestSchema,
+  publishKnowledgeDocumentVersionRequestSchema,
+  knowledgeGraphRebuildResponseSchema,
+  knowledgeGraphOverviewSchema,
+  knowledgeGraphResponseSchema,
 } from '@enterprise/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,16 +27,24 @@ const { requestMock } = vi.hoisted(() => ({ requestMock: vi.fn() }));
 vi.mock('./client', () => ({ request: requestMock }));
 
 import {
+  applyFeishuDirectoryPreview,
   archiveKnowledgeDocument,
   changePassword,
   createKnowledgeBase,
+  createFeishuDirectoryPreview,
   getFeishuOrganizationSyncStatus,
   getKnowledgeDocument,
   getKnowledgeDocumentVersion,
+  importKnowledgeWebDocument,
+  issueDirectoryMemberInvitation,
+  listPendingKnowledgeParseReviews,
+  reviewKnowledgeDocumentParse,
   getKnowledgeBaseReadiness,
+  getKnowledgeGraph,
+  getKnowledgeGraphOverview,
   publishKnowledgeDocumentVersion,
+  rebuildKnowledgeDocumentGraph,
   rollbackKnowledgeDocumentVersion,
-  startFeishuOrganizationSync,
   uploadKnowledgeDocument,
   uploadKnowledgeDocumentVersion,
 } from './admin-api';
@@ -63,12 +81,89 @@ describe('admin API', () => {
     });
   });
 
-  it('starts a sync with the same response contract', async () => {
-    await expect(startFeishuOrganizationSync()).resolves.toEqual(syncStatus);
-    expect(requestMock).toHaveBeenCalledWith('/admin/integrations/feishu/organization-sync', {
-      method: 'POST',
-      schema: feishuOrganizationSyncStatusSchema,
-    });
+  it('uses preview then durable apply endpoints for Feishu directory changes', async () => {
+    const preview = {
+      id: '00000000-0000-7000-8000-000000000201',
+      status: 'READY',
+      snapshotCursor: 'a'.repeat(64),
+      summary: {
+        created: 1,
+        updated: 0,
+        archived: 0,
+        deactivated: 0,
+        conflicts: 0,
+        unchanged: 2,
+      },
+      expiresAt: '2026-07-28T08:30:00.000Z',
+      appliedAt: null,
+      createdAt: '2026-07-28T08:15:00.000Z',
+      items: [],
+    } as const;
+    requestMock.mockResolvedValueOnce(preview);
+    await expect(createFeishuDirectoryPreview()).resolves.toEqual(preview);
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/integrations/feishu/organization-sync/preview',
+      { method: 'POST', schema: feishuDirectoryPreviewSchema },
+    );
+
+    const run = {
+      id: '00000000-0000-7000-8000-000000000202',
+      previewId: preview.id,
+      status: 'QUEUED',
+      attempts: 0,
+      maxAttempts: 4,
+      expectedSnapshotCursor: preview.snapshotCursor,
+      lastErrorCode: null,
+      summary: null,
+      startedAt: null,
+      finishedAt: null,
+      createdAt: '2026-07-28T08:16:00.000Z',
+    } as const;
+    requestMock.mockResolvedValueOnce(run);
+    await expect(
+      applyFeishuDirectoryPreview({
+        previewId: preview.id,
+        idempotencyKey: `admin-${preview.id}`,
+      }),
+    ).resolves.toEqual(run);
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/integrations/feishu/organization-sync/runs',
+      {
+        method: 'POST',
+        body: { previewId: preview.id, idempotencyKey: `admin-${preview.id}` },
+        schema: feishuDirectorySyncRunDetailSchema,
+      },
+    );
+  });
+
+  it('issues a one-time activation invitation for a credentialless directory member', async () => {
+    const memberId = '00000000-0000-7000-8000-000000000102';
+    const invitation = {
+      id: '00000000-0000-7000-8000-000000000202',
+      memberId,
+      email: 'member@example.test',
+      displayName: 'Member',
+      status: 'PENDING',
+      deliveryStatus: 'NOT_CONFIGURED',
+      issuedAt: '2026-07-29T01:00:00.000Z',
+      expiresAt: '2026-07-29T01:15:00.000Z',
+      consumedAt: null,
+      deliveryKind: 'MANUAL_FALLBACK',
+      fallback: {
+        kind: 'MANUAL_FALLBACK',
+        acceptanceUrl: `https://admin.example.test/#/accept-invitation?token=ea_invite_${'a'.repeat(
+          43,
+        )}`,
+        expiresAt: '2026-07-29T01:15:00.000Z',
+      },
+    } as const;
+    requestMock.mockResolvedValueOnce(invitation);
+
+    await expect(issueDirectoryMemberInvitation(memberId)).resolves.toEqual(invitation);
+    expect(requestMock).toHaveBeenLastCalledWith(
+      `/admin/members/${encodeURIComponent(memberId)}/invitation`,
+      { method: 'POST', schema: issueMemberInvitationResponseSchema },
+    );
   });
 
   it('validates non-negative result counts', () => {
@@ -211,6 +306,49 @@ describe('admin API', () => {
     });
   });
 
+  it('loads relationship graph governance data from stable encoded routes', async () => {
+    const controller = new AbortController();
+
+    await getKnowledgeGraphOverview('knowledge/base', controller.signal);
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/graph-overview',
+      {
+        schema: knowledgeGraphOverviewSchema,
+        signal: controller.signal,
+      },
+    );
+
+    await getKnowledgeGraph(
+      'knowledge/base',
+      {
+        query: '  差旅 制度  ',
+        entityType: 'POLICY',
+        focusEntityId: '00000000-0000-7000-8000-000000000021',
+        limit: 25,
+      },
+      controller.signal,
+    );
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/graph?limit=25&query=%E5%B7%AE%E6%97%85+%E5%88%B6%E5%BA%A6&entityType=POLICY&focusEntityId=00000000-0000-7000-8000-000000000021',
+      {
+        schema: knowledgeGraphResponseSchema,
+        signal: controller.signal,
+      },
+    );
+  });
+
+  it('rebuilds a document version relationship graph through the typed route', async () => {
+    await rebuildKnowledgeDocumentGraph('knowledge/base', 'document/id', 'version/id');
+
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/documents/document%2Fid/versions/version%2Fid/rebuild-graph',
+      {
+        method: 'POST',
+        schema: knowledgeGraphRebuildResponseSchema,
+      },
+    );
+  });
+
   it('uploads a source file with its trimmed document title', async () => {
     const file = new File(['policy'], '员工制度.pdf', { type: 'application/pdf' });
     requestMock.mockResolvedValueOnce({ id: 'document-id' });
@@ -261,11 +399,57 @@ describe('admin API', () => {
     );
   });
 
+  it('uses controlled web import and parse-review endpoints with typed bodies', async () => {
+    const webInput = { url: 'https://docs.example.com/policy', title: 'Policy' };
+    await importKnowledgeWebDocument('knowledge/base', webInput);
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/documents/import-web',
+      {
+        method: 'POST',
+        body: importKnowledgeWebDocumentRequestSchema.parse(webInput),
+        schema: knowledgeDocumentSchema,
+      },
+    );
+
+    await listPendingKnowledgeParseReviews('knowledge/base');
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/parse-review-queue',
+      { schema: knowledgeParseReviewQueueResponseSchema },
+    );
+
+    const review = {
+      decision: 'REJECT' as const,
+      expectedReviewRevision: 2,
+      note: 'Table extraction is incomplete.',
+    };
+    await reviewKnowledgeDocumentParse('knowledge/base', 'document/id', 'version/id', review);
+    expect(requestMock).toHaveBeenLastCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/documents/document%2Fid/versions/version%2Fid/parse-review',
+      {
+        method: 'POST',
+        body: reviewKnowledgeDocumentParseRequestSchema.parse(review),
+        schema: knowledgeDocumentVersionDetailSchema,
+      },
+    );
+  });
+
   it('publishes drafts and rolls back with the expected-current guard', async () => {
-    await publishKnowledgeDocumentVersion('knowledge/base', 'document/id', 'version/id');
+    const publication = {
+      evaluationRunId: '00000000-0000-7000-8000-000000000202',
+    };
+    await publishKnowledgeDocumentVersion(
+      'knowledge/base',
+      'document/id',
+      'version/id',
+      publication,
+    );
     expect(requestMock).toHaveBeenLastCalledWith(
       '/admin/knowledge-bases/knowledge%2Fbase/documents/document%2Fid/versions/version%2Fid/publish',
-      { method: 'POST', schema: knowledgeDocumentSchema },
+      {
+        method: 'POST',
+        body: publishKnowledgeDocumentVersionRequestSchema.parse(publication),
+        schema: knowledgeDocumentSchema,
+      },
     );
 
     const expectedCurrentVersionId = '00000000-0000-7000-8000-000000000201';

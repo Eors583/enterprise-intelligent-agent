@@ -93,7 +93,11 @@ export class DoclingDocumentParserAdapter implements KnowledgeDocumentParser {
     // page-level provenance instead of collapsing the whole file to one blob.
     form.append('md_page_break_placeholder', `\n${DOCLING_PAGE_BREAK}\n`);
 
+    input.signal?.throwIfAborted();
     const controller = new AbortController();
+    const abortFromLease = (): void => controller.abort();
+    input.signal?.addEventListener('abort', abortFromLease, { once: true });
+    if (input.signal?.aborted === true) controller.abort();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     timer.unref?.();
     try {
@@ -124,6 +128,7 @@ export class DoclingDocumentParserAdapter implements KnowledgeDocumentParser {
       throw new DocumentParsingError('DOCUMENT_PARSER_UNAVAILABLE');
     } finally {
       clearTimeout(timer);
+      input.signal?.removeEventListener('abort', abortFromLease);
     }
   }
 }
@@ -238,15 +243,19 @@ function doclingEndpoint(baseUrl: string): URL {
 function requireDoclingMimeType(mimeType: string): SupportedDocumentMimeType {
   if (
     mimeType !== 'application/pdf' &&
-    mimeType !== 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    mimeType !== 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' &&
+    mimeType !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
   ) {
     throw new DocumentParsingError('UNSUPPORTED_MIME_TYPE');
   }
   return mimeType;
 }
 
-function doclingFormat(mimeType: SupportedDocumentMimeType): 'pdf' | 'docx' {
-  return mimeType === 'application/pdf' ? 'pdf' : 'docx';
+function doclingFormat(mimeType: SupportedDocumentMimeType): 'pdf' | 'docx' | 'xlsx' {
+  if (mimeType === 'application/pdf') return 'pdf';
+  return mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    ? 'xlsx'
+    : 'docx';
 }
 
 function requireSourceSignature(bytes: Buffer, mimeType: SupportedDocumentMimeType): void {
@@ -263,7 +272,12 @@ function requireSourceSignature(bytes: Buffer, mimeType: SupportedDocumentMimeTy
 }
 
 function safeFileName(fileName: string | undefined, mimeType: SupportedDocumentMimeType): string {
-  const fallback = mimeType === 'application/pdf' ? 'document.pdf' : 'document.docx';
+  const fallback =
+    mimeType === 'application/pdf'
+      ? 'document.pdf'
+      : mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        ? 'document.xlsx'
+        : 'document.docx';
   if (fileName === undefined) return fallback;
   const normalized = fileName.trim().replaceAll('\\', '/').split('/').at(-1)?.trim() ?? '';
   if (

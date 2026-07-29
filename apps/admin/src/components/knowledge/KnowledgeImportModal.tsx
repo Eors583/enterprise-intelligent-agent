@@ -17,7 +17,7 @@ import { knowledgeVersionFailure, latestKnowledgeVersion } from './knowledge-ing
 
 const MAXIMUM_FILES = 20;
 const MAXIMUM_FILE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md']);
+const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'txt', 'md']);
 
 type ImportFileStatus = 'QUEUED' | 'UPLOADING' | 'SUCCEEDED' | 'FAILED';
 
@@ -182,7 +182,7 @@ export function KnowledgeImportModal({
           type="file"
           multiple
           disabled={importing || files.length >= MAXIMUM_FILES}
-          accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+          accept=".pdf,.docx,.xlsx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/markdown"
           onChange={chooseFiles}
         />
         <div
@@ -215,7 +215,7 @@ export function KnowledgeImportModal({
             ↑
           </span>
           <strong>拖放多个文件到这里，或点击选择</strong>
-          <small>支持 PDF、DOCX、TXT、MD；最多 20 个，每个不超过 20 MB</small>
+          <small>支持 PDF、DOCX、XLSX、TXT、MD；最多 20 个，每个不超过 20 MB</small>
         </div>
 
         {files.length > 0 ? (
@@ -308,7 +308,7 @@ function fileProblem(file: File): string | null {
     return '文件名长度必须在 1 到 300 个字符之间';
   }
   if (!ALLOWED_EXTENSIONS.has(extensionOf(file.name))) {
-    return '仅支持 PDF、Word（.docx）、纯文本（.txt）和 Markdown（.md）文件';
+    return '仅支持 PDF、Word（.docx）、Excel（.xlsx）、纯文本（.txt）和 Markdown（.md）文件';
   }
   if (file.size === 0) return '文件内容为空';
   if (file.size > MAXIMUM_FILE_BYTES) return '文件超过 20 MB';

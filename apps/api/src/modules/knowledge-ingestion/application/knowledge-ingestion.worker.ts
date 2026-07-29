@@ -18,7 +18,9 @@ import {
   KnowledgeIngestionProcessor,
   describeKnowledgeIngestionError,
   type KnowledgeIngestionFailure,
+  type KnowledgeIngestionLeaseControl,
 } from './knowledge-ingestion.service.js';
+import { KnowledgeIngestionAvailabilityService } from './knowledge-ingestion-availability.service.js';
 
 @Injectable()
 export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -41,6 +43,8 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
     private readonly jobs: KnowledgeIngestionJobRepository,
     @Inject(KnowledgeIngestionProcessor)
     private readonly ingestion: KnowledgeIngestionProcessor,
+    @Inject(KnowledgeIngestionAvailabilityService)
+    private readonly availability: KnowledgeIngestionAvailabilityService,
   ) {
     this.enabled = config.get('KNOWLEDGE_INGESTION_WORKER_ENABLED', { infer: true });
     this.pollIntervalMs = config.get('KNOWLEDGE_INGESTION_POLL_INTERVAL_MS', { infer: true });
@@ -53,16 +57,19 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
 
   onApplicationBootstrap(): void {
     if (!this.enabled) {
+      this.availability.markWorkerStopped();
       this.logger.log('Knowledge ingestion worker is disabled.');
       return;
     }
     this.stopped = false;
+    this.availability.markWorkerStarting();
     this.logger.log(`Starting knowledge ingestion worker ${this.workerId}.`);
     this.schedule(0);
   }
 
   async onApplicationShutdown(): Promise<void> {
     this.stopped = true;
+    this.availability.markWorkerStopped();
     if (this.timer !== undefined) clearTimeout(this.timer);
     this.timer = undefined;
     await this.activeTick;
@@ -71,20 +78,26 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
   /** Runs one bounded claim batch; exposed for deterministic operational tests. */
   async runOnce(): Promise<number> {
     if (!this.enabled) return 0;
-    const claims = await this.jobs.claim({
-      workerId: this.workerId,
-      batchSize: this.batchSize,
-      claimTtlMs: this.claimTtlMs,
-    });
-    const settled = await Promise.allSettled(claims.map((claim) => this.processClaim(claim)));
-    for (const result of settled) {
-      if (result.status === 'rejected') {
-        this.logger.error(
-          `Unable to persist a knowledge ingestion transition (${errorKind(result.reason)}).`,
-        );
+    try {
+      const claims = await this.jobs.claim({
+        workerId: this.workerId,
+        batchSize: this.batchSize,
+        claimTtlMs: this.claimTtlMs,
+      });
+      const settled = await Promise.allSettled(claims.map((claim) => this.processClaim(claim)));
+      for (const result of settled) {
+        if (result.status === 'rejected') {
+          this.logger.error(
+            `Unable to persist a knowledge ingestion transition (${errorKind(result.reason)}).`,
+          );
+        }
       }
+      this.availability.markWorkerReady();
+      return claims.length;
+    } catch (error) {
+      this.availability.markWorkerUnavailable();
+      throw error;
     }
-    return claims.length;
   }
 
   private schedule(delayMs: number): void {
@@ -122,14 +135,18 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
     const heartbeat = this.startHeartbeat(claim);
     let failure: unknown;
     try {
-      await this.ingestion.executeClaim(claim, this.workerId);
+      await this.ingestion.executeClaim(claim, this.workerId, heartbeat.lease);
     } catch (error) {
       failure = error;
     } finally {
       await heartbeat.stop();
     }
+    if (heartbeat.lost()) {
+      this.logLostLease(claim.id);
+      return;
+    }
     if (failure === undefined) return;
-    if (failure instanceof KnowledgeIngestionLeaseLostError || heartbeat.lost()) {
+    if (failure instanceof KnowledgeIngestionLeaseLostError) {
       this.logLostLease(claim.id);
       return;
     }
@@ -137,32 +154,65 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
   }
 
   private startHeartbeat(claim: ClaimedKnowledgeIngestionJob): {
+    readonly lease: KnowledgeIngestionLeaseControl;
     readonly lost: () => boolean;
     readonly stop: () => Promise<void>;
   } {
     let lost = false;
-    let activeRenewal: Promise<void> = Promise.resolve();
+    const controller = new AbortController();
+    let leaseOperation: Promise<void> = Promise.resolve();
+    const markLost = (): void => {
+      if (lost) return;
+      lost = true;
+      controller.abort();
+    };
+    const runLeaseOperation = (
+      operation: () => Promise<boolean>,
+      failureMessage: string,
+    ): Promise<void> => {
+      leaseOperation = leaseOperation.then(async () => {
+        if (lost) return;
+        try {
+          if (!(await operation())) markLost();
+        } catch (error) {
+          markLost();
+          this.logger.error(`${failureMessage} (${errorKind(error)}).`);
+        }
+      });
+      return leaseOperation;
+    };
     const intervalMs = Math.max(1_000, Math.floor(this.claimTtlMs / 3));
     const timer = setInterval(() => {
-      activeRenewal = activeRenewal.then(async () => {
-        try {
-          const renewed = await this.jobs.renewLease({
+      void runLeaseOperation(
+        () =>
+          this.jobs.renewLease({
             jobId: claim.id,
             workerId: this.workerId,
             claimTtlMs: this.claimTtlMs,
-          });
-          if (!renewed) lost = true;
-        } catch (error) {
-          this.logger.error(`Knowledge ingestion lease renewal failed (${errorKind(error)}).`);
-        }
-      });
+          }),
+        'Knowledge ingestion lease renewal failed',
+      );
     }, intervalMs);
     timer.unref();
     return {
+      lease: {
+        signal: controller.signal,
+        assertOwned: async () => {
+          await runLeaseOperation(
+            () =>
+              this.jobs.ownsLease({
+                jobId: claim.id,
+                workerId: this.workerId,
+              }),
+            'Knowledge ingestion lease ownership check failed',
+          );
+          if (lost) throw new KnowledgeIngestionLeaseLostError();
+        },
+      },
       lost: () => lost,
       stop: async () => {
         clearInterval(timer);
-        await activeRenewal;
+        await leaseOperation;
       },
     };
   }

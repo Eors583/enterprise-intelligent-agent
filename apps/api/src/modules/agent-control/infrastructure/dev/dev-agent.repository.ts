@@ -17,6 +17,8 @@ export class DevAgentRepository extends AgentRepository {
       status: 'online',
       versionStatus: 'published',
       visibility: 'tenant',
+      assignedToPrincipal: false,
+      requiresActiveAssignment: false,
       summary: '可协助查询产品路线、需求背景和会议结论。',
     },
     {
@@ -27,11 +29,16 @@ export class DevAgentRepository extends AgentRepository {
       status: 'online',
       versionStatus: 'published',
       visibility: 'tenant',
+      assignedToPrincipal: false,
+      requiresActiveAssignment: false,
       summary: '可协助定位系统模块、接口约定和研发进度。',
     },
   ];
 
-  async listMemberAgents(tenantId: string): Promise<readonly MemberAgent[]> {
+  async listMemberAgents(
+    tenantId: string,
+    _principalUserId: string,
+  ): Promise<readonly MemberAgent[]> {
     return this.agents.filter((agent) => agent.tenantId === tenantId);
   }
 }

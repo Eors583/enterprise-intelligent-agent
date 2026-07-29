@@ -34,4 +34,20 @@ describe('OrganizationAdminController member password reset', () => {
     });
     expect(result).not.toHaveProperty('temporaryPassword');
   });
+
+  it('delegates credentialless directory-member activation to a one-time invitation', async () => {
+    const invitation = {
+      memberId: MEMBER_ID,
+      deliveryKind: 'EMAIL_SENT',
+      fallback: null,
+    };
+    const issueForDirectoryMember = vi.fn().mockResolvedValue(invitation);
+    const controller = new OrganizationAdminController(
+      {} as OrganizationAdminService,
+      { issueForDirectoryMember } as unknown as MemberInvitationService,
+    );
+
+    await expect(controller.issueDirectoryMemberInvitation(MEMBER_ID)).resolves.toBe(invitation);
+    expect(issueForDirectoryMember).toHaveBeenCalledWith(MEMBER_ID);
+  });
 });

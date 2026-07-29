@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  conversationAgentRunSchema,
   createConversationRequestSchema,
   createMessageRequestSchema,
   knowledgeCitationDetailSchema,
+  knowledgeCitationOriginalQuerySchema,
   textMessageContentSchema,
   upsertAnswerFeedbackRequestSchema,
 } from '../src/conversation.js';
@@ -11,6 +13,37 @@ import {
 const USER_ID = '00000000-0000-7000-8000-000000000102';
 const AGENT_ID = '00000000-0000-7000-8000-000000000301';
 const SECOND_AGENT_ID = '00000000-0000-7000-8000-000000000302';
+
+describe('conversation Agent Run read contracts', () => {
+  const run = {
+    id: '00000000-0000-7000-8000-000000000401',
+    inputMessageId: '00000000-0000-7000-8000-000000000402',
+    outputMessageId: null,
+    agentId: AGENT_ID,
+    agentName: '制度助手',
+    status: 'RUNNING',
+    errorCode: null,
+    errorMessage: null,
+    retryable: false,
+    createdAt: '2026-07-29T06:00:00.000Z',
+    startedAt: '2026-07-29T06:00:01.000Z',
+    finishedAt: null,
+  };
+
+  it.each(['live', 'terminal_only', null] as const)(
+    'accepts the explicit %s stream capability',
+    (streamMode) => {
+      expect(conversationAgentRunSchema.parse({ ...run, streamMode }).streamMode).toBe(streamMode);
+    },
+  );
+
+  it('requires the API to state whether the stream capability is known', () => {
+    expect(conversationAgentRunSchema.safeParse(run).success).toBe(false);
+    expect(
+      conversationAgentRunSchema.safeParse({ ...run, streamMode: 'simulated_stream' }).success,
+    ).toBe(false);
+  });
+});
 
 describe('conversation write contracts', () => {
   it.each([
@@ -124,7 +157,7 @@ describe('conversation citation read contracts', () => {
   it('接受可溯源到知识库、文档版本和 chunk 的完整引用', () => {
     expect(
       textMessageContentSchema.parse({ type: 'text', text: '答案 [来源1]', citations: [citation] }),
-    ).toMatchObject({ citations: [{ ...citation, verificationStatus: 'VERIFIED' }] });
+    ).toMatchObject({ citations: [{ ...citation, verificationStatus: 'LINEAGE_VERIFIED' }] });
   });
 
   it('兼容旧历史引用并显式标记为不可完整核验', () => {
@@ -192,6 +225,15 @@ describe('conversation citation read contracts', () => {
       documentVersionId: citation.documentVersionId,
       chunkId: citation.chunkId,
     });
+  });
+
+  it('要求引用原文请求绑定产生该引用的消息', () => {
+    expect(
+      knowledgeCitationOriginalQuerySchema.safeParse({
+        messageId: '00000000-0000-7000-8000-000000000701',
+      }).success,
+    ).toBe(true);
+    expect(knowledgeCitationOriginalQuerySchema.safeParse({}).success).toBe(false);
   });
 });
 

@@ -22,6 +22,7 @@ import { getKnowledgeCitationOriginal } from './api';
 import { composerReducer, createClientMessageId, initialComposerState } from './composer-state';
 import {
   useAgentRunActions,
+  useAgentRunStream,
   useAnswerFeedback,
   useConversationMessages,
   useSendTextMessage,
@@ -109,7 +110,9 @@ export function MessagingSidebar({
             <button
               type="button"
               disabled={agents.length < 2}
-              title={agents.length < 2 ? '至少需要两个可联系的在线智能体' : '创建智能体协作会话'}
+              title={
+                agents.length < 2 ? '至少需要两个已通过运行就绪检查的智能体' : '创建智能体协作会话'
+              }
               onClick={() => setIsAgentPairDialogOpen(true)}
             >
               <span className="agent-pair-mark" aria-hidden="true">
@@ -118,7 +121,7 @@ export function MessagingSidebar({
               <span>
                 <strong>智能体协作</strong>
                 <small>
-                  {agents.length < 2 ? '在线智能体不足 2 个' : '选择两个智能体受控协作'}
+                  {agents.length < 2 ? '运行可用智能体不足 2 个' : '选择两个智能体受控协作'}
                 </small>
               </span>
               <i aria-hidden="true">＋</i>
@@ -272,7 +275,7 @@ function AgentPairDialog({
         </header>
 
         <p className="agent-pair-dialog-intro">
-          选择两个在线智能体。你将作为观察者发送协作主题，服务端按设定轮次组织它们交替讨论。
+          选择两个已通过运行就绪检查的智能体。你将作为观察者发送协作主题，服务端按设定轮次组织它们交替讨论。
         </p>
 
         <form onSubmit={(event) => void submit(event)}>
@@ -386,6 +389,10 @@ export function ConversationWorkspace({
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
   const retryGateRef = useRef(new RunActionGate());
   const listEndRef = useRef<HTMLDivElement | null>(null);
+  const activeRun = [...(messages.data?.runs ?? [])]
+    .reverse()
+    .find((run) => ['QUEUED', 'DISPATCHING', 'RUNNING', 'UNKNOWN'].includes(run.status));
+  const runStream = useAgentRunStream(conversationId, activeRun);
 
   useEffect(() => {
     dispatch({ type: 'reset' });
@@ -397,7 +404,7 @@ export function ConversationWorkspace({
 
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.data?.items.length]);
+  }, [messages.data?.items.length, runStream.content.length]);
 
   if (!conversation) {
     return (
@@ -415,9 +422,6 @@ export function ConversationWorkspace({
   const isAgentPair = conversationHasAgentPair(conversation);
   const latestMessage = messages.data?.items.at(-1);
   const latestRun = messages.data?.runs.at(-1);
-  const activeRun = [...(messages.data?.runs ?? [])]
-    .reverse()
-    .find((run) => ['QUEUED', 'DISPATCHING', 'RUNNING'].includes(run.status));
   const failedRun =
     latestRun && ['FAILED', 'UNKNOWN', 'CANCELLED'].includes(latestRun.status)
       ? latestRun
@@ -537,15 +541,31 @@ export function ConversationWorkspace({
             <span /> 正在等待服务端确认发送…
           </div>
         )}
-        {awaitingAgentReply && (
-          <div className="sending-indicator agent-thinking" role="status">
-            <span /> 智能体正在处理，通常需要 10–30 秒；回复生成后会自动显示。
+        {awaitingAgentReply && runStream.content.length > 0 ? (
+          <AgentRunStreamingBubble
+            agentName={activeRun?.agentName ?? 'AI'}
+            content={runStream.content}
+            phase={runStream.phase}
+          />
+        ) : null}
+        {awaitingAgentReply && runStream.content.length === 0 && (
+          <div
+            className="sending-indicator agent-thinking"
+            role="status"
+            data-stream-mode={activeRun.streamMode ?? 'unknown'}
+          >
+            <span /> {agentRunWaitingMessage(activeRun)}
           </div>
         )}
         {awaitingAgentReply ? (
           <div className="agent-run-status-detail">
             <span>
               {activeRun?.agentName} · {activeRun?.status}
+            </span>
+            <span className="agent-run-stream-state" data-stream-state={runStream.phase}>
+              {activeRun.streamMode === 'terminal_only' && runStream.content.length === 0
+                ? '等待供应商终态'
+                : agentRunStreamPhaseLabel(runStream.phase)}
             </span>
             <button
               type="button"
@@ -624,6 +644,52 @@ export function ConversationWorkspace({
   );
 }
 
+export function agentRunStreamPhaseLabel(
+  phase: 'idle' | 'replaying' | 'live' | 'offline' | 'terminal' | 'terminal_only',
+): string {
+  return {
+    idle: '等待生成',
+    replaying: '正在恢复实时事件',
+    live: '正在实时生成',
+    offline: '连接中断，正在续传',
+    terminal: '生成完成',
+    terminal_only: '供应商仅返回终态',
+  }[phase];
+}
+
+export function agentRunWaitingMessage(run: Pick<ConversationAgentRun, 'streamMode'>): string {
+  return run.streamMode === 'terminal_only'
+    ? '等待供应商终态；当前供应商不提供增量输出，完成后会自动显示回复。'
+    : '智能体正在处理，通常需要 10–30 秒；回复生成后会自动显示。';
+}
+
+export function AgentRunStreamingBubble({
+  agentName,
+  content,
+  phase,
+}: {
+  readonly agentName: string;
+  readonly content: string;
+  readonly phase: 'idle' | 'replaying' | 'live' | 'offline' | 'terminal' | 'terminal_only';
+}): React.JSX.Element {
+  return (
+    <article
+      className="message-entry from-agent agent-run-streaming"
+      data-stream-state={phase}
+      aria-label={`${agentName} streaming reply`}
+    >
+      <div className="message-sender-avatar agent">AI</div>
+      <div className="message-entry-body">
+        <div className="message-meta">
+          <strong>{agentName}</strong>
+          <span className="sender-type agent">{agentRunStreamPhaseLabel(phase)}</span>
+        </div>
+        <p>{content}</p>
+      </div>
+    </article>
+  );
+}
+
 function MessageBubble({
   message,
   isCurrentUser,
@@ -656,6 +722,7 @@ function MessageBubble({
             {message.content.citations.map((citation, index) => (
               <MessageCitationCard
                 key={citation.chunkId ?? `legacy:${citation.documentId}:${index}`}
+                messageId={message.id}
                 citation={citation}
                 index={index}
               />
@@ -825,9 +892,11 @@ export function answerFeedbackReasonLabel(reason: AnswerFeedbackReason): string 
 }
 
 export function MessageCitationCard({
+  messageId,
   citation,
   index,
 }: {
+  messageId: string;
   citation: MessageCitation;
   index: number;
 }): React.JSX.Element {
@@ -866,6 +935,7 @@ export function MessageCitationCard({
     setOriginalError(null);
     try {
       const detail = await getKnowledgeCitationOriginal(
+        messageId,
         citation.documentVersionId,
         citation.chunkId,
         controller.signal,
@@ -893,6 +963,7 @@ export function MessageCitationCard({
             <span>旧引用 · 不可完整核验</span>
           ) : (
             <>
+              <span>来源链路已核验（非内容真实性判定）</span>
               <span>知识库：{citation.knowledgeBaseName}</span>
               <span>文档：v{citation.documentVersion}</span>
               <span>章节：{metadata.heading}</span>
@@ -902,7 +973,7 @@ export function MessageCitationCard({
           )}
         </div>
         <p>{citation.excerpt}</p>
-        {citation.verificationStatus === 'VERIFIED' ? (
+        {citation.verificationStatus === 'LINEAGE_VERIFIED' ? (
           <button
             type="button"
             className="message-citation-original-action"
@@ -922,7 +993,7 @@ export function MessageCitationCard({
         )}
       </details>
 
-      {isOriginalOpen && citation.verificationStatus === 'VERIFIED' ? (
+      {isOriginalOpen && citation.verificationStatus === 'LINEAGE_VERIFIED' ? (
         <div
           className="citation-original-dialog-backdrop"
           onMouseDown={(event) => {
@@ -1219,8 +1290,8 @@ export function citationDisplayMetadata(citation: MessageCitation): {
   };
 }
 
-function knowledgeSourceTypeLabel(sourceType: 'TEXT' | 'MARKDOWN' | 'FILE'): string {
-  return { TEXT: '文本', MARKDOWN: 'Markdown', FILE: '文件' }[sourceType];
+function knowledgeSourceTypeLabel(sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB'): string {
+  return { TEXT: '文本', MARKDOWN: 'Markdown', FILE: '文件', WEB: 'HTTPS 网页' }[sourceType];
 }
 
 function fullDateTime(value: string): string {

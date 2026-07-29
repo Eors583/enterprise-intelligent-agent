@@ -8,6 +8,7 @@ import {
   KNOWLEDGE_DOCUMENT_PARSER,
   type KnowledgeDocumentParser,
 } from './application/knowledge-document-parser.port.js';
+import { KnowledgeIngestionAvailabilityService } from './application/knowledge-ingestion-availability.service.js';
 import {
   KnowledgeIngestionProcessor,
   KnowledgeIngestionService,
@@ -15,6 +16,7 @@ import {
 import { KnowledgeIngestionWorker } from './application/knowledge-ingestion.worker.js';
 import { KnowledgeIngestionJobRepository } from './domain/knowledge-ingestion-job.repository.js';
 import { DoclingDocumentParserAdapter } from './infrastructure/docling-document-parser.adapter.js';
+import { ControlledKnowledgeWebFetcher } from './infrastructure/controlled-knowledge-web-fetcher.js';
 import { DocumentParserAdapter } from './infrastructure/document-parser.adapter.js';
 import { KnowledgeObjectStoreModule } from './infrastructure/knowledge-object-store.module.js';
 import { PrismaKnowledgeIngestionJobRepository } from './infrastructure/prisma-knowledge-ingestion-job.repository.js';
@@ -23,6 +25,7 @@ import { PrismaKnowledgeIngestionJobRepository } from './infrastructure/prisma-k
   imports: [AdminAccessModule, KnowledgeSemanticModule, KnowledgeObjectStoreModule],
   providers: [
     DocumentParserAdapter,
+    ControlledKnowledgeWebFetcher,
     {
       provide: KNOWLEDGE_DOCUMENT_PARSER,
       inject: [ConfigService, DocumentParserAdapter],
@@ -47,12 +50,16 @@ import { PrismaKnowledgeIngestionJobRepository } from './infrastructure/prisma-k
         });
         return {
           parse: (input) =>
-            input.mimeType === 'text/plain' || input.mimeType === 'text/markdown'
+            input.mimeType === 'text/plain' ||
+            input.mimeType === 'text/markdown' ||
+            input.mimeType === 'text/html' ||
+            input.mimeType === 'application/xhtml+xml'
               ? localParser.parse(input)
               : doclingParser.parse(input),
         };
       },
     },
+    KnowledgeIngestionAvailabilityService,
     KnowledgeIngestionProcessor,
     KnowledgeIngestionService,
     KnowledgeIngestionWorker,
@@ -62,6 +69,12 @@ import { PrismaKnowledgeIngestionJobRepository } from './infrastructure/prisma-k
       useExisting: PrismaKnowledgeIngestionJobRepository,
     },
   ],
-  exports: [KnowledgeIngestionProcessor, KnowledgeIngestionService, KnowledgeIngestionWorker],
+  exports: [
+    KnowledgeIngestionProcessor,
+    KnowledgeIngestionService,
+    KnowledgeIngestionWorker,
+    KnowledgeIngestionAvailabilityService,
+    ControlledKnowledgeWebFetcher,
+  ],
 })
 export class KnowledgeIngestionModule {}

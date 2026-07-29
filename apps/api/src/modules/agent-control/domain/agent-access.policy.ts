@@ -10,9 +10,17 @@ export function canContactMemberAgent(
   principal: AgentAccessPrincipal,
   agent: MemberAgent,
 ): boolean {
+  if (
+    agent.tenantId !== principal.tenantId ||
+    agent.status === 'disabled' ||
+    (agent.requiresActiveAssignment && !agent.assignedToPrincipal)
+  ) {
+    return false;
+  }
   return (
-    agent.tenantId === principal.tenantId &&
-    agent.status !== 'disabled' &&
-    (agent.visibility === 'tenant' || agent.ownerUserId === principal.userId)
+    agent.requiresActiveAssignment ||
+    agent.visibility === 'tenant' ||
+    agent.ownerUserId === principal.userId ||
+    agent.assignedToPrincipal
   );
 }

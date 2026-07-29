@@ -18,6 +18,7 @@ export function listAgentCollaborationCandidates(
       member.status !== 'active' ||
       !member.capabilities.canContactAgent ||
       agent?.status !== 'online' ||
+      agent.operationalAvailability.status !== 'AVAILABLE' ||
       seen.has(agent.id)
     ) {
       return [];

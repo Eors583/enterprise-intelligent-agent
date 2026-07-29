@@ -1,0 +1,19 @@
+# Reference only. Install under a dedicated least-privilege service account after
+# replacing every REPLACE_* value. Secrets remain in the service manager or
+# secret store environment; never place them in this file.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Daily protected PostgreSQL custom archive.
+5 1 * * * cd REPLACE_REPOSITORY_ROOT && /usr/bin/pwsh -NoProfile -NonInteractive -File ./infra/scripts/Backup-EnterpriseDatabase.ps1 -Container REPLACE_SOURCE_CONTAINER -Database enterprise_agent -DatabaseUser enterprise_agent_backup -OutputDirectory REPLACE_PROTECTED_BACKUP_DIRECTORY -RetentionDays 14 >> REPLACE_OPERATIONS_LOG_DIRECTORY/backup.log 2>&1
+
+# Monitoring snapshot every two minutes. The injected webhook environment is
+# owned by the service manager, not by this crontab.
+*/2 * * * * cd REPLACE_REPOSITORY_ROOT && /usr/bin/pwsh -NoProfile -NonInteractive -File ./infra/scripts/Invoke-EnterpriseMonitoringCycle.ps1 -Container REPLACE_SOURCE_CONTAINER -Database enterprise_agent -DatabaseUser enterprise_agent_monitor -ExpectedEmbeddingModel REPLACE_IMMUTABLE_EMBEDDING_MODEL -BackupDirectory REPLACE_PROTECTED_BACKUP_DIRECTORY -ApiBaseUrl https://REPLACE_API_HOST -AdminBaseUrl https://REPLACE_ADMIN_HOST -AiRuntimeBaseUrl https://REPLACE_AI_RUNTIME_HOST -Deliver >> REPLACE_OPERATIONS_LOG_DIRECTORY/monitoring.log 2>&1
+
+# Export the atomic monitoring snapshot to a node_exporter textfile directory.
+1-59/2 * * * * cd REPLACE_REPOSITORY_ROOT && /usr/bin/pwsh -NoProfile -NonInteractive -File ./infra/scripts/Export-EnterprisePrometheusMetrics.ps1 -MonitoringResultPath ./.data/monitoring/latest-monitoring-result.json -OutputPath REPLACE_NODE_EXPORTER_TEXTFILE_DIRECTORY/enterprise_agent.prom >> REPLACE_OPERATIONS_LOG_DIRECTORY/metrics.log 2>&1
+
+# Weekly isolated restore rehearsal. The restore container/cluster must be
+# independent from the source database and pre-provisioned with required roles.
+20 3 * * 0 cd REPLACE_REPOSITORY_ROOT && /usr/bin/pwsh -NoProfile -NonInteractive -File ./infra/scripts/Invoke-EnterpriseBackupRehearsal.ps1 -SourceContainer REPLACE_SOURCE_CONTAINER -SourceDatabase enterprise_agent -SourceDatabaseUser enterprise_agent_backup -RestoreContainer REPLACE_ISOLATED_RESTORE_CONTAINER -RestoreDatabaseUser enterprise_agent_restore -BackupDirectory REPLACE_PROTECTED_BACKUP_DIRECTORY >> REPLACE_OPERATIONS_LOG_DIRECTORY/restore-rehearsal.log 2>&1

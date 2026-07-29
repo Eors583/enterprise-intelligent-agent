@@ -19,6 +19,7 @@ import { FileInterceptor } from '@nestjs/platform-express';
 import {
   createKnowledgeBaseRequestSchema,
   createKnowledgeDocumentRequestSchema,
+  knowledgeDocumentGovernancePolicySchema,
   type CreateKnowledgeBaseRequest,
   type CreateKnowledgeDocumentRequest,
   type KnowledgeBase,
@@ -26,15 +27,32 @@ import {
   type KnowledgeBaseListResponse,
   type KnowledgeDocument,
   type KnowledgeDocumentChunkListResponse,
+  type KnowledgeDocumentGovernancePolicy,
   type KnowledgeDocumentVersionDetail,
+  type KnowledgeParseReviewQueueResponse,
   type KnowledgeEmbeddingRebuildResponse,
+  type KnowledgeGraphOverview,
+  type KnowledgeGraphQuery,
+  type KnowledgeGraphRebuildResponse,
+  type KnowledgeGraphResponse,
+  type PublishKnowledgeDocumentVersionRequest,
   type KnowledgeRetrievalTestRequest,
   type KnowledgeRetrievalTestResponse,
   type RollbackKnowledgeDocumentVersionRequest,
+  type ImportKnowledgeWebDocumentRequest,
+  type ReviewKnowledgeDocumentParseRequest,
+  type ReviewKnowledgeDocumentGovernanceRequest,
+  type UpdateKnowledgeDocumentVersionGovernanceRequest,
   type UpdateKnowledgeBaseRequest,
   type UpdateKnowledgeDocumentRequest,
   knowledgeRetrievalTestRequestSchema,
+  importKnowledgeWebDocumentRequestSchema,
+  publishKnowledgeDocumentVersionRequestSchema,
+  knowledgeGraphQuerySchema,
   rollbackKnowledgeDocumentVersionRequestSchema,
+  reviewKnowledgeDocumentParseRequestSchema,
+  reviewKnowledgeDocumentGovernanceRequestSchema,
+  updateKnowledgeDocumentVersionGovernanceRequestSchema,
   updateKnowledgeBaseRequestSchema,
   updateKnowledgeDocumentRequestSchema,
 } from '@enterprise/contracts';
@@ -56,6 +74,7 @@ interface UploadedKnowledgeFile {
 interface KnowledgeUploadBody {
   readonly title?: unknown;
   readonly changeSummary?: unknown;
+  readonly governance?: unknown;
 }
 
 @Controller('admin/knowledge-bases')
@@ -82,6 +101,21 @@ export class KnowledgeAdminController {
     return this.knowledge.readiness(knowledgeBaseId);
   }
 
+  @Get(':knowledgeBaseId/graph-overview')
+  graphOverview(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+  ): Promise<KnowledgeGraphOverview> {
+    return this.knowledge.graphOverview(knowledgeBaseId);
+  }
+
+  @Get(':knowledgeBaseId/graph')
+  graph(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Query(new SchemaValidationPipe(knowledgeGraphQuerySchema)) request: KnowledgeGraphQuery,
+  ): Promise<KnowledgeGraphResponse> {
+    return this.knowledge.graph(knowledgeBaseId, request);
+  }
+
   @Patch(':id')
   update(
     @Param('id', new ParseUUIDPipe()) id: string,
@@ -98,6 +132,22 @@ export class KnowledgeAdminController {
     request: CreateKnowledgeDocumentRequest,
   ): Promise<KnowledgeDocument> {
     return this.knowledge.createDocument(knowledgeBaseId, request);
+  }
+
+  @Post(':knowledgeBaseId/documents/import-web')
+  importWebDocument(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Body(new SchemaValidationPipe(importKnowledgeWebDocumentRequestSchema))
+    request: ImportKnowledgeWebDocumentRequest,
+  ): Promise<KnowledgeDocument> {
+    return this.knowledge.importWebDocument(knowledgeBaseId, request);
+  }
+
+  @Get(':knowledgeBaseId/parse-review-queue')
+  listPendingParseReviews(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+  ): Promise<KnowledgeParseReviewQueueResponse> {
+    return this.knowledge.listPendingParseReviews(knowledgeBaseId);
   }
 
   @Get(':knowledgeBaseId/documents/:documentId')
@@ -195,13 +245,68 @@ export class KnowledgeAdminController {
     return this.knowledge.retryDocumentVersion(knowledgeBaseId, documentId, documentVersionId);
   }
 
+  @Post(':knowledgeBaseId/documents/:documentId/versions/:documentVersionId/parse-review')
+  reviewDocumentVersionParse(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Param('documentId', new ParseUUIDPipe()) documentId: string,
+    @Param('documentVersionId', new ParseUUIDPipe()) documentVersionId: string,
+    @Body(new SchemaValidationPipe(reviewKnowledgeDocumentParseRequestSchema))
+    request: ReviewKnowledgeDocumentParseRequest,
+  ): Promise<KnowledgeDocumentVersionDetail> {
+    return this.knowledge.reviewDocumentVersionParse(
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+      request,
+    );
+  }
+
+  @Patch(':knowledgeBaseId/documents/:documentId/versions/:documentVersionId/governance')
+  updateDocumentVersionGovernance(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Param('documentId', new ParseUUIDPipe()) documentId: string,
+    @Param('documentVersionId', new ParseUUIDPipe()) documentVersionId: string,
+    @Body(new SchemaValidationPipe(updateKnowledgeDocumentVersionGovernanceRequestSchema))
+    request: UpdateKnowledgeDocumentVersionGovernanceRequest,
+  ): Promise<KnowledgeDocumentVersionDetail> {
+    return this.knowledge.updateDocumentVersionGovernance(
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+      request,
+    );
+  }
+
+  @Post(':knowledgeBaseId/documents/:documentId/versions/:documentVersionId/governance-review')
+  reviewDocumentVersionGovernance(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Param('documentId', new ParseUUIDPipe()) documentId: string,
+    @Param('documentVersionId', new ParseUUIDPipe()) documentVersionId: string,
+    @Body(new SchemaValidationPipe(reviewKnowledgeDocumentGovernanceRequestSchema))
+    request: ReviewKnowledgeDocumentGovernanceRequest,
+  ): Promise<KnowledgeDocumentVersionDetail> {
+    return this.knowledge.reviewDocumentVersionGovernance(
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+      request,
+    );
+  }
+
   @Post(':knowledgeBaseId/documents/:documentId/versions/:documentVersionId/publish')
   publishDocumentVersion(
     @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
     @Param('documentId', new ParseUUIDPipe()) documentId: string,
     @Param('documentVersionId', new ParseUUIDPipe()) documentVersionId: string,
+    @Body(new SchemaValidationPipe(publishKnowledgeDocumentVersionRequestSchema))
+    request: PublishKnowledgeDocumentVersionRequest,
   ): Promise<KnowledgeDocument> {
-    return this.knowledge.publishDocumentVersion(knowledgeBaseId, documentId, documentVersionId);
+    return this.knowledge.publishDocumentVersion(
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+      request,
+    );
   }
 
   @Post(':knowledgeBaseId/documents/:documentId/versions/:documentVersionId/rollback')
@@ -242,6 +347,19 @@ export class KnowledgeAdminController {
     );
   }
 
+  @Post(':knowledgeBaseId/documents/:documentId/versions/:documentVersionId/rebuild-graph')
+  rebuildDocumentVersionGraph(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Param('documentId', new ParseUUIDPipe()) documentId: string,
+    @Param('documentVersionId', new ParseUUIDPipe()) documentVersionId: string,
+  ): Promise<KnowledgeGraphRebuildResponse> {
+    return this.knowledge.rebuildDocumentVersionGraph(
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+    );
+  }
+
   @Delete(':knowledgeBaseId/documents/:documentId')
   archiveDocument(
     @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
@@ -255,7 +373,7 @@ export class KnowledgeAdminController {
 function parseUploadMetadata(
   body: KnowledgeUploadBody,
   fileName: string,
-): { title: string; changeSummary?: string } {
+): { title: string; changeSummary?: string; governance?: KnowledgeDocumentGovernancePolicy } {
   const fallbackTitle = fileName.replace(/\.[^.]+$/u, '').trim();
   const title = typeof body.title === 'string' ? body.title.trim() : fallbackTitle;
   if (title.length < 1 || title.length > 300) {
@@ -264,16 +382,43 @@ function parseUploadMetadata(
   return { title, ...parseVersionUploadMetadata(body) };
 }
 
-function parseVersionUploadMetadata(body: KnowledgeUploadBody): { changeSummary?: string } {
-  if (body.changeSummary === undefined || body.changeSummary === '') return {};
-  if (typeof body.changeSummary !== 'string') {
-    throw new BadRequestException('changeSummary must be text.');
+function parseVersionUploadMetadata(body: KnowledgeUploadBody): {
+  changeSummary?: string;
+  governance?: KnowledgeDocumentGovernancePolicy;
+} {
+  const result: {
+    changeSummary?: string;
+    governance?: KnowledgeDocumentGovernancePolicy;
+  } = {};
+  if (body.changeSummary !== undefined && body.changeSummary !== '') {
+    if (typeof body.changeSummary !== 'string') {
+      throw new BadRequestException('changeSummary must be text.');
+    }
+    const changeSummary = body.changeSummary.trim();
+    if (changeSummary.length > 500) {
+      throw new BadRequestException('changeSummary must not exceed 500 characters.');
+    }
+    if (changeSummary.length > 0) result.changeSummary = changeSummary;
   }
-  const changeSummary = body.changeSummary.trim();
-  if (changeSummary.length > 500) {
-    throw new BadRequestException('changeSummary must not exceed 500 characters.');
+  if (body.governance !== undefined && body.governance !== '') {
+    let candidate: unknown = body.governance;
+    if (typeof candidate === 'string') {
+      try {
+        candidate = JSON.parse(candidate);
+      } catch {
+        throw new BadRequestException('governance must be valid JSON.');
+      }
+    }
+    const parsed = knowledgeDocumentGovernancePolicySchema.safeParse(candidate);
+    if (!parsed.success) {
+      throw new BadRequestException({
+        message: 'governance contains invalid policy fields.',
+        issues: parsed.error.issues,
+      });
+    }
+    result.governance = parsed.data;
   }
-  return changeSummary.length === 0 ? {} : { changeSummary };
+  return result;
 }
 
 function requireUploadedKnowledgeFile(
@@ -346,6 +491,8 @@ function resolveUploadMimeType(mimeType: string, fileName: string): string {
       return 'application/pdf';
     case '.docx':
       return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case '.xlsx':
+      return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
     default:
       return normalizedMimeType;
   }

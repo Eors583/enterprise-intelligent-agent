@@ -9,6 +9,8 @@ import {
 import type { Request, Response } from 'express';
 import type { ApiErrorResponse } from '@enterprise/contracts';
 
+import { buildHttpFailureLog } from '../observability/http-access-log.js';
+
 type ErrorDescription = Pick<ApiErrorResponse, 'code' | 'message' | 'details'>;
 
 @Catch()
@@ -25,8 +27,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
     if (status >= 500) {
       this.logger.error(
-        `${request.method} ${request.originalUrl} failed [${request.requestId}]`,
-        exception instanceof Error ? exception.stack : String(exception),
+        JSON.stringify(buildHttpFailureLog({ request, statusCode: status, error: exception })),
       );
     }
 

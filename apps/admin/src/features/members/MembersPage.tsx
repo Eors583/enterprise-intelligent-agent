@@ -13,6 +13,7 @@ import {
   createMember,
   getOrganization,
   inviteMember,
+  issueDirectoryMemberInvitation,
   listMemberInvitations,
   resendMemberInvitation,
   resetMemberPassword,
@@ -349,23 +350,30 @@ function InviteMemberModal({
     >
       {issued ? (
         <div className="form-stack">
-          <Notice tone={issued.deliveryStatus === 'SENT' ? 'success' : 'info'}>
-            {issued.deliveryStatus === 'SENT'
-              ? '邀请邮件已发送。'
-              : '邮件投递尚未配置或失败，请通过安全渠道发送下方一次性链接。'}
+          <Notice tone={issued.deliveryKind === 'EMAIL_SENT' ? 'success' : 'info'}>
+            {issued.deliveryKind === 'EMAIL_SENT'
+              ? '邀请邮件已发送。安全起见，系统不会向管理端返回邀请令牌或链接。'
+              : '邮件投递尚未配置或失败。下方是显式手工回退链接，仅显示一次且将在短时间内失效。'}
           </Notice>
-          <label>
-            <span>一次性邀请链接</span>
-            <input readOnly value={issued.acceptanceUrl} />
-          </label>
+          {issued.fallback ? (
+            <label>
+              <span>
+                一次性邀请链接（有效期至{' '}
+                {new Date(issued.fallback.expiresAt).toLocaleString('zh-CN')}）
+              </span>
+              <input readOnly value={issued.fallback.acceptanceUrl} />
+            </label>
+          ) : null}
           <div className="modal-actions">
-            <button
-              className="button secondary"
-              type="button"
-              onClick={() => void navigator.clipboard?.writeText(issued.acceptanceUrl)}
-            >
-              复制链接
-            </button>
+            {issued.fallback ? (
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => void navigator.clipboard?.writeText(issued.fallback!.acceptanceUrl)}
+              >
+                复制回退链接
+              </button>
+            ) : null}
             <button className="button primary" type="button" onClick={onClose}>
               完成
             </button>
@@ -610,6 +618,7 @@ function EditMemberModal({
   const [revokedSessionCount, setRevokedSessionCount] = useState<number | null>(null);
   const [resendingInvitation, setResendingInvitation] = useState(false);
   const [invitationLink, setInvitationLink] = useState<string | null>(null);
+  const [invitationEmailSent, setInvitationEmailSent] = useState(false);
   const [invitationError, setInvitationError] = useState<string | null>(null);
   const externallyManaged = member.source === 'FEISHU';
   const isCurrentUser = member.id === currentUserId;
@@ -657,9 +666,26 @@ function EditMemberModal({
   const resendInvitation = async (): Promise<void> => {
     setResendingInvitation(true);
     setInvitationError(null);
+    setInvitationEmailSent(false);
     try {
       const result = await resendMemberInvitation(member.id);
-      setInvitationLink(result.acceptanceUrl);
+      setInvitationLink(result.fallback?.acceptanceUrl ?? null);
+      setInvitationEmailSent(result.deliveryKind === 'EMAIL_SENT');
+    } catch (caught) {
+      setInvitationError(messageFromError(caught));
+    } finally {
+      setResendingInvitation(false);
+    }
+  };
+
+  const issueInvitation = async (): Promise<void> => {
+    setResendingInvitation(true);
+    setInvitationError(null);
+    setInvitationEmailSent(false);
+    try {
+      const result = await issueDirectoryMemberInvitation(member.id);
+      setInvitationLink(result.fallback?.acceptanceUrl ?? null);
+      setInvitationEmailSent(result.deliveryKind === 'EMAIL_SENT');
     } catch (caught) {
       setInvitationError(messageFromError(caught));
     } finally {
@@ -768,6 +794,11 @@ function EditMemberModal({
             </p>
           </div>
           <div className="form-stack">
+            {invitationEmailSent ? (
+              <Notice tone="success">
+                邀请邮件已发送；安全起见，管理端不会显示邀请令牌或链接。
+              </Notice>
+            ) : null}
             {invitationLink ? (
               <>
                 <Notice tone="success">新的一次性邀请链接已生成。</Notice>
@@ -795,52 +826,95 @@ function EditMemberModal({
             </button>
           </div>
         </div>
-      ) : null}
-      <div className="member-password-reset">
-        <div>
-          <strong>重置登录密码</strong>
-          <p>设置一次性临时密码，并立即吊销该成员在所有设备上的会话。</p>
-        </div>
-        {isCurrentUser ? (
-          <Notice tone="info">请使用右上角账号菜单修改自己的密码，该流程会校验当前密码。</Notice>
-        ) : (
-          <form className="form-stack" onSubmit={(event) => void submitPasswordReset(event)}>
-            <label>
-              <span>一次性临时密码</span>
-              <span className="password-input">
-                <input
-                  type={showTemporaryPassword ? 'text' : 'password'}
-                  autoComplete="new-password"
-                  value={temporaryPassword}
-                  onChange={(event) => setTemporaryPassword(event.target.value)}
-                  placeholder="至少 10 位"
-                />
-                <button type="button" onClick={() => setShowTemporaryPassword((value) => !value)}>
-                  {showTemporaryPassword ? '隐藏' : '显示'}
-                </button>
-              </span>
-            </label>
-            <Notice tone="info">
-              重置后成员必须在下次登录时设置新密码；系统不会通过邮件发送该密码。
-            </Notice>
-            {revokedSessionCount === null ? null : (
+      ) : externallyManaged && invitation === null ? (
+        <div className="member-password-reset">
+          <div>
+            <strong>激活登录身份</strong>
+            <p>
+              飞书同步不会创建共享密码。请向该成员的唯一有效工作邮箱发送一次性邀请，或使用企业 SSO。
+            </p>
+          </div>
+          <div className="form-stack">
+            {invitationEmailSent ? (
               <Notice tone="success">
-                密码已重置，已退出 {revokedSessionCount} 个活跃会话。请通过安全渠道告知成员。
+                邀请邮件已发送；安全起见，管理端不会显示邀请令牌或链接。
               </Notice>
-            )}
-            <FieldError message={passwordResetError} />
-            <div className="member-modal-actions">
-              <button
-                className="button danger-ghost"
-                type="submit"
-                disabled={resettingPassword || temporaryPassword.length < 10}
-              >
-                {resettingPassword ? <Spinner label="正在重置…" /> : '重置密码并退出全部设备'}
-              </button>
-            </div>
-          </form>
-        )}
-      </div>
+            ) : null}
+            {invitationLink ? (
+              <>
+                <Notice tone="success">一次性邀请链接已生成。</Notice>
+                <label>
+                  <span>邀请链接</span>
+                  <input readOnly value={invitationLink} />
+                </label>
+                <button
+                  className="button secondary"
+                  type="button"
+                  onClick={() => void navigator.clipboard?.writeText(invitationLink)}
+                >
+                  复制链接
+                </button>
+              </>
+            ) : null}
+            <FieldError message={invitationError} />
+            <button
+              className="button secondary"
+              type="button"
+              disabled={resendingInvitation}
+              onClick={() => void issueInvitation()}
+            >
+              {resendingInvitation ? <Spinner label="正在发送…" /> : '发送一次性邀请'}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {!externallyManaged || invitation?.status === 'ACCEPTED' ? (
+        <div className="member-password-reset">
+          <div>
+            <strong>重置登录密码</strong>
+            <p>设置一次性临时密码，并立即吊销该成员在所有设备上的会话。</p>
+          </div>
+          {isCurrentUser ? (
+            <Notice tone="info">请使用右上角账号菜单修改自己的密码，该流程会校验当前密码。</Notice>
+          ) : (
+            <form className="form-stack" onSubmit={(event) => void submitPasswordReset(event)}>
+              <label>
+                <span>一次性临时密码</span>
+                <span className="password-input">
+                  <input
+                    type={showTemporaryPassword ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    value={temporaryPassword}
+                    onChange={(event) => setTemporaryPassword(event.target.value)}
+                    placeholder="至少 10 位"
+                  />
+                  <button type="button" onClick={() => setShowTemporaryPassword((value) => !value)}>
+                    {showTemporaryPassword ? '隐藏' : '显示'}
+                  </button>
+                </span>
+              </label>
+              <Notice tone="info">
+                重置后成员必须在下次登录时设置新密码；系统不会通过邮件发送该密码。
+              </Notice>
+              {revokedSessionCount === null ? null : (
+                <Notice tone="success">
+                  密码已重置，已退出 {revokedSessionCount} 个活跃会话。请通过安全渠道告知成员。
+                </Notice>
+              )}
+              <FieldError message={passwordResetError} />
+              <div className="member-modal-actions">
+                <button
+                  className="button danger-ghost"
+                  type="submit"
+                  disabled={resettingPassword || temporaryPassword.length < 10}
+                >
+                  {resettingPassword ? <Spinner label="正在重置…" /> : '重置密码并退出全部设备'}
+                </button>
+              </div>
+            </form>
+          )}
+        </div>
+      ) : null}
     </Modal>
   );
 }

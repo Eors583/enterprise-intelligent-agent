@@ -13,8 +13,9 @@ export type ConservativeAgentRunPackingResult =
  * upper bound. This conservative estimator is not a model tokenizer.
  *
  * The system prompt and current question are mandatory. Trusted RAG sources are
- * considered in retrieval order, followed by conversation history from newest
- * to oldest. Returned messages remain in chronological order.
+ * considered in retrieval order, followed by purpose-bound memory and then
+ * conversation history from newest to oldest. Returned messages remain in
+ * chronological order.
  */
 export function packConservativeAgentRunInput(
   run: PreparedAgentRun,
@@ -28,6 +29,7 @@ export function packConservativeAgentRunInput(
     ...run,
     messages: [currentQuestion],
     knowledgeSources: [],
+    ...(run.memoryContexts === undefined ? {} : { memoryContexts: [] }),
   };
   if (exceedsConservativeInputBudget(packed)) {
     return { kind: 'required_input_exceeds_budget' };
@@ -37,6 +39,14 @@ export function packConservativeAgentRunInput(
     const candidate: PreparedAgentRun = {
       ...packed,
       knowledgeSources: [...(packed.knowledgeSources ?? []), source],
+    };
+    if (!exceedsConservativeInputBudget(candidate)) packed = candidate;
+  }
+
+  for (const memory of run.memoryContexts ?? []) {
+    const candidate: PreparedAgentRun = {
+      ...packed,
+      memoryContexts: [...(packed.memoryContexts ?? []), memory],
     };
     if (!exceedsConservativeInputBudget(candidate)) packed = candidate;
   }
@@ -71,6 +81,14 @@ export function conservativeAgentRunInputUpperBound(run: PreparedAgentRun): numb
       documentVersion: source.documentVersion,
       headingPath: source.headingPath,
       excerpt: source.excerpt,
+    })),
+    memoryContexts: (run.memoryContexts ?? []).map((memory) => ({
+      id: memory.id,
+      version: memory.version,
+      scope: memory.scope,
+      title: memory.title,
+      sensitivity: memory.sensitivity,
+      summary: memory.summary,
     })),
   });
   // JSON size includes escaping and dynamic labels. The fixed allowance covers

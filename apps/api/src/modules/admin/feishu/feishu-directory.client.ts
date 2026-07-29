@@ -165,6 +165,25 @@ export class FeishuDirectoryClient {
   async verifyConnection(): Promise<void> {
     this.requireConfigured();
     await this.tenantAccessToken(false);
+
+    // A valid tenant token does not prove that the application can read the
+    // directory. Probe both capabilities that synchronization depends on so a
+    // credential with missing Contact scopes cannot be persisted as READY.
+    const departmentUrl = this.apiUrl(
+      `/open-apis/contact/v3/departments/${encodeURIComponent(ROOT_DEPARTMENT_ID)}/children`,
+    );
+    departmentUrl.searchParams.set('department_id_type', 'open_department_id');
+    departmentUrl.searchParams.set('user_id_type', 'user_id');
+    departmentUrl.searchParams.set('fetch_child', 'false');
+    departmentUrl.searchParams.set('page_size', '1');
+    await this.authenticatedGet(departmentUrl);
+
+    const userUrl = this.apiUrl('/open-apis/contact/v3/users/find_by_department');
+    userUrl.searchParams.set('department_id', ROOT_DEPARTMENT_ID);
+    userUrl.searchParams.set('department_id_type', 'open_department_id');
+    userUrl.searchParams.set('user_id_type', 'user_id');
+    userUrl.searchParams.set('page_size', '1');
+    await this.authenticatedGet(userUrl);
   }
 
   private isConfigured(): boolean {

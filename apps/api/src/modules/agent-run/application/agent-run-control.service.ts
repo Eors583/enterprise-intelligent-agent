@@ -10,8 +10,16 @@ import { Prisma } from '@prisma/client';
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../../../database/prisma.service.js';
+import { AuthorizationService } from '../../authorization/authorization.service.js';
 import { IdentityService } from '../../identity/application/identity.service.js';
 import { AgentRuntimeClient, type RuntimeRunResult } from '../domain/agent-runtime.client.js';
+import type { AgentRunUsage } from '../domain/agent-run.models.js';
+import { buildAgentRunRetryPolicySnapshot } from '../domain/agent-run-policy-snapshot.js';
+import {
+  decideAgentRunTokenSettlement,
+  type AgentRunTokenSettlement,
+} from '../domain/agent-run-token-settlement.js';
+import { appendTerminalStreamEvent } from '../infrastructure/prisma/prisma-agent-run-stream.repository.js';
 
 @Injectable()
 export class AgentRunControlService {
@@ -19,10 +27,17 @@ export class AgentRunControlService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(IdentityService) private readonly identity: IdentityService,
     @Inject(AgentRuntimeClient) private readonly runtime: AgentRuntimeClient,
+    @Inject(AuthorizationService) private readonly authorization: AuthorizationService,
   ) {}
 
   async cancel(conversationId: string, runId: string): Promise<AgentRunResponse> {
     const { user } = await this.identity.getCurrentIdentity();
+    this.authorization.requireCurrent({
+      action: 'agent.run.cancel',
+      resourceTenantId: user.tenantId,
+      taskContext: { taskId: runId },
+      risk: 'MEDIUM',
+    });
     const target = await this.prisma.withTenant(user.tenantId, async (transaction) => {
       await transaction.$queryRaw`
         SELECT pg_advisory_xact_lock(hashtextextended(${`${user.tenantId}:agent-run-quota`}, 0))::text
@@ -42,7 +57,16 @@ export class AgentRunControlService {
       });
       if (run === null) throw new NotFoundException('The Agent Run was not found.');
       if (['SUCCEEDED', 'FAILED', 'UNKNOWN', 'CANCELLED'].includes(run.status)) {
-        if (run.status === 'CANCELLED') return { kind: 'cancelled' } as const;
+        if (run.status === 'CANCELLED') {
+          await appendTerminalStreamEvent(transaction, {
+            tenantId: user.tenantId,
+            runId,
+            status: 'CANCELLED',
+            mode: 'terminal_only',
+            createdAt: run.finishedAt ?? new Date(),
+          });
+          return { kind: 'cancelled' } as const;
+        }
         throw new ConflictException('A completed Agent Run cannot be cancelled.');
       }
       if (run.status === 'QUEUED') {
@@ -96,7 +120,16 @@ export class AgentRunControlService {
         where: { id: runId, tenantId: user.tenantId, conversationId },
       });
       if (run === null) throw new NotFoundException('The Agent Run was not found.');
-      if (run.status === 'CANCELLED') return;
+      if (run.status === 'CANCELLED') {
+        await appendTerminalStreamEvent(transaction, {
+          tenantId: user.tenantId,
+          runId,
+          status: 'CANCELLED',
+          mode: 'terminal_only',
+          createdAt: run.finishedAt ?? new Date(),
+        });
+        return;
+      }
       if (['SUCCEEDED', 'FAILED', 'UNKNOWN'].includes(run.status)) {
         throw new ConflictException('The Agent Run completed while cancellation was pending.');
       }
@@ -104,7 +137,7 @@ export class AgentRunControlService {
         throw new ConflictException('The Agent Run execution identity changed.');
       }
       const finishedAt = new Date();
-      const usage = result.usage;
+      const usage = usageFromRuntime(result);
       await transaction.agentRun.update({
         where: { id: run.id },
         data: {
@@ -112,21 +145,19 @@ export class AgentRunControlService {
           errorCode: 'CANCELLED_BY_USER',
           errorMessage: 'Generation was stopped by the user.',
           finishedAt,
-          ...(usage?.tokensReported === true
-            ? {
-                inputTokens: usage.inputTokens,
-                outputTokens: usage.outputTokens,
-                totalTokens: usage.totalTokens,
-                usageRecordedAt: finishedAt,
-                reservedTokens: 0,
-              }
-            : {}),
+          ...confirmedTerminalUsageUpdate(run.reservedTokens, usage, finishedAt),
           ...(usage?.costReported === true
             ? { costMicros: BigInt(usage.costMicros), costRecordedAt: finishedAt }
             : {}),
-          ...(usage === undefined ? {} : { toolCalls: usage.toolCalls }),
           version: { increment: 1 },
         },
+      });
+      await appendTerminalStreamEvent(transaction, {
+        tenantId: user.tenantId,
+        runId,
+        status: 'CANCELLED',
+        mode: 'terminal_only',
+        createdAt: finishedAt,
       });
       await transaction.auditEvent.create({
         data: {
@@ -150,6 +181,12 @@ export class AgentRunControlService {
 
   async retry(conversationId: string, runId: string): Promise<AgentRunResponse> {
     const { user } = await this.identity.getCurrentIdentity();
+    this.authorization.requireCurrent({
+      action: 'agent.run.retry',
+      resourceTenantId: user.tenantId,
+      taskContext: { taskId: runId },
+      risk: 'MEDIUM',
+    });
     return this.prisma.withTenant(user.tenantId, async (transaction) => {
       await transaction.$queryRaw`
         SELECT pg_advisory_xact_lock(hashtextextended(${`${user.tenantId}:${conversationId}:agent-run`}, 0))::text
@@ -163,7 +200,10 @@ export class AgentRunControlService {
             participants: { some: { tenantId: user.tenantId, userId: user.id, leftAt: null } },
           },
         },
-        include: { agent: { include: { version: true } } },
+        include: {
+          agent: true,
+          agentVersion: { include: { template: true } },
+        },
       });
       if (run === null) throw new NotFoundException('The Agent Run was not found.');
       if (!['FAILED', 'CANCELLED'].includes(run.status)) {
@@ -209,11 +249,22 @@ export class AgentRunControlService {
       });
       if (active !== null)
         throw new ConflictException('This conversation already has an active Agent Run.');
-      if (run.agent.status !== 'ONLINE' || run.agent.version.status !== 'PUBLISHED') {
+      if (
+        run.agent.status !== 'ONLINE' ||
+        !['PUBLISHED', 'RETIRED'].includes(run.agentVersion.status)
+      ) {
         throw new ConflictException('The Agent is not currently executable.');
       }
 
       const id = randomUUID();
+      const retryPolicySnapshot = buildAgentRunRetryPolicySnapshot({
+        sourceSnapshot: run.policySnapshot,
+        sourceAgentVersion: run.agentVersion,
+        retryOfRunId: run.id,
+      });
+      if (retryPolicySnapshot === null) {
+        throw new ConflictException('The source Agent Run policy snapshot is invalid.');
+      }
       await transaction.agentRun.create({
         data: {
           id,
@@ -222,20 +273,14 @@ export class AgentRunControlService {
           inputMessageId: run.inputMessageId,
           requesterUserId: user.id,
           agentId: run.agentId,
-          agentVersionId: run.agent.versionId,
+          agentVersionId: run.agentVersionId,
+          taskId: run.taskId,
           retryOfRunId: run.id,
           trigger: run.trigger,
           turnIndex: run.turnIndex,
           turnLimit: run.turnLimit,
           idempotencyKey: `retry:${run.id}:${id}`,
-          policySnapshot: {
-            agentVersionId: run.agent.versionId,
-            version: run.agent.version.version,
-            modelPolicy: run.agent.version.modelPolicy,
-            toolPolicy: run.agent.version.toolPolicy,
-            knowledgeScope: run.agent.version.knowledgeScope,
-            retryOfRunId: run.id,
-          },
+          policySnapshot: retryPolicySnapshot,
         },
       });
       await Promise.all([
@@ -256,7 +301,11 @@ export class AgentRunControlService {
             action: 'agent.run.retry',
             resourceType: 'agent_run',
             resourceId: id,
-            metadata: { conversationId, retryOfRunId: run.id },
+            metadata: {
+              conversationId,
+              retryOfRunId: run.id,
+              agentVersionId: run.agentVersionId,
+            },
           },
         }),
       ]);
@@ -269,6 +318,16 @@ export class AgentRunControlService {
     actorUserId: string,
     runId: string,
   ): Promise<AgentRunResponse> {
+    this.authorization.requireCurrent({
+      action: 'agent.run.reconcile',
+      resourceTenantId: tenantId,
+      taskContext: {
+        taskId: runId,
+        ownerUserId: actorUserId,
+        enforceActorMembership: true,
+      },
+      risk: 'MEDIUM',
+    });
     const target = await this.prisma.withTenant(tenantId, async (transaction) => {
       await transaction.$queryRaw`
         SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:agent-run-quota`}, 0))::text
@@ -355,16 +414,24 @@ async function persistCancellation(
     readonly runId: string;
   },
 ): Promise<void> {
+  const finishedAt = new Date();
   await transaction.agentRun.update({
     where: { id: input.runId },
     data: {
       status: 'CANCELLED',
       errorCode: 'CANCELLED_BY_USER',
       errorMessage: 'Generation was stopped by the user.',
-      finishedAt: new Date(),
+      finishedAt,
       reservedTokens: 0,
       version: { increment: 1 },
     },
+  });
+  await appendTerminalStreamEvent(transaction, {
+    tenantId: input.tenantId,
+    runId: input.runId,
+    status: 'CANCELLED',
+    mode: 'terminal_only',
+    createdAt: finishedAt,
   });
   await transaction.auditEvent.create({
     data: {
@@ -377,4 +444,48 @@ async function persistCancellation(
       metadata: { conversationId: input.conversationId, runtimeConfirmed: false },
     },
   });
+}
+
+type AgentRunUsageSettlementUpdate = Prisma.AgentRunUncheckedUpdateInput & {
+  readonly tokenEvidence?: 'UNREPORTED' | 'PROVIDER_REPORTED' | 'QUOTA_UPPER_BOUND';
+  readonly quotaChargedTokens?: number;
+  readonly quotaSettledAt?: Date | null;
+};
+
+function confirmedTerminalUsageUpdate(
+  reservedTokens: number,
+  usage: AgentRunUsage | undefined,
+  settledAt: Date,
+): AgentRunUsageSettlementUpdate {
+  const settlement = decideAgentRunTokenSettlement({
+    status: 'CANCELLED',
+    reservedTokens,
+    usage,
+    settledAt,
+  });
+  return {
+    ...(usage === undefined
+      ? {}
+      : {
+          runtimeProvider: usage.provider,
+          runtimeModel: usage.model,
+          toolCalls: usage.toolCalls,
+        }),
+    ...tokenSettlementUpdate(settlement),
+  };
+}
+
+function tokenSettlementUpdate(settlement: AgentRunTokenSettlement): AgentRunUsageSettlementUpdate {
+  if (settlement.kind === 'UNKNOWN_HOLD' || settlement.kind === 'UNREPORTED') return {};
+  const { kind: _kind, ...update } = settlement;
+  return update;
+}
+
+function usageFromRuntime(result: RuntimeRunResult): AgentRunUsage | undefined {
+  if (result.usage === undefined) return undefined;
+  return {
+    ...result.usage,
+    provider: result.output?.provider ?? null,
+    model: result.output?.model ?? null,
+  };
 }

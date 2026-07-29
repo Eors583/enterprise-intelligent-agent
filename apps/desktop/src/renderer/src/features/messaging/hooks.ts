@@ -1,6 +1,7 @@
 import type {
   AnswerFeedback,
   Conversation,
+  ConversationAgentRun,
   CreateConversationRequest,
   CreateMessageRequest,
   Message,
@@ -8,7 +9,7 @@ import type {
   UpsertAnswerFeedbackRequest,
 } from '@enterprise/contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   cancelAgentRun,
   createDirectConversation,
@@ -19,7 +20,13 @@ import {
   sendTextMessage,
   upsertAnswerFeedback,
 } from './api';
+import { getExpectedDesktopSessionId } from '../../shared/api/client';
 import { messagingSyncOptions, type WindowActivity } from './sync-policy';
+import {
+  applyAgentRunStreamPage,
+  type AgentRunStreamAccumulator,
+  type AgentRunStreamPhase,
+} from './stream-state';
 import { useWindowActivity } from './use-window-activity';
 
 export const conversationQueryKeys = {
@@ -128,6 +135,130 @@ export function useAgentRunActions(conversationId: string | null) {
     onSuccess: invalidate,
   });
   return { cancel, retry };
+}
+
+export type { AgentRunStreamPhase } from './stream-state';
+
+export interface AgentRunStreamView {
+  readonly runId: string | null;
+  readonly content: string;
+  readonly cursor: number;
+  readonly phase: AgentRunStreamPhase;
+  readonly error: string | null;
+}
+
+const EMPTY_STREAM: AgentRunStreamView = {
+  runId: null,
+  content: '',
+  cursor: 0,
+  phase: 'idle',
+  error: null,
+};
+
+export function useAgentRunStream(
+  conversationId: string | null,
+  run: ConversationAgentRun | undefined,
+): AgentRunStreamView {
+  const queryClient = useQueryClient();
+  const [view, setView] = useState<AgentRunStreamView>(EMPTY_STREAM);
+
+  useEffect(() => {
+    if (conversationId === null || run === undefined) {
+      setView(EMPTY_STREAM);
+      return undefined;
+    }
+    let accumulator: AgentRunStreamAccumulator = {
+      cursor: 0,
+      content: '',
+      caughtUp: false,
+    };
+    let active = true;
+    setView({
+      runId: run.id,
+      content: accumulator.content,
+      cursor: accumulator.cursor,
+      phase: 'replaying',
+      error: null,
+    });
+    const expectedSessionId = getExpectedDesktopSessionId();
+    if (
+      expectedSessionId === null ||
+      typeof window.enterpriseDesktop?.subscribeAgentRunStream !== 'function'
+    ) {
+      setView({
+        runId: run.id,
+        content: '',
+        cursor: 0,
+        phase: 'offline',
+        error: '桌面端实时事件桥接尚未就绪，请重启或更新客户端。',
+      });
+      return undefined;
+    }
+    const unsubscribe = window.enterpriseDesktop.subscribeAgentRunStream(
+      {
+        conversationId,
+        runId: run.id,
+        expectedSessionId,
+        cursor: accumulator.cursor,
+      },
+      (update) => {
+        if (!active) return;
+        if (update.kind === 'event') {
+          const terminal = update.event.type !== 'delta' && update.event.status !== 'UNKNOWN';
+          try {
+            const applied = applyAgentRunStreamPage(accumulator, {
+              items: [update.event],
+              nextCursor: update.event.sequence,
+              terminal,
+            });
+            accumulator = applied.state;
+            setView({
+              runId: run.id,
+              content: accumulator.content,
+              cursor: accumulator.cursor,
+              phase: applied.phase,
+              error: null,
+            });
+            if (terminal) {
+              void queryClient.invalidateQueries({
+                queryKey: conversationQueryKeys.messages(conversationId),
+              });
+            }
+          } catch (error) {
+            setView({
+              runId: run.id,
+              content: accumulator.content,
+              cursor: accumulator.cursor,
+              phase: 'offline',
+              error: error instanceof Error ? error.message : '实时事件校验失败。',
+            });
+          }
+          return;
+        }
+        if (update.state === 'closed' && update.error === undefined) return;
+        setView({
+          runId: run.id,
+          content: accumulator.content,
+          cursor: accumulator.cursor,
+          phase:
+            update.state === 'reconnecting' || (update.state === 'closed' && update.error)
+              ? 'offline'
+              : accumulator.caughtUp
+                ? 'live'
+                : 'replaying',
+          error:
+            update.error ??
+            (update.state === 'reconnecting' ? '实时连接中断，正在安全续传。' : null),
+        });
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [conversationId, queryClient, run?.id]);
+
+  return view;
 }
 
 export function useAnswerFeedback(messageId: string, enabled = true) {

@@ -19,13 +19,13 @@ const STORED_SESSION = {
   },
 } as const;
 
-describe('stored admin session migration', () => {
-  it('adds a safe default for sessions stored before password change enforcement', () => {
+describe('legacy stored admin session disposal', () => {
+  it('keeps only the account projection and never returns bearer credentials', () => {
     const parsed = parseStoredSession(JSON.stringify(STORED_SESSION));
 
     expect(parsed?.account.passwordChangeRequired).toBe(false);
-    expect(parsed?.accessToken).toBe(STORED_SESSION.accessToken);
-    expect(parsed?.refreshToken).toBe(STORED_SESSION.refreshToken);
+    expect(parsed).not.toHaveProperty('accessToken');
+    expect(parsed).not.toHaveProperty('refreshToken');
   });
 
   it('preserves an explicit password change requirement', () => {

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import logging
+import os
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from secrets import compare_digest
+from time import perf_counter
 from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 
 from enterprise_ai_runtime.adapters.cohere_rerank_provider import CohereRerankProvider
 from enterprise_ai_runtime.adapters.manus_provider import ManusProvider
@@ -14,7 +20,9 @@ from enterprise_ai_runtime.adapters.memory_run_store import InMemoryRunStore
 from enterprise_ai_runtime.adapters.noop_runtime import NoopRuntime
 from enterprise_ai_runtime.adapters.openai_compatible_provider import OpenAICompatibleProvider
 from enterprise_ai_runtime.adapters.openai_embedding_provider import OpenAIEmbeddingProvider
+from enterprise_ai_runtime.adapters.postgres_run_store import PostgresRunStore
 from enterprise_ai_runtime.adapters.provider_runtime import ProviderRuntime
+from enterprise_ai_runtime.adapters.routed_provider_runtime import RoutedProviderRuntime
 from enterprise_ai_runtime.api import router
 from enterprise_ai_runtime.config import (
     EmbeddingDriver,
@@ -27,12 +35,20 @@ from enterprise_ai_runtime.config import (
 )
 from enterprise_ai_runtime.domain.errors import RuntimeConfigurationError
 from enterprise_ai_runtime.knowledge_api import router as knowledge_router
+from enterprise_ai_runtime.observability import resolve_trace_context, structured_access_log
 from enterprise_ai_runtime.ports.run_store import RunStorePort
 from enterprise_ai_runtime.ports.runtime import RuntimePort
+from enterprise_ai_runtime.services.evaluation_service import EvaluationService
 from enterprise_ai_runtime.services.knowledge_service import KnowledgeService
 from enterprise_ai_runtime.services.run_service import RunService
+from enterprise_ai_runtime.telemetry import (
+    TelemetryRuntime,
+    read_telemetry_config,
+    start_telemetry,
+)
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+access_logger = logging.getLogger("enterprise_ai_runtime.access")
 
 
 def normalized_request_id(raw_request_id: str | None) -> str:
@@ -47,6 +63,7 @@ def create_app(
     store: RunStorePort | None = None,
     runtime: RuntimePort | None = None,
     knowledge_service: KnowledgeService | None = None,
+    telemetry: TelemetryRuntime | None = None,
 ) -> FastAPI:
     runtime_settings = settings if settings is not None else RuntimeSettings.from_env()
     store_adapter = store if store is not None else build_store(runtime_settings)
@@ -73,7 +90,14 @@ def create_app(
             try:
                 await knowledge_service_adapter.aclose()
             finally:
-                await runtime_adapter.aclose()
+                try:
+                    await runtime_adapter.aclose()
+                finally:
+                    try:
+                        await store_adapter.aclose()
+                    finally:
+                        if telemetry is not None:
+                            await telemetry.aclose()
 
     app = FastAPI(
         title="Enterprise AI Runtime",
@@ -88,16 +112,64 @@ def create_app(
         runtime=runtime_adapter,
     )
     app.state.knowledge_service = knowledge_service_adapter
+    app.state.evaluation_service = EvaluationService(
+        runtime=runtime_adapter,
+        attestation_secret=runtime_settings.evaluation_attestation_secret,
+    )
+    if telemetry is not None:
+        app.state.telemetry_status = telemetry.status
+        app.state.telemetry_runtime = telemetry
 
     @app.middleware("http")
     async def request_id_middleware(
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
+        started_at = perf_counter()
         request_id = normalized_request_id(request.headers.get("X-Request-ID"))
+        correlation_id, trace_id, traceparent = resolve_trace_context(
+            request_id=request_id,
+            correlation_id=request.headers.get("X-Correlation-ID"),
+            traceparent=request.headers.get("traceparent"),
+        )
         request.state.request_id = request_id
-        response = await call_next(request)
+        request.state.correlation_id = correlation_id
+        request.state.trace_id = trace_id
+        request.state.traceparent = traceparent
+        response: Response
+        if request.url.path.startswith("/internal/") and runtime_settings.service_token is not None:
+            authorization = request.headers.get("Authorization")
+            expected = f"Bearer {runtime_settings.service_token}"
+            if authorization is None or not compare_digest(authorization, expected):
+                response = JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": {
+                            "code": "SERVICE_AUTHENTICATION_FAILED",
+                            "message": "valid internal service credentials are required",
+                        }
+                    },
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            else:
+                response = await call_next(request)
+        else:
+            response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
+        response.headers["X-Correlation-ID"] = correlation_id
+        response.headers["traceparent"] = traceparent
+        access_logger.info(
+            structured_access_log(
+                request_id=request_id,
+                correlation_id=correlation_id,
+                trace_id=trace_id,
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                duration_ms=(perf_counter() - started_at) * 1000,
+                occurred_at_utc=datetime.now(UTC).isoformat(),
+            )
+        )
         return response
 
     app.include_router(router)
@@ -137,13 +209,19 @@ def build_runtime(settings: RuntimeSettings) -> RuntimePort:
         return NoopRuntime()
 
     if settings.driver == RuntimeDriver.OPENAI_COMPATIBLE:
-        provider = OpenAICompatibleProvider(
+        openai_provider = OpenAICompatibleProvider(
             base_url=settings.openai_base_url or "",
             api_key=settings.openai_api_key or "",
         )
-        return ProviderRuntime(provider, model=settings.openai_model or "")
+        if settings.model_route_catalog or settings.require_trusted_model_route:
+            return RoutedProviderRuntime(
+                openai_provider,
+                catalog=settings.model_route_catalog,
+                require_route=settings.require_trusted_model_route,
+            )
+        return ProviderRuntime(openai_provider, model=settings.openai_model or "")
 
-    provider = ManusProvider(
+    manus_provider = ManusProvider(
         base_url=settings.manus_api_base_url,
         api_key=settings.manus_api_key or "",
         project_id=settings.manus_project_id,
@@ -151,27 +229,42 @@ def build_runtime(settings: RuntimeSettings) -> RuntimePort:
         max_wait_seconds=settings.manus_max_wait_seconds,
         proxy_url=settings.manus_proxy_url,
     )
-    return ProviderRuntime(provider, model=settings.manus_agent_profile)
+    if settings.model_route_catalog or settings.require_trusted_model_route:
+        return RoutedProviderRuntime(
+            manus_provider,
+            catalog=settings.model_route_catalog,
+            require_route=settings.require_trusted_model_route,
+        )
+    return ProviderRuntime(manus_provider, model=settings.manus_agent_profile)
 
 
 def build_store(settings: RuntimeSettings) -> RunStorePort:
     if settings.store_driver == StoreDriver.MEMORY:
         return InMemoryRunStore()
-    raise RuntimeConfigurationError(
-        "postgres RunStore is not implemented; inject a durable RunStorePort adapter"
+    return PostgresRunStore(
+        dsn=settings.postgres_dsn or "",
+        min_size=settings.postgres_pool_min_size,
+        max_size=settings.postgres_pool_max_size,
+        command_timeout_seconds=settings.postgres_command_timeout_seconds,
     )
 
 
 load_runtime_dotenv()
-app = create_app()
+_runtime_settings = RuntimeSettings.from_env()
+_telemetry = start_telemetry(
+    read_telemetry_config(os.environ, _runtime_settings.environment),
+    _runtime_settings.environment,
+)
+app = create_app(settings=_runtime_settings, telemetry=_telemetry)
+_telemetry.instrument_app(app)
 
 
 def run() -> None:
     uvicorn.run(
         "enterprise_ai_runtime.main:app",
-        # The internal API has no service authentication in the MVP. Keep the
-        # console entry point loopback-only; production must expose it through
-        # an authenticated private service boundary explicitly.
+        # Loopback remains the safe local default. Production deployments can
+        # bind through their private service definition and must configure the
+        # service token enforced by the application middleware.
         host="127.0.0.1",
         port=8100,
         reload=False,

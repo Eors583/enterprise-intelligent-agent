@@ -15,6 +15,7 @@ from enterprise_ai_runtime.ports.knowledge import (
     EmbeddingProviderPort,
     RerankProviderPort,
 )
+from enterprise_ai_runtime.telemetry import mark_span_result, runtime_span
 
 
 class KnowledgeService:
@@ -30,19 +31,44 @@ class KnowledgeService:
         self._embedding_dimensions = embedding_dimensions
 
     async def embed(self, command: EmbeddingRequest, *, request_id: str) -> EmbeddingResponse:
-        if self._embedding_provider is None:
-            raise KnowledgeCapabilityDisabledError("embeddings")
-        return await self._embedding_provider.embed(command.inputs, request_id=request_id)
+        with runtime_span(
+            "knowledge.embedding.generate",
+            {
+                "tenant.id": command.tenant_id,
+                "knowledge.input_count": len(command.inputs),
+                "knowledge.embedding.dimensions": self._embedding_dimensions,
+            },
+        ) as span:
+            if self._embedding_provider is None:
+                raise KnowledgeCapabilityDisabledError("embeddings")
+            response = await self._embedding_provider.embed(
+                command.inputs,
+                request_id=request_id,
+            )
+            span.set_attribute("gen_ai.request.model", response.model)
+            mark_span_result(span, status="succeeded")
+            return response
 
     async def rerank(self, command: RerankRequest, *, request_id: str) -> RerankResponse:
-        if self._rerank_provider is None:
-            raise KnowledgeCapabilityDisabledError("rerank")
-        return await self._rerank_provider.rerank(
-            command.query,
-            command.documents,
-            top_n=command.top_n,
-            request_id=request_id,
-        )
+        with runtime_span(
+            "knowledge.rerank",
+            {
+                "tenant.id": command.tenant_id,
+                "knowledge.candidate_count": len(command.documents),
+                "knowledge.result_limit": command.top_n,
+            },
+        ) as span:
+            if self._rerank_provider is None:
+                raise KnowledgeCapabilityDisabledError("rerank")
+            response = await self._rerank_provider.rerank(
+                command.query,
+                command.documents,
+                top_n=command.top_n,
+                request_id=request_id,
+            )
+            span.set_attribute("gen_ai.request.model", response.model)
+            mark_span_result(span, status="succeeded")
+            return response
 
     async def capabilities(self) -> KnowledgeCapabilitiesResponse:
         embedding_status = CapabilityStatus.DISABLED
@@ -66,9 +92,7 @@ class KnowledgeService:
                     "openai_compatible" if self._embedding_provider is not None else "disabled"
                 ),
                 model=(
-                    self._embedding_provider.model
-                    if self._embedding_provider is not None
-                    else None
+                    self._embedding_provider.model if self._embedding_provider is not None else None
                 ),
                 dimensions=self._embedding_dimensions,
             ),

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -240,7 +240,7 @@ def validate_retrieval_response(
     expected_rerank_model: str,
 ) -> tuple[tuple[str, ...], bool, float, tuple[str, ...]]:
     if not isinstance(payload, dict):
-        raise ValueError("retrieval response must be a JSON object")
+        raise TypeError("retrieval response must be a JSON object")
     if payload.get("query") != case.query:
         raise ValueError("retrieval response query does not match the request")
     if _normalized_id(payload.get("simulatedUserId")) != case.user_id:
@@ -249,7 +249,7 @@ def validate_retrieval_response(
         )
     accessible = payload.get("accessibleKnowledgeBaseIds")
     if not isinstance(accessible, list):
-        raise ValueError(
+        raise TypeError(
             "retrieval response accessibleKnowledgeBaseIds must be an array"
         )
     accessible_ids = [_normalized_id(item) for item in accessible]
@@ -259,7 +259,7 @@ def validate_retrieval_response(
         raise ValueError("accessible knowledge base ids must be unique")
     items = payload.get("items")
     if not isinstance(items, list):
-        raise ValueError("retrieval response items must be an array")
+        raise TypeError("retrieval response items must be an array")
     if len(items) > case.limit:
         raise ValueError("retrieval response contains more items than requested")
     mode = payload.get("mode")
@@ -294,7 +294,7 @@ def validate_retrieval_response(
         raise ValueError("LEXICAL mode must not report vector candidates")
     no_answer = payload.get("noAnswer")
     if not isinstance(no_answer, bool):
-        raise ValueError("retrieval response noAnswer must be a boolean")
+        raise TypeError("retrieval response noAnswer must be a boolean")
     if no_answer != (len(items) == 0):
         raise ValueError("retrieval response noAnswer is inconsistent with items")
     server_elapsed_ms = payload.get("elapsedMs")
@@ -309,7 +309,7 @@ def validate_retrieval_response(
     final_scores: list[float] = []
     for item in items:
         if not isinstance(item, dict):
-            raise ValueError("retrieval response items must be objects")
+            raise TypeError("retrieval response items must be objects")
         chunk_id = _normalized_id(item.get("chunkId"))
         if chunk_id is None:
             raise ValueError("retrieval item chunkId must be a UUID")

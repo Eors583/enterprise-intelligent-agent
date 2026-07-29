@@ -9,6 +9,7 @@ allowBuilds:
   electron-winstaller: true
   esbuild: true
   prisma: true
+  protobufjs: set this to true or false
 
 minimumReleaseAgeExclude:
   - '@turbo/darwin-64@2.10.5'

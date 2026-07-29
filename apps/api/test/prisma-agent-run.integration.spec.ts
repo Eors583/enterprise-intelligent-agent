@@ -10,13 +10,17 @@ import { OutboxPrismaService } from '../src/database/outbox-prisma.service.js';
 import { PrismaAgentRunQueueRepository } from '../src/modules/agent-run/infrastructure/prisma/prisma-agent-run-queue.repository.js';
 import { PrismaAgentRunRepository } from '../src/modules/agent-run/infrastructure/prisma/prisma-agent-run.repository.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantId = '00000000-0000-7000-8000-000000000007';
 const otherTenantId = '00000000-0000-7000-8000-000000000006';
 const actorId = '00000000-0000-7000-8000-000000000701';
+const routeReviewerId = '00000000-0000-7000-8000-000000000702';
 const templateId = '00000000-0000-7000-8000-000000000720';
 const versionId = '00000000-0000-7000-8000-000000000721';
+const modelCatalogVersionId = '00000000-0000-7000-8000-000000000722';
+const modelRoutePolicyVersionId = '00000000-0000-7000-8000-000000000723';
 const agentAId = '00000000-0000-7000-8000-000000000711';
 const agentBId = '00000000-0000-7000-8000-000000000712';
 const agentRunRequestedEventType = 'agent.run_requested.v1';
@@ -43,7 +47,27 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
     await Promise.all([leftQueueClient.onModuleInit(), rightQueueClient.onModuleInit()]);
     await cleanup();
     await seedFixtures();
-    app = await createTestApp();
+    app = await createTestApp({
+      // This suite verifies PostgreSQL Run orchestration, idempotency, quotas,
+      // relay ordering and RLS. Provider connectivity has its own fail-closed
+      // coverage; make availability an explicit test-only prerequisite here.
+      agentOperationalReadiness: {
+        inspectAgents: (_tenantId, agentIds) =>
+          Promise.resolve(
+            new Map(
+              agentIds.map((agentId) => [
+                agentId,
+                {
+                  status: 'AVAILABLE' as const,
+                  evidenceStatus: 'VERIFIED' as const,
+                  reasonCodes: [],
+                  checkedAt: new Date().toISOString(),
+                },
+              ]),
+            ),
+          ),
+      },
+    });
     runs = app.get(PrismaAgentRunRepository);
   });
 
@@ -194,10 +218,12 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
   });
 
   it('does not blindly retry an UNKNOWN provider result', async () => {
-    await administrator.agentRun.update({
-      where: { id: activeRetryRunId },
-      data: { status: 'UNKNOWN', errorCode: 'PROVIDER_RESULT_UNKNOWN' },
-    });
+    const prepared = await runs.prepare(tenantId, activeRetryRunId);
+    if (prepared.kind !== 'ready') {
+      throw new Error(`Expected retry Run to be ready, received ${prepared.kind}.`);
+    }
+    await runs.attachExternalRun(tenantId, activeRetryRunId, randomUUID());
+    await runs.completeUnknown(tenantId, activeRetryRunId, 'PROVIDER_RESULT_UNKNOWN');
     const before = await administrator.agentRun.count({
       where: { tenantId, conversationId: singleConversationId },
     });
@@ -210,6 +236,59 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
     await expect(
       administrator.agentRun.count({ where: { tenantId, conversationId: singleConversationId } }),
     ).resolves.toBe(before);
+    await expect(
+      administrator.agentRunStreamEvent.findMany({
+        where: { tenantId, runId: activeRetryRunId },
+        orderBy: { sequence: 'asc' },
+        select: { sequence: true, type: true, terminalStatus: true },
+      }),
+    ).resolves.toEqual([{ sequence: 1, type: 'TERMINAL_ONLY', terminalStatus: 'UNKNOWN' }]);
+    const messageList = await request(app.getHttpServer())
+      .get(`/api/v1/conversations/${singleConversationId}/messages`)
+      .set(identityHeaders())
+      .expect(200);
+    expect(
+      messageList.body.runs.find((run: { readonly id: string }) => run.id === activeRetryRunId),
+    ).toMatchObject({ status: 'UNKNOWN', retryable: false });
+  });
+
+  it('appends a final reconciliation marker without rewriting UNKNOWN stream history', async () => {
+    await administrator.agentRun.update({
+      where: { id: activeRetryRunId },
+      data: {
+        status: 'RUNNING',
+        finishedAt: null,
+        errorCode: null,
+        errorMessage: null,
+        version: { increment: 1 },
+      },
+    });
+
+    const completed = await runs.completeSucceeded(
+      tenantId,
+      activeRetryRunId,
+      'Reconciled provider answer',
+    );
+    expect(completed.outputMessageId).toEqual(expect.any(String));
+    await expect(
+      administrator.agentRunStreamEvent.findMany({
+        where: { tenantId, runId: activeRetryRunId },
+        orderBy: { sequence: 'asc' },
+        select: { sequence: true, type: true, terminalStatus: true },
+      }),
+    ).resolves.toEqual([
+      { sequence: 1, type: 'TERMINAL_ONLY', terminalStatus: 'UNKNOWN' },
+      { sequence: 2, type: 'TERMINAL_RECONCILED', terminalStatus: 'SUCCEEDED' },
+    ]);
+    await expect(
+      administrator.agentRun.findUnique({
+        where: { id: activeRetryRunId },
+        select: { status: true, outputMessageId: true },
+      }),
+    ).resolves.toEqual({
+      status: 'SUCCEEDED',
+      outputMessageId: completed.outputMessageId,
+    });
   });
 
   it('queues Agent A first and rolls back a second topic while the relay is active', async () => {
@@ -281,6 +360,36 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
 
     const externalRunAId = randomUUID();
     await runs.attachExternalRun(tenantId, relayRunAId, externalRunAId);
+    const attemptStartedAt = new Date();
+    const attemptFinishedAt = new Date(attemptStartedAt.getTime() + 25);
+    await runs.recordModelExecutionEvidence(
+      tenantId,
+      relayRunAId,
+      [
+        {
+          attemptNumber: 1,
+          catalogVersionId: modelCatalogVersionId,
+          routeKey: 'AGENT_RUN_PRIMARY',
+          provider: 'OPENAI_COMPATIBLE',
+          model: 'integration-chat',
+          outcome: 'SUCCEEDED',
+          reasonCode: null,
+          retrySafe: false,
+          startedAt: attemptStartedAt,
+          finishedAt: attemptFinishedAt,
+        },
+      ],
+      {
+        direction: 'OUTPUT',
+        classification: 'INTERNAL',
+        action: 'ALLOW',
+        reasonCodes: ['NO_SENSITIVE_PATTERN_DETECTED'],
+        contentSha256: 'e'.repeat(64),
+        redactedContentSha256: null,
+        detectorVersion: 'integration-output-guard-v1',
+        decisionHash: 'f'.repeat(64),
+      },
+    );
     const completedA = await runs.completeSucceeded(tenantId, relayRunAId, 'Agent A answer', [], {
       provider: 'openai_compatible',
       model: 'model-a',
@@ -306,8 +415,57 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
       outputTokens: 4,
       totalTokens: 16,
       costMicros: 25n,
+      groundedCitationCount: 0,
       reservedTokens: 0,
     });
+    await expect(
+      administrator.aiModelAttemptReceipt.findMany({
+        where: { tenantId, runId: relayRunAId },
+        orderBy: { phase: 'asc' },
+        select: {
+          phase: true,
+          outcome: true,
+          catalogVersionId: true,
+          routeKey: true,
+          provider: true,
+          modelName: true,
+        },
+      }),
+    ).resolves.toEqual([
+      {
+        phase: 'STARTED',
+        outcome: 'STARTED',
+        catalogVersionId: modelCatalogVersionId,
+        routeKey: 'AGENT_RUN_PRIMARY',
+        provider: 'OPENAI_COMPATIBLE',
+        modelName: 'integration-chat',
+      },
+      {
+        phase: 'TERMINAL',
+        outcome: 'SUCCEEDED',
+        catalogVersionId: modelCatalogVersionId,
+        routeKey: 'AGENT_RUN_PRIMARY',
+        provider: 'OPENAI_COMPATIBLE',
+        modelName: 'integration-chat',
+      },
+    ]);
+    await expect(
+      administrator.aiModelCircuitStateRecord.findUnique({
+        where: {
+          tenantId_catalogVersionId: {
+            tenantId,
+            catalogVersionId: modelCatalogVersionId,
+          },
+        },
+        select: { state: true, consecutiveFailures: true },
+      }),
+    ).resolves.toEqual({ state: 'CLOSED', consecutiveFailures: 0 });
+    await expect(
+      administrator.aiSafetyDecisionRecord.findFirst({
+        where: { tenantId, runId: relayRunAId, direction: 'OUTPUT', sequence: 1 },
+        select: { action: true, decisionHash: true },
+      }),
+    ).resolves.toEqual({ action: 'ALLOW', decisionHash: 'f'.repeat(64) });
     await expect(
       administrator.$executeRaw`
         UPDATE public."agent_runs"
@@ -436,6 +594,9 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
         externalRunId: randomUUID(),
         finishedAt: null,
         reservedTokens: 20_000,
+        tokenEvidence: 'UNREPORTED',
+        quotaChargedTokens: 0,
+        quotaSettledAt: null,
       },
     });
     const deferred = await runs.prepare(tenantId, queued.id);
@@ -597,6 +758,15 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
   });
 
   it('uses two SKIP LOCKED claimants without claiming an event twice', async () => {
+    const existingEventIds = (
+      await administrator.outboxEvent.findMany({
+        where: { tenantId, eventType: agentRunRequestedEventType },
+        select: { id: true },
+      })
+    ).map(({ id }) => id);
+    await administrator.outboxEventDelivery.deleteMany({
+      where: { tenantId, eventId: { in: existingEventIds } },
+    });
     await administrator.outboxEvent.deleteMany({
       where: { tenantId, eventType: agentRunRequestedEventType },
     });
@@ -676,15 +846,127 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
         name: 'Agent Run Integration Other',
       },
     });
-    await administrator.user.create({
-      data: {
-        id: actorId,
-        tenantId,
-        email: 'actor@agent-run-integration.invalid',
-        emailNormalized: 'actor@agent-run-integration.invalid',
-        displayName: 'Agent Run Actor',
-        status: 'ACTIVE',
-      },
+    await administrator.user.createMany({
+      data: [
+        {
+          id: actorId,
+          tenantId,
+          email: 'actor@agent-run-integration.invalid',
+          emailNormalized: 'actor@agent-run-integration.invalid',
+          displayName: 'Agent Run Actor',
+          status: 'ACTIVE',
+        },
+        {
+          id: routeReviewerId,
+          tenantId,
+          email: 'route-reviewer@agent-run-integration.invalid',
+          emailNormalized: 'route-reviewer@agent-run-integration.invalid',
+          displayName: 'Agent Run Route Reviewer',
+          role: 'ADMIN',
+          status: 'ACTIVE',
+        },
+      ],
+    });
+    const reviewedAt = new Date();
+    await withModelRouteActor(actorId, async (transaction) => {
+      await transaction.aiModelCatalogVersion.create({
+        data: {
+          id: modelCatalogVersionId,
+          tenantId,
+          routeKey: 'AGENT_RUN_PRIMARY',
+          version: 1,
+          provider: 'OPENAI_COMPATIBLE',
+          modelName: 'integration-chat',
+          credentialReference: 'vault://integration/agent-run',
+          dataResidency: 'CN',
+          maximumClassification: 'CONFIDENTIAL',
+          capabilities: ['chat'],
+          maxContextTokens: 32_000,
+          maxOutputTokens: 4_000,
+          inputCostMicrosPerMillion: 1_000n,
+          outputCostMicrosPerMillion: 2_000n,
+          p95LatencyMs: 5_000,
+          configurationHash: 'a'.repeat(64),
+          createdByUserId: actorId,
+          idempotencyKey: 'agent-run-integration-model-v1',
+          requestHash: 'b'.repeat(64),
+        },
+      });
+      await transaction.aiModelCatalogVersion.update({
+        where: { id: modelCatalogVersionId },
+        data: {
+          status: 'IN_REVIEW',
+          revision: 2,
+          submittedByUserId: actorId,
+          submittedAt: reviewedAt,
+        },
+      });
+    });
+    await withModelRouteActor(routeReviewerId, async (transaction) => {
+      await transaction.aiModelCatalogVersion.update({
+        where: { id: modelCatalogVersionId },
+        data: {
+          status: 'PUBLISHED',
+          revision: 3,
+          reviewedByUserId: routeReviewerId,
+          reviewedAt,
+          publishedByUserId: routeReviewerId,
+          publishedAt: reviewedAt,
+        },
+      });
+    });
+    await withModelRouteActor(actorId, async (transaction) => {
+      await transaction.aiModelRoutePolicyVersion.create({
+        data: {
+          id: modelRoutePolicyVersionId,
+          tenantId,
+          taskClass: 'GENERAL_QA',
+          version: 1,
+          maximumClassification: 'CONFIDENTIAL',
+          allowedResidencies: ['CN'],
+          requiredCapabilities: ['chat'],
+          maxP95LatencyMs: 8_000,
+          maxInputCostMicrosPerMillion: 5_000n,
+          maxOutputCostMicrosPerMillion: 10_000n,
+          maximumAttempts: 1,
+          circuitFailureThreshold: 3,
+          circuitOpenSeconds: 60,
+          policyHash: 'c'.repeat(64),
+          createdByUserId: actorId,
+          idempotencyKey: 'agent-run-integration-policy-v1',
+          requestHash: 'd'.repeat(64),
+        },
+      });
+      await transaction.aiModelRouteCandidate.create({
+        data: {
+          tenantId,
+          policyVersionId: modelRoutePolicyVersionId,
+          ordinal: 1,
+          catalogVersionId: modelCatalogVersionId,
+        },
+      });
+      await transaction.aiModelRoutePolicyVersion.update({
+        where: { id: modelRoutePolicyVersionId },
+        data: {
+          status: 'IN_REVIEW',
+          revision: 2,
+          submittedByUserId: actorId,
+          submittedAt: reviewedAt,
+        },
+      });
+    });
+    await withModelRouteActor(routeReviewerId, async (transaction) => {
+      await transaction.aiModelRoutePolicyVersion.update({
+        where: { id: modelRoutePolicyVersionId },
+        data: {
+          status: 'PUBLISHED',
+          revision: 3,
+          reviewedByUserId: routeReviewerId,
+          reviewedAt,
+          publishedByUserId: routeReviewerId,
+          publishedAt: reviewedAt,
+        },
+      });
     });
     await administrator.agentTemplate.create({
       data: {
@@ -702,7 +984,11 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
         version: 1,
         status: 'PUBLISHED',
         systemPrompt: 'Respond safely for the Agent Run integration test.',
-        modelPolicy: { provider: 'integration', model: 'integration' },
+        modelPolicy: {
+          taskClass: 'GENERAL_QA',
+          dataClassification: 'INTERNAL',
+          requiredCapabilities: ['chat'],
+        },
         toolPolicy: { allow: [] },
         knowledgeScope: { ids: [] },
         publishedAt: new Date(),
@@ -738,22 +1024,18 @@ describe.runIf(enabled)('PostgreSQL Agent Run orchestration', () => {
 
   async function cleanup(): Promise<void> {
     const tenantIds = [tenantId, otherTenantId];
-    await administrator.auditEvent.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.outboxEvent.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.agentRun.deleteMany({
-      where: { tenantId: { in: tenantIds }, parentRunId: { not: null } },
+    await cleanupDisposableTenants(administrator, tenantIds);
+  }
+
+  async function withModelRouteActor<T>(
+    userId: string,
+    operation: (transaction: Prisma.TransactionClient) => Promise<T>,
+  ): Promise<T> {
+    return administrator.$transaction(async (transaction) => {
+      await transaction.$executeRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+      await transaction.$executeRaw`SELECT set_config('app.user_id', ${userId}, true)`;
+      return operation(transaction);
     });
-    await administrator.agentRun.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.message.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.conversationParticipant.deleteMany({
-      where: { tenantId: { in: tenantIds } },
-    });
-    await administrator.conversation.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.agentInstance.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.agentVersion.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.agentTemplate.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.user.deleteMany({ where: { tenantId: { in: tenantIds } } });
-    await administrator.tenant.deleteMany({ where: { id: { in: tenantIds } } });
   }
 });
 

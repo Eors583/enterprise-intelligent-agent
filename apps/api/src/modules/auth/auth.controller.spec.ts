@@ -9,6 +9,7 @@ import {
   type RecoveryRequestLimiter,
 } from './application/recovery-request-limiter.service.js';
 import { AuthController } from './auth.controller.js';
+import type { BrowserSessionTransport } from './browser-session.transport.js';
 
 describe('AuthController password reset timing budget', () => {
   it.each(['known@example.test', 'unknown@example.test'])(
@@ -91,5 +92,6 @@ function createController(
     {} as LoginAttemptLimiter,
     recoveryRequests as RecoveryRequestLimiter,
     responseTiming as RecoveryResponseTimingService,
+    {} as BrowserSessionTransport,
   );
 }

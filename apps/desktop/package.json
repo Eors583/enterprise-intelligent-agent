@@ -38,6 +38,7 @@
     "electron": "43.1.0",
     "electron-builder": "^26.0.12",
     "electron-vite": "5.0.0",
+    "linkedom": "0.18.13",
     "typescript": "5.9.3",
     "vite": "7.3.6",
     "vitest": "4.1.10"

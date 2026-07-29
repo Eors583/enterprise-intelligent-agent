@@ -1,9 +1,9 @@
-import { BadRequestException, Logger } from '@nestjs/common';
+import { BadRequestException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 
 import type { EnvironmentVariables } from '../../../config/environment.js';
 import type { AuthPrismaService } from '../../../database/auth-prisma.service.js';
-import type { AuthRecoveryNotificationService } from './auth-recovery-notification.service.js';
+import type { IdentitySecretVault } from '../../identity-governance/identity-secret-vault.js';
 import { AuthRecoveryService } from './auth-recovery.service.js';
 import type { PasswordHasher } from './password-hasher.js';
 import { TokenService } from './token.service.js';
@@ -20,13 +20,7 @@ describe('AuthRecoveryService token preflight', () => {
       withAuth: <T>(operation: (value: typeof transaction) => Promise<T>) => operation(transaction),
     } as unknown as AuthPrismaService;
     const passwords = { hash: vi.fn() } as unknown as PasswordHasher;
-    const service = new AuthRecoveryService(
-      prisma,
-      passwords,
-      tokens,
-      {} as AuthRecoveryNotificationService,
-      config,
-    );
+    const service = new AuthRecoveryService(prisma, passwords, tokens, secretVault(), config);
 
     await expect(
       service.completePasswordReset({
@@ -45,13 +39,7 @@ describe('AuthRecoveryService token preflight', () => {
       withAuth: vi.fn(),
     } as unknown as AuthPrismaService;
     const passwords = { hash: vi.fn() } as unknown as PasswordHasher;
-    const service = new AuthRecoveryService(
-      prisma,
-      passwords,
-      tokens,
-      {} as AuthRecoveryNotificationService,
-      config,
-    );
+    const service = new AuthRecoveryService(prisma, passwords, tokens, secretVault(), config);
 
     await expect(
       service.completePasswordReset({
@@ -63,7 +51,66 @@ describe('AuthRecoveryService token preflight', () => {
     expect(passwords.hash).not.toHaveBeenCalled();
   });
 
-  it('catches an asynchronous delivery rejection, records FAILED, and does not emit unhandledRejection', async () => {
+  it('creates the first local credential only after a credentialless directory member consumes an invitation', async () => {
+    const config = recoveryConfig();
+    const tokens = new TokenService(config);
+    const invitation = tokens.issueAction('invite');
+    const passwordCreate = vi.fn().mockResolvedValue({});
+    const passwordUpdate = vi.fn();
+    const candidate = {
+      id: '00000000-0000-7000-8000-000000000201',
+      tenantId: '00000000-0000-7000-8000-000000000001',
+      userId: '00000000-0000-7000-8000-000000000101',
+      purpose: 'MEMBER_INVITATION',
+      expiresAt: new Date(Date.now() + 60_000),
+      consumedAt: null,
+      revokedAt: null,
+      tenant: { status: 'ACTIVE' },
+      user: { status: 'ACTIVE' },
+    };
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      authActionToken: {
+        findUnique: vi.fn().mockResolvedValue(candidate),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+      },
+      passwordCredential: {
+        findUnique: vi.fn().mockResolvedValue(null),
+        create: passwordCreate,
+        updateMany: passwordUpdate,
+      },
+      user: { updateMany: vi.fn().mockResolvedValue({ count: 1 }) },
+      employment: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      authSession: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      enabled: true,
+      withAuth: <T>(operation: (value: typeof transaction) => Promise<T>) => operation(transaction),
+    } as unknown as AuthPrismaService;
+    const passwords = {
+      hash: vi.fn().mockResolvedValue('scrypt$activated'),
+    } as unknown as PasswordHasher;
+    const service = new AuthRecoveryService(prisma, passwords, tokens, secretVault(), config);
+
+    await expect(
+      service.acceptMemberInvitation({
+        token: invitation.value,
+        newPassword: 'ActivatedPassword!2026',
+      }),
+    ).resolves.toEqual({ accepted: true, revokedSessionCount: 0 });
+    expect(passwordCreate).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        tenantId: candidate.tenantId,
+        userId: candidate.userId,
+        passwordHash: 'scrypt$activated',
+        mustChangePassword: false,
+      }),
+    });
+    expect(passwordUpdate).not.toHaveBeenCalled();
+  });
+
+  it('persists an encrypted delivery before returning the enumeration-safe response', async () => {
     const config = recoveryConfig();
     const tokens = new TokenService(config);
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
@@ -77,6 +124,7 @@ describe('AuthRecoveryService token preflight', () => {
       .mockResolvedValueOnce({ id: '00000000-0000-7000-8000-000000000101' });
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
       tenant: {
         findUnique: vi.fn().mockResolvedValue({
           id: '00000000-0000-7000-8000-000000000001',
@@ -95,50 +143,37 @@ describe('AuthRecoveryService token preflight', () => {
       enabled: true,
       withAuth: <T>(operation: (value: typeof transaction) => Promise<T>) => operation(transaction),
     } as unknown as AuthPrismaService;
-    const notifications = {
-      sendPasswordReset: vi.fn().mockRejectedValue(new Error('provider transport failed')),
-    } as unknown as AuthRecoveryNotificationService;
-    const service = new AuthRecoveryService(
-      prisma,
-      {} as PasswordHasher,
-      tokens,
-      notifications,
-      config,
+    const vault = secretVault();
+    const service = new AuthRecoveryService(prisma, {} as PasswordHasher, tokens, vault, config);
+
+    await expect(
+      service.requestPasswordReset({
+        tenantSlug: 'tenant',
+        email: 'member@example.test',
+      }),
+    ).resolves.toMatchObject({ accepted: true });
+
+    expect(vault.encrypt).toHaveBeenCalledWith(
+      expect.not.stringContaining('payloadCiphertext'),
+      expect.objectContaining({ purpose: 'AUTH_RECOVERY_DELIVERY' }),
     );
-    const warned = vi.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
-    const unhandled: unknown[] = [];
-    const captureUnhandled = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-    process.on('unhandledRejection', captureUnhandled);
-
-    try {
-      await expect(
-        service.requestPasswordReset({
-          tenantSlug: 'tenant',
-          email: 'member@example.test',
-        }),
-      ).resolves.toMatchObject({ accepted: true });
-      await flushImmediate();
-      await flushImmediate();
-
-      expect(notifications.sendPasswordReset).toHaveBeenCalledOnce();
-      expect(updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          data: expect.objectContaining({ deliveryStatus: 'FAILED' }),
-        }),
-      );
-      expect(warned).toHaveBeenCalledWith(expect.stringContaining('status recorded as FAILED'));
-      expect(unhandled).toEqual([]);
-    } finally {
-      process.off('unhandledRejection', captureUnhandled);
-      warned.mockRestore();
-    }
+    expect(transaction.$executeRaw).toHaveBeenCalledOnce();
+    expect(updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ deliveryStatus: 'FAILED' }),
+      }),
+    );
   });
 });
 
-function flushImmediate(): Promise<void> {
-  return new Promise((resolve) => setImmediate(resolve));
+function secretVault(): IdentitySecretVault {
+  return {
+    encrypt: vi.fn().mockReturnValue({
+      ciphertext: Buffer.from('encrypted-capability'),
+      keyId: 'unit-test-v1',
+      formatVersion: 1,
+    }),
+  } as unknown as IdentitySecretVault;
 }
 
 function recoveryConfig(): ConfigService<EnvironmentVariables, true> {

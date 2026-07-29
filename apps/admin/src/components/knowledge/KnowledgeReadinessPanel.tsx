@@ -1,10 +1,11 @@
 import type {
   KnowledgeBaseIndexReadiness,
   KnowledgeCapabilityReadiness,
+  KnowledgeGraphOverview,
 } from '@enterprise/contracts';
 import { useEffect, useState, type ReactNode } from 'react';
 
-import { getKnowledgeBaseReadiness } from '@/api/admin-api';
+import { getKnowledgeBaseReadiness, getKnowledgeGraphOverview } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
 import { ErrorState, LoadingPanel, Notice, Spinner } from '@/components/ui';
@@ -14,6 +15,10 @@ import {
   knowledgeReadinessReasonLabel,
   knowledgeReadinessSummary,
 } from './knowledge-readiness-view';
+import {
+  knowledgeGraphReadinessReasonLabel,
+  knowledgeGraphStatusLabel,
+} from './knowledge-graph-view';
 
 const POLL_INTERVAL_MS = 3_000;
 
@@ -21,17 +26,22 @@ export function KnowledgeReadinessPanel({
   knowledgeBaseId,
   refreshToken,
   onReadinessChange,
+  onGraphOverviewChange,
   onReviewFailures,
 }: {
   knowledgeBaseId: string;
   refreshToken: string;
   onReadinessChange: (readiness: KnowledgeBaseIndexReadiness | null) => void;
+  onGraphOverviewChange: (overview: KnowledgeGraphOverview | null) => void;
   onReviewFailures: () => void;
 }): ReactNode {
   const [reloadKey, setReloadKey] = useState(0);
   const [result, setResult] = useState<KnowledgeBaseIndexReadiness | null>(null);
+  const [graphOverview, setGraphOverview] = useState<KnowledgeGraphOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [graphLoading, setGraphLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -53,6 +63,27 @@ export function KnowledgeReadinessPanel({
       });
     return () => controller.abort();
   }, [knowledgeBaseId, onReadinessChange, refreshToken, reloadKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setGraphLoading(true);
+    setGraphError(null);
+    void getKnowledgeGraphOverview(knowledgeBaseId, controller.signal)
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setGraphOverview(response);
+        onGraphOverviewChange(response);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        setGraphError(messageFromError(caught));
+        onGraphOverviewChange(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGraphLoading(false);
+      });
+    return () => controller.abort();
+  }, [knowledgeBaseId, onGraphOverviewChange, refreshToken, reloadKey]);
 
   useEffect(() => {
     if ((result?.documents.processing ?? 0) === 0) return;
@@ -93,7 +124,7 @@ export function KnowledgeReadinessPanel({
           onClick={retry}
           disabled={loading}
         >
-          {loading ? (
+          {loading || graphLoading ? (
             <Spinner label="检查中…" />
           ) : (
             <>
@@ -141,6 +172,60 @@ export function KnowledgeReadinessPanel({
             <CapabilityCard title="Embedding" capability={result.embedding} />
             <CapabilityCard title="Reranker" capability={result.rerank} />
           </div>
+          <div className="knowledge-graph-readiness-inline">
+            <header>
+              <div>
+                <strong>关系图谱</strong>
+                <span>
+                  {graphOverview
+                    ? knowledgeGraphStatusLabel(graphOverview.status)
+                    : graphLoading
+                      ? '检查中'
+                      : '不可用'}
+                </span>
+              </div>
+              {graphOverview ? (
+                <em
+                  className={graphOverview.strongRetrievalReady ? 'status-ready' : 'status-failed'}
+                >
+                  {graphOverview.strongRetrievalReady ? '强关系检索就绪' : '未通过关系门禁'}
+                </em>
+              ) : null}
+            </header>
+            {graphOverview ? (
+              <>
+                <dl>
+                  <div>
+                    <dt>实体</dt>
+                    <dd>{graphOverview.entityCount.toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>关系</dt>
+                    <dd>{graphOverview.relationCount.toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>切片提及覆盖</dt>
+                    <dd>{Math.round(graphOverview.mentionCoverage * 100)}%</dd>
+                  </div>
+                  <div>
+                    <dt>关系证据覆盖</dt>
+                    <dd>{Math.round(graphOverview.evidenceCoverage * 100)}%</dd>
+                  </div>
+                </dl>
+                {graphOverview.readinessBlockers.length > 0 ? (
+                  <ul>
+                    {graphOverview.readinessBlockers.map((reason) => (
+                      <li key={reason}>{knowledgeGraphReadinessReasonLabel(reason)}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            ) : graphError ? (
+              <p>关系图谱状态检查失败：{graphError}。为避免误标，当前不能声明强关系检索已就绪。</p>
+            ) : (
+              <p>正在核对实体、关系与来源证据。</p>
+            )}
+          </div>
           {result.degradedReason ? (
             <Notice tone="info">
               当前仅提供词法降级检索：{knowledgeReadinessReasonLabel(result.degradedReason)}（
@@ -159,6 +244,15 @@ export function KnowledgeReadinessPanel({
           ) : (
             <Notice tone="success">
               已满足启用门禁：发布切片、当前模型向量覆盖及 Reranker 均已就绪。
+            </Notice>
+          )}
+          {graphOverview?.strongRetrievalReady ? (
+            <Notice tone="success">
+              已满足强关系检索门禁：实体与关系可浏览，且关系均可追溯到来源切片证据。
+            </Notice>
+          ) : (
+            <Notice tone="info">
+              强关系检索门禁尚未通过；知识库即使具备语义检索，也不能标记为关系型知识库就绪。
             </Notice>
           )}
           {result.documents.failed > 0 || result.documents.processing > 0 ? (

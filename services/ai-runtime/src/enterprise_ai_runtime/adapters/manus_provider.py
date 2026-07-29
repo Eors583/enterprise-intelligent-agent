@@ -3,14 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import random
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 import httpx
 from pydantic import ValidationError
 
+from enterprise_ai_runtime.adapters.provider_readiness import ProviderReadinessEvidence
 from enterprise_ai_runtime.domain.errors import (
     ProviderAuthenticationError,
     ProviderInteractionRequiredError,
@@ -54,11 +57,14 @@ class ManusProvider:
         self._project_id = project_id
         self._poll_interval_seconds = poll_interval_seconds
         self._max_wait_seconds = max_wait_seconds
-        self._client = client if client is not None else httpx.AsyncClient(proxy=proxy_url)
+        self._client = (
+            client if client is not None else httpx.AsyncClient(proxy=proxy_url, trust_env=False)
+        )
         self._sleep = sleep
         self._random_value = random_value
         self._max_rate_limit_retries = max_rate_limit_retries
         self._max_incomplete_response_retries = max(0, max_incomplete_response_retries)
+        self._readiness = ProviderReadinessEvidence()
         self._task_ids: dict[UUID, str] = {}
         self._task_ids_lock = asyncio.Lock()
         self._closed = False
@@ -72,9 +78,9 @@ class ManusProvider:
                 async with self._task_ids_lock:
                     self._task_ids[request.run_id] = task_id
                 return await self._wait_for_result(task_id, request)
-        except TimeoutError as error:
+        except TimeoutError:
             await self._stop_after_interruption(task_id)
-            raise ProviderTimeoutError() from error
+            raise ProviderTimeoutError() from None
         except asyncio.CancelledError:
             await self._stop_after_interruption(task_id)
             raise
@@ -107,10 +113,11 @@ class ManusProvider:
                         params={
                             "task_id": task_id,
                             "order": "desc",
-                            "limit": "50",
+                            "limit": "200",
                             "verbose": "false",
                         },
                     )
+                    _validate_task_read_envelope(body, task_id)
                     status = _latest_status(_events(body))
                     if status in {"stopped", "error"}:
                         return True
@@ -121,8 +128,37 @@ class ManusProvider:
         return False
 
     async def is_ready(self) -> bool:
-        # Avoid a paid or rate-limited network probe. RuntimeSettings validates the local config.
-        return not self._closed
+        if self._closed:
+            return False
+        # `task.list` authenticates the configured API key without starting a
+        # paid model task. Cache the result so readiness polling does not
+        # amplify provider traffic or consume the endpoint rate limit.
+        return await self._readiness.resolve(self._probe_readiness)
+
+    async def _probe_readiness(self) -> None:
+        body = await self._request_json(
+            "GET",
+            "/v2/task.list",
+            params={"limit": "1", "order": "desc"},
+        )
+        _required_string(body, "request_id")
+        tasks = body.get("data")
+        has_more = body.get("has_more")
+        if (
+            not isinstance(tasks, list)
+            or any(not isinstance(task, dict) for task in tasks)
+            or not isinstance(has_more, bool)
+        ):
+            raise ProviderResponseError()
+        if has_more and not isinstance(body.get("next_cursor"), str):
+            raise ProviderResponseError()
+        for task in tasks:
+            if (
+                not isinstance(task.get("id"), str)
+                or not task["id"]
+                or task.get("status") not in {"running", "stopped", "waiting", "error"}
+            ):
+                raise ProviderResponseError()
 
     async def aclose(self) -> None:
         if not self._closed:
@@ -133,17 +169,22 @@ class ManusProvider:
         payload: dict[str, Any] = {
             # An omitted connector list inherits the Manus account/project defaults.
             # Enterprise chat runs must not silently gain access to account connectors.
-            "message": {"content": _render_messages(request), "connectors": []},
+            "message": {
+                "content": [{"type": "text", "text": _render_messages(request)}],
+                "connectors": [],
+            },
             "interactive_mode": False,
             "hide_in_task_list": True,
             "share_visibility": "private",
             "agent_profile": request.model,
+            "locale": "zh-CN",
             "title": f"enterprise-run-{request.run_id}",
         }
         if self._project_id is not None:
             payload["project_id"] = self._project_id
 
         body = await self._request_json("POST", "/v2/task.create", json_body=payload)
+        _required_string(body, "request_id")
         return _required_string(body, "task_id")
 
     async def _wait_for_result(
@@ -151,7 +192,6 @@ class ManusProvider:
         task_id: str,
         request: ProviderCompletionRequest,
     ) -> RunExecutionResult:
-        stopped_without_output = 0
         incomplete_response_attempts = 0
         while True:
             try:
@@ -161,10 +201,11 @@ class ManusProvider:
                     params={
                         "task_id": task_id,
                         "order": "desc",
-                        "limit": "50",
+                        "limit": "200",
                         "verbose": "false",
                     },
                 )
+                _validate_task_read_envelope(body, task_id)
             except ProviderResponseError:
                 incomplete_response_attempts = await self._retry_incomplete_response(
                     stage="response_envelope",
@@ -192,25 +233,14 @@ class ManusProvider:
 
             if status == "stopped":
                 try:
-                    result = _latest_assistant_result(events, task_id, request.model)
+                    result = _terminal_assistant_result(events, task_id, request.model)
                 except ProviderResponseError:
                     incomplete_response_attempts = await self._retry_incomplete_response(
                         stage="assistant_message",
                         previous_attempts=incomplete_response_attempts,
                     )
                     continue
-                if result is not None:
-                    return result
-                if _has_error_event(events):
-                    raise ProviderTaskError()
-                stopped_without_output += 1
-                if stopped_without_output >= 3:
-                    logger.warning(
-                        "manus_task_read_invalid stage=assistant_message_missing "
-                        "outcome=exhausted attempts=%d",
-                        stopped_without_output,
-                    )
-                    raise ProviderResponseError()
+                return result
             elif status == "waiting":
                 raise ProviderInteractionRequiredError()
             elif status == "error":
@@ -366,11 +396,65 @@ def _render_messages(request: ProviderCompletionRequest) -> str:
     )
 
 
+def _validate_task_read_envelope(body: dict[str, Any], expected_task_id: str) -> None:
+    _required_string(body, "request_id")
+    if _required_string(body, "task_id") != expected_task_id:
+        raise ProviderResponseError()
+
+
 def _events(body: dict[str, Any]) -> list[dict[str, Any]]:
     messages = body.get("messages")
     if not isinstance(messages, list) or any(not isinstance(item, dict) for item in messages):
         raise ProviderResponseError()
+    previous_timestamp = float("inf")
+    event_ids: set[str] = set()
+    for event in messages:
+        event_id = event.get("id")
+        timestamp = _event_timestamp(event.get("timestamp"))
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or event_id in event_ids
+            or timestamp > previous_timestamp
+        ):
+            raise ProviderResponseError()
+        event_ids.add(event_id)
+        previous_timestamp = timestamp
     return messages
+
+
+def _event_timestamp(value: Any) -> float:
+    if isinstance(value, bool):
+        raise ProviderResponseError()
+    if isinstance(value, (int, float)):
+        return _epoch_seconds(float(value))
+    if not isinstance(value, str) or not value:
+        raise ProviderResponseError()
+    try:
+        return _epoch_seconds(float(value))
+    except ValueError:
+        pass
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        raise ProviderResponseError() from None
+    if parsed.tzinfo is None:
+        raise ProviderResponseError()
+    return parsed.timestamp()
+
+
+def _epoch_seconds(value: float) -> float:
+    if not math.isfinite(value) or value < 0:
+        raise ProviderResponseError()
+    # Manus currently returns epoch milliseconds as a JSON string. Normalize
+    # common epoch precisions so mixed but valid pages still compare correctly.
+    if value >= 1e18:
+        return value / 1e9
+    if value >= 1e15:
+        return value / 1e6
+    if value >= 1e12:
+        return value / 1e3
+    return value
 
 
 def _latest_status(events: list[dict[str, Any]]) -> str | None:
@@ -387,53 +471,68 @@ def _latest_status(events: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def _latest_assistant_result(
+def _terminal_assistant_result(
     events: list[dict[str, Any]],
     task_id: str,
     model: str,
-) -> RunExecutionResult | None:
-    for event in events:
-        if event.get("type") != "assistant_message":
-            continue
-        assistant_message = event.get("assistant_message")
-        if not isinstance(assistant_message, dict):
-            raise ProviderResponseError()
-        content = assistant_message.get("content")
-        if not isinstance(content, str):
-            raise ProviderResponseError()
-        event_id = event.get("id")
-        response_id = event_id if isinstance(event_id, str) and event_id else task_id
-        try:
-            return RunExecutionResult(
-                output=RunOutput(
-                    content=content,
-                    finish_reason="stop",
-                    model=model,
-                    provider="manus",
-                    response_id=response_id,
-                ),
-                # Manus reports account credits rather than token counts or currency micros.
-                # Keep these values explicitly unknown/zero until the platform gains a provider-
-                # specific usage model; do not invent token or monetary measurements.
-                usage=RunUsage(
-                    input_tokens=0,
-                    output_tokens=0,
-                    total_tokens=0,
-                    tool_calls=0,
-                    cost_micros=0,
-                    tokens_reported=False,
-                    cost_reported=False,
-                ),
-            )
-        except ValidationError:
-            # Pydantic validation errors include rejected input values; suppress them at the
-            # provider boundary so generated content cannot be copied into exception logs.
-            raise ProviderResponseError() from None
-    return None
-
-
-def _has_error_event(events: list[dict[str, Any]]) -> bool:
-    return any(event.get("type") == "error_message" for event in events)
+) -> RunExecutionResult:
+    terminal_index = next(
+        (index for index, event in enumerate(events) if event.get("type") == "status_update"),
+        None,
+    )
+    if terminal_index is None:
+        raise ProviderResponseError()
+    terminal = events[terminal_index]
+    status_update = terminal.get("status_update")
+    if not isinstance(status_update, dict) or status_update.get("agent_status") != "stopped":
+        raise ProviderResponseError()
+    # `order=desc` guarantees the first assistant after the latest terminal status is
+    # the final answer for this newly-created task. An assistant newer than the terminal
+    # status would indicate a stale or incoherent event page and must not be accepted.
+    if any(event.get("type") == "assistant_message" for event in events[:terminal_index]):
+        raise ProviderResponseError()
+    assistant = next(
+        (
+            event
+            for event in events[terminal_index + 1 :]
+            if event.get("type") == "assistant_message"
+        ),
+        None,
+    )
+    if assistant is None:
+        raise ProviderResponseError()
+    assistant_message = assistant.get("assistant_message")
+    if not isinstance(assistant_message, dict):
+        raise ProviderResponseError()
+    answer = assistant_message.get("content")
+    if not isinstance(answer, str) or not answer.strip():
+        raise ProviderResponseError()
+    try:
+        return RunExecutionResult(
+            output=RunOutput(
+                content=answer,
+                finish_reason="stop",
+                model=model,
+                provider="manus",
+                response_id=_required_string(assistant, "id") or task_id,
+            ),
+            # Manus reports account credits rather than token counts or currency micros.
+            # Keep these values explicitly unknown/zero until the platform gains a provider-
+            # specific usage model; do not invent token or monetary measurements.
+            usage=RunUsage(
+                input_tokens=0,
+                output_tokens=0,
+                total_tokens=0,
+                tool_calls=0,
+                cost_micros=0,
+                tokens_reported=False,
+                cost_reported=False,
+            ),
+        )
+    except ValidationError:
+        # Pydantic validation errors include rejected input values; suppress them at the
+        # provider boundary so generated content cannot be copied into exception logs.
+        raise ProviderResponseError() from None
 
 
 def _required_string(body: dict[str, Any], key: str) -> str:

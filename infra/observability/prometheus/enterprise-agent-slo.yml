@@ -1,0 +1,180 @@
+groups:
+  - name: enterprise-agent-sli-recording
+    interval: 30s
+    rules:
+      # The Collector example pins Prometheus translation with type/unit suffixes and
+      # promotes service.name to service_name. Validate these names against /metrics
+      # whenever the Collector or instrumentation version changes.
+      - record: enterprise_agent:sli_http_error_ratio:rate5m
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime",
+            http_response_status_code=~"5.."
+          }[5m]))
+          /
+          clamp_min(sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime"
+          }[5m])), 0.000000001)
+      - record: enterprise_agent:sli_http_error_ratio:rate30m
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime",
+            http_response_status_code=~"5.."
+          }[30m]))
+          /
+          clamp_min(sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime"
+          }[30m])), 0.000000001)
+      - record: enterprise_agent:sli_http_error_ratio:rate1h
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime",
+            http_response_status_code=~"5.."
+          }[1h]))
+          /
+          clamp_min(sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime"
+          }[1h])), 0.000000001)
+      - record: enterprise_agent:sli_http_error_ratio:rate6h
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime",
+            http_response_status_code=~"5.."
+          }[6h]))
+          /
+          clamp_min(sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime"
+          }[6h])), 0.000000001)
+      - record: enterprise_agent:sli_http_error_ratio:rate3d
+        expr: |
+          sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime",
+            http_response_status_code=~"5.."
+          }[3d]))
+          /
+          clamp_min(sum(rate(http_server_request_duration_seconds_count{
+            service_name=~"enterprise-agent-api|enterprise-ai-runtime"
+          }[3d])), 0.000000001)
+      - record: enterprise_agent:sli_http_availability:ratio30d
+        expr: |
+          1 -
+          (
+            sum(increase(http_server_request_duration_seconds_count{
+              service_name=~"enterprise-agent-api|enterprise-ai-runtime",
+              http_response_status_code=~"5.."
+            }[30d]))
+            /
+            clamp_min(sum(increase(http_server_request_duration_seconds_count{
+              service_name=~"enterprise-agent-api|enterprise-ai-runtime"
+            }[30d])), 1)
+          )
+      - record: enterprise_agent:sli_agent_run_duration_p95_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(enterprise_agent_run_duration_seconds_bucket{
+                service_name="enterprise-ai-runtime",
+                enterprise_result_status=~"SUCCEEDED|succeeded"
+              }[5m])
+            )
+          )
+      - record: enterprise_agent:sli_agent_run_first_token_p95_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(enterprise_agent_run_time_to_first_token_seconds_bucket{
+                service_name="enterprise-ai-runtime"
+              }[5m])
+            )
+          )
+      - record: enterprise_agent:sli_structured_query_p95_seconds:rate5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(http_server_request_duration_seconds_bucket{
+                service_name="enterprise-agent-api",
+                http_route=~".*(workbench|admin/finops/dashboard|knowledge-citations).*"
+              }[5m])
+            )
+          )
+
+  - name: enterprise-agent-slo-alerts
+    interval: 30s
+    rules:
+      # 99.9% / 30d error budget. Page on fast and medium multi-window burn;
+      # create a ticket for sustained slow burn. Core probes remain the low-traffic backstop.
+      - alert: EnterpriseAgentAvailabilityFastBurn
+        expr: |
+          enterprise_agent:sli_http_error_ratio:rate1h > (14.4 * 0.001)
+          and
+          enterprise_agent:sli_http_error_ratio:rate5m > (14.4 * 0.001)
+        for: 2m
+        labels:
+          severity: critical
+          slo: availability-99.9
+        annotations:
+          summary: Enterprise Agent is rapidly consuming its 30-day availability error budget
+      - alert: EnterpriseAgentAvailabilityMediumBurn
+        expr: |
+          enterprise_agent:sli_http_error_ratio:rate6h > (6 * 0.001)
+          and
+          enterprise_agent:sli_http_error_ratio:rate30m > (6 * 0.001)
+        for: 15m
+        labels:
+          severity: critical
+          slo: availability-99.9
+        annotations:
+          summary: Enterprise Agent is consuming its availability error budget
+      - alert: EnterpriseAgentAvailabilitySlowBurn
+        expr: |
+          enterprise_agent:sli_http_error_ratio:rate3d > 0.001
+          and
+          enterprise_agent:sli_http_error_ratio:rate6h > 0.001
+        for: 1h
+        labels:
+          severity: warning
+          slo: availability-99.9
+        annotations:
+          summary: Enterprise Agent has a sustained availability error-budget burn
+      - alert: EnterpriseAgentOrdinaryQaLatencySloBreached
+        expr: enterprise_agent:sli_agent_run_duration_p95_seconds:rate5m > 8
+        for: 10m
+        labels:
+          severity: warning
+          slo: ordinary-qa-p95-8s
+        annotations:
+          summary: Successful ordinary Agent Run P95 latency exceeds 8 seconds
+      - alert: EnterpriseAgentStructuredQueryLatencySloBreached
+        expr: enterprise_agent:sli_structured_query_p95_seconds:rate5m > 3
+        for: 10m
+        labels:
+          severity: warning
+          slo: structured-query-p95-3s
+        annotations:
+          summary: Structured query P95 latency exceeds 3 seconds
+      - alert: EnterpriseAgentFirstTokenLatencyDegraded
+        expr: enterprise_agent:sli_agent_run_first_token_p95_seconds:rate5m > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Agent Run P95 time to first token exceeds 5 seconds
+      - alert: EnterpriseAgentBusinessEventFreshnessSloBreached
+        expr: enterprise_agent_outbox_oldest_pending_age_seconds > 60
+        for: 2m
+        labels:
+          severity: warning
+          slo: business-event-freshness-60s
+        annotations:
+          summary: The oldest pending business event has exceeded the 60-second freshness SLO
+      - alert: EnterpriseAgentBusinessEventFreshnessCritical
+        expr: enterprise_agent_outbox_oldest_pending_age_seconds > 300
+        for: 2m
+        labels:
+          severity: critical
+          slo: business-event-freshness-60s
+        annotations:
+          summary: Business event propagation is more than five minutes behind

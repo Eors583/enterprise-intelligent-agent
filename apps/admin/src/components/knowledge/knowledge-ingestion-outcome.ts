@@ -45,9 +45,9 @@ export type KnowledgeVersionAction = 'publish' | 'rollback' | null;
 
 export function knowledgeVersionAction(
   document: Pick<KnowledgeDocumentSummary, 'currentVersionId' | 'versions'>,
-  version: Pick<KnowledgeDocumentVersionSummary, 'id' | 'status' | 'versionNumber'>,
+  version: Pick<KnowledgeDocumentVersionSummary, 'id' | 'status' | 'versionNumber' | 'publishedAt'>,
 ): KnowledgeVersionAction {
-  if (version.status === 'DRAFT') {
+  if (version.status === 'READY' && version.publishedAt === null) {
     const currentVersionNumber = currentPublishedKnowledgeVersion(document)?.versionNumber;
     return currentVersionNumber === undefined || version.versionNumber > currentVersionNumber
       ? 'publish'
@@ -55,6 +55,7 @@ export function knowledgeVersionAction(
   }
   if (
     version.status === 'READY' &&
+    version.publishedAt !== null &&
     document.currentVersionId !== null &&
     version.id !== document.currentVersionId
   ) {

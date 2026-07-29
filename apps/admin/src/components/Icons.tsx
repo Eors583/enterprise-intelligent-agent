@@ -5,6 +5,9 @@ export type IconName =
   | 'members'
   | 'knowledge'
   | 'agent'
+  | 'blueprint'
+  | 'business'
+  | 'runtime'
   | 'password'
   | 'logout'
   | 'plus'
@@ -38,6 +41,29 @@ export function Icon({ name, size = 20 }: { name: IconName; size?: number }): Re
       <>
         <rect x="4" y="6" width="16" height="13" rx="4" />
         <path d="M9 11h.01M15 11h.01M9 15h6M12 6V3M10 3h4" />
+      </>
+    ),
+    blueprint: (
+      <>
+        <path d="M5 3h10l4 4v14H5z" />
+        <path d="M15 3v5h5M8 12h8M8 16h8M8 8h3" />
+      </>
+    ),
+    business: (
+      <>
+        <circle cx="5" cy="12" r="2" />
+        <circle cx="12" cy="6" r="2" />
+        <circle cx="19" cy="12" r="2" />
+        <circle cx="12" cy="18" r="2" />
+        <path d="m6.7 10.9 3.6-3.8M13.7 7.1l3.6 3.8M17.3 13.1l-3.6 3.8M10.3 16.9l-3.6-3.8" />
+      </>
+    ),
+    runtime: (
+      <>
+        <path d="M4 6h16M4 12h16M4 18h16" />
+        <circle cx="8" cy="6" r="2" />
+        <circle cx="16" cy="12" r="2" />
+        <circle cx="11" cy="18" r="2" />
       </>
     ),
     password: (

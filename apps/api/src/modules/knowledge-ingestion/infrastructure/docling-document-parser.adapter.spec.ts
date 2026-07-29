@@ -7,6 +7,8 @@ import {
 } from './docling-document-parser.adapter.js';
 
 const PDF = Buffer.from('%PDF-1.7 enterprise test', 'utf8');
+const XLSX = Buffer.from('PK\u0003\u0004 enterprise workbook', 'binary');
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 describe('DoclingDocumentParserAdapter', () => {
   it('converts an uploaded PDF into normalized Markdown pages', async () => {
@@ -66,6 +68,31 @@ describe('DoclingDocumentParserAdapter', () => {
       parser.parse({ bytes: Buffer.from('text'), mimeType: 'text/plain' }),
     ).rejects.toEqual(new DocumentParsingError('UNSUPPORTED_MIME_TYPE'));
     expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it('sends XLSX files through the governed table and OCR parser boundary', async () => {
+    const fetchImplementation = vi.fn().mockResolvedValue(
+      jsonResponse({
+        status: 'success',
+        document: { md_content: '# Sheet\n\n| Metric | Value |\n| --- | --- |\n| SLA | 99.9% |' },
+      }),
+    );
+    const result = await new DoclingDocumentParserAdapter({
+      baseUrl: 'https://docling.example',
+      fetchImplementation,
+    }).parse({
+      bytes: XLSX,
+      mimeType: XLSX_MIME,
+      fileName: '../metrics.xlsx',
+    });
+
+    const form = fetchImplementation.mock.calls[0]?.[1]?.body as FormData;
+    expect(form.get('from_formats')).toBe('xlsx');
+    expect((form.get('files') as File).name).toBe('metrics.xlsx');
+    expect(result.metadata).toMatchObject({
+      mimeType: XLSX_MIME,
+      parser: 'docling-serve-v1',
+    });
   });
 
   it('rejects a forged file signature before sending bytes to Docling', async () => {
@@ -154,6 +181,34 @@ describe('DoclingDocumentParserAdapter', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('aborts an in-flight conversion when the ingestion lease is lost', async () => {
+    const fetchImplementation = vi.fn(
+      (_url: URL | RequestInfo, request?: RequestInit): Promise<Response> =>
+        new Promise((_resolve, reject) => {
+          request?.signal?.addEventListener('abort', () =>
+            reject(new DOMException('lease lost', 'AbortError')),
+          );
+        }),
+    );
+    const parser = new DoclingDocumentParserAdapter({
+      baseUrl: 'https://docling.example',
+      fetchImplementation,
+    });
+    const controller = new AbortController();
+
+    const parsing = parser.parse({
+      bytes: PDF,
+      mimeType: 'application/pdf',
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(fetchImplementation).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(parsing).rejects.toEqual(new DocumentParsingError('DOCUMENT_PARSER_TIMEOUT'));
+    const request = fetchImplementation.mock.calls[0]?.[1] as RequestInit;
+    expect(request.signal?.aborted).toBe(true);
   });
 });
 

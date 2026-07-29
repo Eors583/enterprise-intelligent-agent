@@ -89,3 +89,4 @@ Desktop.ini
 # Codex/local review artifacts
 .codex_tmp/
 .tmp/
+apps/api/.generated/

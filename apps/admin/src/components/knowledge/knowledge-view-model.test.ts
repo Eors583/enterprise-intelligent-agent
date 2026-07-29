@@ -4,6 +4,7 @@ import type {
   KnowledgeDocumentVersionSummary,
 } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
+import { testKnowledgeGovernance } from '@/test/knowledge-fixtures';
 
 import {
   filterKnowledgeDocuments,
@@ -136,6 +137,19 @@ function version(
     chunkCount: 1,
     createdAt: '2026-07-27T00:00:00.000Z',
     publishedAt: '2026-07-27T00:00:00.000Z',
+    evaluationRunId: null,
+    evaluationDatasetVersionId: null,
+    evaluationSnapshotHash: null,
+    sourceUri: null,
+    parserName: 'utf8-markdown-v1',
+    parseQualityScore: 1,
+    parseReviewStatus: 'NOT_REQUIRED',
+    parseReviewRevision: 1,
+    parseReviewedById: null,
+    parseReviewedAt: null,
+    parseReviewNote: null,
+    parseDiagnostics: {},
+    governance: testKnowledgeGovernance(),
     ingestionJob: null,
     ...overrides,
   };

@@ -2,7 +2,6 @@ import {
   BadRequestException,
   Inject,
   Injectable,
-  Logger,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -14,11 +13,12 @@ import type {
   RequestPasswordResetRequest,
   RequestPasswordResetResponse,
 } from '@enterprise/contracts';
-import type { Prisma } from '@prisma/client';
+import { Prisma } from '@prisma/client';
+import { randomUUID } from 'node:crypto';
 
 import type { EnvironmentVariables } from '../../../config/environment.js';
 import { AuthPrismaService } from '../../../database/auth-prisma.service.js';
-import { AuthRecoveryNotificationService } from './auth-recovery-notification.service.js';
+import { IdentitySecretVault } from '../../identity-governance/identity-secret-vault.js';
 import { PasswordHasher } from './password-hasher.js';
 import { TokenService } from './token.service.js';
 
@@ -45,15 +45,13 @@ type ActionTokenCandidate = Prisma.AuthActionTokenGetPayload<{
 
 @Injectable()
 export class AuthRecoveryService {
-  private readonly logger = new Logger(AuthRecoveryService.name);
   private readonly passwordResetTtlSeconds: number;
 
   constructor(
     @Inject(AuthPrismaService) private readonly prisma: AuthPrismaService,
     @Inject(PasswordHasher) private readonly passwords: PasswordHasher,
     @Inject(TokenService) private readonly tokens: TokenService,
-    @Inject(AuthRecoveryNotificationService)
-    private readonly notifications: AuthRecoveryNotificationService,
+    @Inject(IdentitySecretVault) private readonly vault: IdentitySecretVault,
     @Inject(ConfigService)
     config: ConfigService<EnvironmentVariables, true>,
   ) {
@@ -70,8 +68,9 @@ export class AuthRecoveryService {
     const opaque = this.tokens.issueAction('reset');
     const issuedAt = new Date();
     const expiresAt = addSeconds(issuedAt, this.passwordResetTtlSeconds);
+    const deliveryId = randomUUID();
 
-    const delivery = await this.prisma.withAuth(async (transaction) => {
+    await this.prisma.withAuth(async (transaction) => {
       const identity = await findEligibleIdentity(transaction, request.tenantSlug, request.email);
       if (identity === null) return null;
 
@@ -111,6 +110,31 @@ export class AuthRecoveryService {
         },
         select: { id: true },
       });
+      const encrypted = this.vault.encrypt(
+        JSON.stringify({
+          schemaVersion: 1,
+          email: identity.email,
+          displayName: identity.displayName,
+          tenantName: identity.tenantName,
+          token: opaque.value,
+        }),
+        {
+          tenantId: identity.tenantId,
+          resourceId: deliveryId,
+          purpose: 'AUTH_RECOVERY_DELIVERY',
+        },
+      );
+      await transaction.$executeRaw(Prisma.sql`
+        INSERT INTO public."auth_recovery_deliveries" (
+          "id", "tenant_id", "action_token_id",
+          "payload_ciphertext", "payload_key_id", "payload_format_version",
+          "status", "available_at", "expires_at"
+        ) VALUES (
+          ${deliveryId}::uuid, ${identity.tenantId}::uuid, ${action.id}::uuid,
+          ${encrypted.ciphertext}, ${encrypted.keyId}, ${encrypted.formatVersion},
+          'PENDING', CURRENT_TIMESTAMP, ${expiresAt}
+        )
+      `);
       await transaction.auditEvent.create({
         data: {
           tenantId: identity.tenantId,
@@ -122,23 +146,8 @@ export class AuthRecoveryService {
           metadata: { expiresAt: expiresAt.toISOString() },
         },
       });
-      return { ...identity, actionId: action.id };
+      return action.id;
     });
-
-    if (delivery !== null) {
-      // Do not put provider latency on this public, enumeration-safe endpoint.
-      // Raw action tokens are intentionally not persisted, so this is a
-      // best-effort hand-off: a process crash can leave PENDING delivery that
-      // cannot be replayed; the user must request a replacement token.
-      setImmediate(() => {
-        void this.deliverPasswordReset(delivery, opaque.value).catch(() => {
-          this.logger.warn(
-            'Password reset notification delivery failed after async hand-off; status recorded as FAILED.',
-          );
-          return this.recordDelivery(delivery.actionId, 'FAILED');
-        });
-      });
-    }
     return PASSWORD_RESET_REQUEST_ACCEPTED_RESPONSE;
   }
 
@@ -212,15 +221,52 @@ export class AuthRecoveryService {
       });
       if (consumed.count !== 1) throw invalidActionToken();
 
-      const credential = await transaction.passwordCredential.updateMany({
-        where: { tenantId: candidate.tenantId, userId: candidate.userId },
-        data: {
-          passwordHash,
-          mustChangePassword: false,
-          passwordChangedAt: consumedAt,
-        },
-      });
-      if (credential.count !== 1) throw invalidActionToken();
+      if (purpose === 'MEMBER_INVITATION') {
+        const existingCredential = await transaction.passwordCredential.findUnique({
+          where: { userId: candidate.userId },
+          select: { mustChangePassword: true },
+        });
+        if (existingCredential === null) {
+          await transaction.passwordCredential.create({
+            data: {
+              tenantId: candidate.tenantId,
+              userId: candidate.userId,
+              passwordHash,
+              mustChangePassword: false,
+              passwordChangedAt: consumedAt,
+            },
+          });
+        } else {
+          // Compatibility for invitations issued before credentialless activation:
+          // those accounts hold an unknowable placeholder marked as temporary.
+          // Password changes/resets revoke outstanding action tokens under the
+          // same advisory lock, so a non-temporary credential must never be
+          // overwritten by an old invitation.
+          const credential = await transaction.passwordCredential.updateMany({
+            where: {
+              tenantId: candidate.tenantId,
+              userId: candidate.userId,
+              mustChangePassword: true,
+            },
+            data: {
+              passwordHash,
+              mustChangePassword: false,
+              passwordChangedAt: consumedAt,
+            },
+          });
+          if (credential.count !== 1) throw invalidActionToken();
+        }
+      } else {
+        const credential = await transaction.passwordCredential.updateMany({
+          where: { tenantId: candidate.tenantId, userId: candidate.userId },
+          data: {
+            passwordHash,
+            mustChangePassword: false,
+            passwordChangedAt: consumedAt,
+          },
+        });
+        if (credential.count !== 1) throw invalidActionToken();
+      }
 
       if (purpose === 'MEMBER_INVITATION') {
         const activated = await transaction.user.updateMany({
@@ -276,46 +322,6 @@ export class AuthRecoveryService {
       });
       return { revokedSessionCount: revoked.count };
     });
-  }
-
-  private async recordDelivery(
-    actionId: string,
-    status: 'NOT_CONFIGURED' | 'SENT' | 'FAILED',
-  ): Promise<void> {
-    try {
-      await this.prisma.withAuth(async (transaction) => {
-        await transaction.authActionToken.updateMany({
-          where: { id: actionId, consumedAt: null, revokedAt: null },
-          data: {
-            deliveryStatus: status,
-            ...(status === 'NOT_CONFIGURED'
-              ? {}
-              : { deliveryAttempts: { increment: 1 }, lastDeliveryAt: new Date() }),
-          },
-        });
-      });
-    } catch {
-      // A notification status write must not change the public, enumeration-safe
-      // response. The token remains PENDING and can be replaced by a new request.
-    }
-  }
-
-  private async deliverPasswordReset(
-    delivery: {
-      readonly actionId: string;
-      readonly email: string;
-      readonly displayName: string;
-      readonly tenantName: string;
-    },
-    rawToken: string,
-  ): Promise<void> {
-    const status = await this.notifications.sendPasswordReset({
-      email: delivery.email,
-      displayName: delivery.displayName,
-      tenantName: delivery.tenantName,
-      token: rawToken,
-    });
-    await this.recordDelivery(delivery.actionId, status);
   }
 
   private assertPersistenceEnabled(): void {

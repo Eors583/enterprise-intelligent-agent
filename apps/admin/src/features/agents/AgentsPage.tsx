@@ -11,6 +11,7 @@ import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
 import { EmptyState, ErrorState, LoadingPanel, Notice, StatusPill } from '@/components/ui';
 import { AgentEditor } from './AgentEditor';
+import { agentConfigurationStatusLabel } from './agent-status-view';
 
 export function AgentsPage({ canManageLimits = false }: { canManageLimits?: boolean }): ReactNode {
   const [items, setItems] = useState<AdminAgent[]>([]);
@@ -92,6 +93,10 @@ export function AgentsPage({ canManageLimits = false }: { canManageLimits?: bool
           }
         />
       ) : null}
+      <Notice tone="info">
+        “配置已启用”只表示允许进入运行就绪度检查，不代表模型供应商在线。员工端仅在 Runtime、
+        路由允许列表和近期真实成功凭据全部通过后才开放联系；未配置或证据不足时保持不可用。
+      </Notice>
       {loading && items.length === 0 ? <LoadingPanel label="正在读取智能体配置…" /> : null}
       {error && items.length === 0 ? <ErrorState message={error} onRetry={reload} /> : null}
       {!loading && !error && items.length === 0 ? (
@@ -128,7 +133,10 @@ export function AgentsPage({ canManageLimits = false }: { canManageLimits?: bool
                     <strong>{item.owner.displayName}</strong>
                     <small>{item.name}</small>
                   </span>
-                  <StatusPill value={item.status} />
+                  <StatusPill
+                    value={item.status}
+                    label={agentConfigurationStatusLabel(item.status)}
+                  />
                 </button>
               ))}
               {filtered.length === 0 ? <p className="inline-empty">没有匹配的智能体</p> : null}
@@ -176,7 +184,10 @@ function AgentUsageOverview({
   const [monthlyTokens, setMonthlyTokens] = useState(usage.limits.monthlyTokens);
   const [updatingLimits, setUpdatingLimits] = useState(false);
   const [limitError, setLimitError] = useState<string | null>(null);
-  const usedAndReserved = BigInt(usage.current.totalTokens) + BigInt(usage.current.reservedTokens);
+  const usedAndReserved =
+    BigInt(usage.current.totalTokens) +
+    BigInt(usage.current.quotaChargedTokens) +
+    BigInt(usage.current.reservedTokens);
   const monthlyLimit = BigInt(usage.limits.monthlyTokens);
   const quotaPercent = percentage(usedAndReserved, monthlyLimit);
   const hasOperationalRisk =
@@ -213,18 +224,19 @@ function AgentUsageOverview({
           {usage.current.unknownRuns > 0
             ? `当前有 ${usage.current.unknownRuns} 个状态未知的运行；其预留 Token 不会释放，请先排查运行结果。`
             : usage.current.unverifiedUsageRuns > 0
-              ? `本月有 ${usage.current.unverifiedUsageRuns} 个运行未返回可信 Token 用量，系统已保留保守额度；其中 ${usage.current.unreportedCostRuns} 个运行未上报成本。`
+              ? `本月有 ${usage.current.unverifiedUsageRuns} 个运行未返回可信 Token；其中 ${usage.current.quotaUpperBoundRuns} 个已按额度上限保守结算，真实用量仍保持未上报。`
               : '本月 Token 配额已用尽，新运行将被拒绝，直至管理员调整配额或进入下个周期。'}
         </Notice>
       ) : null}
       <div className="summary-grid" aria-label="智能体运行用量概览">
         <article className="summary-card accent">
-          <span>本月 TOKEN（已用 + 预留）</span>
+          <span>本月 TOKEN（可信用量 + 保守结算 + 预留）</span>
           <strong>
             {formatInteger(usedAndReserved)} / {formatInteger(monthlyLimit)}
           </strong>
           <small>
-            已用 {formatInteger(usage.current.totalTokens)}，预留{' '}
+            可信用量 {formatInteger(usage.current.totalTokens)}，保守结算{' '}
+            {formatInteger(usage.current.quotaChargedTokens)}，预留{' '}
             {formatInteger(usage.current.reservedTokens)} · {quotaPercent}%
           </small>
         </article>

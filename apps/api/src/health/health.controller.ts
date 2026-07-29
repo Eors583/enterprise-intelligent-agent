@@ -3,6 +3,14 @@ import { ConfigService } from '@nestjs/config';
 
 import type { EnvironmentVariables } from '../config/environment.js';
 import { PrismaService } from '../database/prisma.service.js';
+import {
+  apiOpenTelemetryStatus,
+  type ApiOpenTelemetryStatus,
+} from '../observability/opentelemetry.js';
+import {
+  KnowledgeIngestionAvailabilityService,
+  type KnowledgeIngestionReadinessStatus,
+} from '../modules/knowledge-ingestion/application/knowledge-ingestion-availability.service.js';
 
 @Controller('health')
 export class HealthController {
@@ -10,6 +18,8 @@ export class HealthController {
     @Inject(ConfigService)
     private readonly config: ConfigService<EnvironmentVariables, true>,
     @Inject(PrismaService) private readonly prisma: PrismaService,
+    @Inject(KnowledgeIngestionAvailabilityService)
+    private readonly knowledgeIngestion: KnowledgeIngestionAvailabilityService,
   ) {}
 
   @Get('live')
@@ -24,6 +34,10 @@ export class HealthController {
       repository: 'up';
       adapter: 'memory' | 'prisma';
       aiRuntime: 'up' | 'disabled';
+      knowledgeIngestion: KnowledgeIngestionReadinessStatus;
+      toolExecution: 'enabled' | 'disabled';
+      feishuDirectorySync: 'enabled' | 'disabled';
+      openTelemetry: 'up' | 'disabled';
     };
     timestamp: string;
   }> {
@@ -34,13 +48,29 @@ export class HealthController {
       throw new ServiceUnavailableException('Database readiness check failed.');
     }
     const agentWorkerEnabled = this.config.get('AGENT_RUN_WORKER_ENABLED', { infer: true });
+    const toolExecutionWorkerEnabled = this.config.get('TOOL_EXECUTION_WORKER_ENABLED', {
+      infer: true,
+    });
+    const feishuDirectorySyncWorkerEnabled = this.config.get('FEISHU_SYNC_WORKER_ENABLED', {
+      infer: true,
+    });
     if (agentWorkerEnabled) await this.assertAiRuntimeReady();
+    const knowledgeIngestion = this.knowledgeIngestion.readinessStatus();
+    const telemetry = apiOpenTelemetryStatus();
+    const telemetryReady = isOpenTelemetryReady(telemetry);
+    if (telemetry.required && !telemetryReady) {
+      throw new ServiceUnavailableException('OpenTelemetry readiness check failed.');
+    }
     return {
       status: 'ready',
       checks: {
         repository: 'up',
         adapter,
         aiRuntime: agentWorkerEnabled ? 'up' : 'disabled',
+        knowledgeIngestion,
+        toolExecution: toolExecutionWorkerEnabled ? 'enabled' : 'disabled',
+        feishuDirectorySync: feishuDirectorySyncWorkerEnabled ? 'enabled' : 'disabled',
+        openTelemetry: telemetryReady ? 'up' : 'disabled',
       },
       timestamp: new Date().toISOString(),
     };
@@ -66,6 +96,16 @@ export class HealthController {
       throw new ServiceUnavailableException('AI Runtime readiness check failed.');
     }
   }
+}
+
+function isOpenTelemetryReady(telemetry: ApiOpenTelemetryStatus): boolean {
+  return (
+    telemetry.state === 'started' &&
+    !telemetry.signals.trace.stale &&
+    telemetry.signals.trace.failureCode === null &&
+    !telemetry.signals.metric.stale &&
+    telemetry.signals.metric.failureCode === null
+  );
 }
 
 function isReadyRuntimeResponse(value: unknown): boolean {

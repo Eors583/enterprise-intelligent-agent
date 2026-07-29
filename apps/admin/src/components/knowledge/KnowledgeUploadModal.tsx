@@ -15,7 +15,7 @@ import { FieldError, Modal, Spinner } from '@/components/ui';
 import { knowledgeVersionFailure, latestKnowledgeVersion } from './knowledge-ingestion-outcome';
 
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'txt', 'md']);
+const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'txt', 'md']);
 
 function extensionOf(fileName: string): string {
   return fileName.split('.').pop()?.toLowerCase() ?? '';
@@ -30,7 +30,7 @@ function titleFromFile(fileName: string): string {
 
 function fileProblem(file: File): string | null {
   if (!ALLOWED_EXTENSIONS.has(extensionOf(file.name))) {
-    return '仅支持 PDF、Word（.docx）、纯文本（.txt）和 Markdown（.md）文件。';
+    return '仅支持 PDF、Word（.docx）、Excel（.xlsx）、纯文本（.txt）和 Markdown（.md）文件。';
   }
   if (file.size === 0) return '文件内容为空，请重新选择。';
   if (file.size > MAX_FILE_BYTES) return '文件不能超过 20 MB。';
@@ -152,7 +152,7 @@ export function KnowledgeUploadModal({
           ref={inputRef}
           className="visually-hidden"
           type="file"
-          accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain,text/markdown"
+          accept=".pdf,.docx,.xlsx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/markdown"
           onChange={onInputChange}
         />
         <div
@@ -182,7 +182,7 @@ export function KnowledgeUploadModal({
           ) : (
             <>
               <strong>拖放文件到这里，或点击选择</strong>
-              <small>支持 PDF、DOCX、TXT、MD，单个文件最大 20 MB</small>
+              <small>支持 PDF、DOCX、XLSX、TXT、MD，单个文件最大 20 MB</small>
             </>
           )}
         </div>

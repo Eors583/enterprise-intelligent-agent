@@ -18,6 +18,7 @@ import { AuthPrismaService } from '../src/database/auth-prisma.service.js';
 import { LoginAttemptLimiter } from '../src/modules/auth/application/login-attempt-limiter.service.js';
 import { RecoveryRequestLimiter } from '../src/modules/auth/application/recovery-request-limiter.service.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantSlug = `auth-self-test-${process.pid}`;
@@ -147,6 +148,17 @@ describe.runIf(enabled)('PostgreSQL authentication integration', () => {
     });
     expect(stored.tokenHash).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(stored)).not.toContain('ea_reset_');
+    const delivery = await administrator.authRecoveryDelivery.findUniqueOrThrow({
+      where: { actionTokenId: stored.id },
+    });
+    expect(['PENDING', 'PROCESSING', 'NOT_CONFIGURED', 'SENT', 'FAILED']).toContain(
+      delivery.status,
+    );
+    expect(
+      delivery.payloadCiphertext === null
+        ? ''
+        : Buffer.from(delivery.payloadCiphertext).toString('utf8'),
+    ).not.toContain('ea_reset_');
   });
 
   it('consumes a password reset once, revokes sessions, and accepts only the new password', async () => {
@@ -302,8 +314,12 @@ describe.runIf(enabled)('PostgreSQL authentication integration', () => {
       })
       .expect(201);
     expect(issueMemberInvitationResponseSchema.safeParse(issued.body).success).toBe(true);
-    expect(new URL(issued.body.acceptanceUrl).search).toBe('');
-    expect(new URL(issued.body.acceptanceUrl).hash).toContain('/accept-invitation?token=');
+    expect(issued.body.deliveryKind).toBe('MANUAL_FALLBACK');
+    const issuedUrl = new URL(issued.body.fallback.acceptanceUrl);
+    expect(issuedUrl.search).toBe('');
+    expect(issuedUrl.hash).toContain('/accept-invitation?token=');
+    const issuedToken = new URLSearchParams(issuedUrl.hash.split('?')[1]).get('token');
+    expect(issuedToken).toMatch(/^ea_invite_/u);
 
     const pendingUser = await administrator.user.findFirstOrThrow({
       where: { tenantId: tenant.id, emailNormalized: 'invited@auth-self-test.invalid' },
@@ -325,21 +341,23 @@ describe.runIf(enabled)('PostgreSQL authentication integration', () => {
       .set('authorization', `Bearer ${accessToken}`)
       .expect(200);
     expect(issueMemberInvitationResponseSchema.safeParse(resent.body).success).toBe(true);
-    expect(resent.body.acceptanceToken).not.toBe(issued.body.acceptanceToken);
+    const resentUrl = new URL(resent.body.fallback.acceptanceUrl);
+    const resentToken = new URLSearchParams(resentUrl.hash.split('?')[1]).get('token');
+    expect(resentToken).not.toBe(issuedToken);
     await request(app.getHttpServer())
       .post('/api/v1/auth/invitations/accept')
-      .send({ token: issued.body.acceptanceToken, newPassword: 'InvitedPassword!2026' })
+      .send({ token: issuedToken, newPassword: 'InvitedPassword!2026' })
       .expect(400);
 
     const accepted = await request(app.getHttpServer())
       .post('/api/v1/auth/invitations/accept')
-      .send({ token: resent.body.acceptanceToken, newPassword: 'InvitedPassword!2026' })
+      .send({ token: resentToken, newPassword: 'InvitedPassword!2026' })
       .expect(200);
     expect(acceptMemberInvitationResponseSchema.safeParse(accepted.body).success).toBe(true);
     expect(accepted.headers['server-timing']).toBeUndefined();
     await request(app.getHttpServer())
       .post('/api/v1/auth/invitations/accept')
-      .send({ token: resent.body.acceptanceToken, newPassword: 'InvitedPassword!2027' })
+      .send({ token: resentToken, newPassword: 'InvitedPassword!2027' })
       .expect(400);
 
     const activated = await administrator.user.findUniqueOrThrow({
@@ -700,24 +718,15 @@ describe.runIf(enabled)('PostgreSQL authentication integration', () => {
     await administrator.authLoginRateLimit.deleteMany({
       where: { scope: { in: ['RECOVERY_ACCOUNT', 'RECOVERY_NETWORK'] } },
     });
+    const tenantIds: string[] = [];
     for (const slug of [tenantSlug, crossTenantSlug]) {
       const tenant = await administrator.tenant.findUnique({
         where: { slug },
         select: { id: true },
       });
       if (tenant === null) continue;
-
-      await administrator.$transaction(async (transaction) => {
-        await transaction.authSession.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.authActionToken.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.passwordCredential.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.auditEvent.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.employment.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.orgUnit.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.organization.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.user.deleteMany({ where: { tenantId: tenant.id } });
-        await transaction.tenant.delete({ where: { id: tenant.id } });
-      });
+      tenantIds.push(tenant.id);
     }
+    await cleanupDisposableTenants(administrator, tenantIds);
   }
 });

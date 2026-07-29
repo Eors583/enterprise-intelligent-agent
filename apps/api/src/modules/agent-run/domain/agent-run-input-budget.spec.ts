@@ -66,6 +66,29 @@ describe('packConservativeAgentRunInput', () => {
     expect(result.run.messages).toEqual([newer, current]);
   });
 
+  it('counts purpose-bound memory and packs it before optional history', () => {
+    const current = message('current question');
+    const memory = memoryContext('remembered preference');
+    const requiredWithMemory = preparedRun({
+      messages: [current],
+      knowledgeSources: [],
+      memoryContexts: [memory],
+    });
+    const candidate = preparedRun({
+      messages: [message('older history '.repeat(100)), current],
+      knowledgeSources: [],
+      memoryContexts: [memory],
+      maxInputTokens: conservativeAgentRunInputUpperBound(requiredWithMemory),
+    });
+
+    const result = packConservativeAgentRunInput(candidate);
+
+    expect(result).toMatchObject({ kind: 'packed' });
+    if (result.kind !== 'packed') return;
+    expect(result.run.memoryContexts).toEqual([memory]);
+    expect(result.run.messages).toEqual([current]);
+  });
+
   it('retains all optional context when the conservative bound has room', () => {
     const candidate = preparedRun({
       messages: [message('history'), message('current question')],
@@ -124,6 +147,30 @@ function knowledgeSource(suffix: string, excerpt: string): AgentRunKnowledgeSour
     headingPath: ['Policy'],
     sourceType: 'TEXT',
     excerpt,
+    classification: 'INTERNAL',
+    governanceHash: 'a'.repeat(64),
+    contentHash: 'b'.repeat(64),
     updatedAt: '2026-07-22T00:00:00.000Z',
+  };
+}
+
+function memoryContext(summary: string): NonNullable<PreparedAgentRun['memoryContexts']>[number] {
+  return {
+    id: '00000000-0000-7000-8000-000000000021',
+    version: 1,
+    revision: 1,
+    scope: 'EMPLOYEE_PRIVATE',
+    title: 'Preference',
+    summary,
+    summarySha256: 'a'.repeat(64),
+    contentHash: 'b'.repeat(64),
+    sourceType: 'USER_CONFIRMED',
+    sourceId: '00000000-0000-7000-8000-000000000022',
+    sourceVersion: 1,
+    sensitivity: 'CONFIDENTIAL',
+    effectiveFrom: '2026-07-28T00:00:00.000Z',
+    effectiveTo: null,
+    expiresAt: null,
+    updatedAt: '2026-07-28T00:00:00.000Z',
   };
 }

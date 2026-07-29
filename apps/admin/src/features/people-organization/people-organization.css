@@ -1,0 +1,134 @@
+.people-organization-page {
+  display: grid;
+  gap: 18px;
+}
+
+.people-overview-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.people-metric {
+  display: grid;
+  gap: 8px;
+  padding: 18px;
+}
+
+.people-metric span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.people-metric strong {
+  font-size: 28px;
+}
+
+.people-metric.warning {
+  border-color: #f3d59b;
+  background: #fffaf0;
+}
+
+.people-governance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+}
+
+.people-form {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 20px;
+}
+
+.people-form > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.people-form h2 {
+  margin: 4px 0 0;
+}
+
+.people-form label {
+  display: grid;
+  gap: 7px;
+}
+
+.people-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(100px, 0.35fr);
+  gap: 10px;
+}
+
+.people-form label > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.people-form textarea {
+  min-height: 94px;
+  resize: vertical;
+}
+
+.people-form .code-input {
+  min-height: 130px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.people-form-hint {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.governance-badge {
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #eaf7f2;
+  color: #0f7a64;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.governance-badge.danger {
+  background: #fff0f0;
+  color: #b42318;
+}
+
+.governance-boundaries {
+  padding: 20px;
+}
+
+.governance-boundaries h2 {
+  margin: 0;
+}
+
+.governance-boundaries ul {
+  display: grid;
+  gap: 10px;
+  margin: 16px 0 0;
+  padding-left: 22px;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+@media (max-width: 1200px) {
+  .people-overview-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 780px) {
+  .people-overview-grid,
+  .people-governance-grid {
+    grid-template-columns: 1fr;
+  }
+}

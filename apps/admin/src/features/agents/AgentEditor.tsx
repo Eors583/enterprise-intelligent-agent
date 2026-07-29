@@ -4,6 +4,7 @@ import { useState, type FormEvent, type ReactNode } from 'react';
 import { reconcileUnknownAgentRun, updateAgent } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { FieldError, Notice, Spinner, StatusPill } from '@/components/ui';
+import { agentConfigurationStatusLabel } from './agent-status-view';
 
 export function AgentEditor({
   agent,
@@ -76,7 +77,7 @@ export function AgentEditor({
               模型路由：{agent.modelRoute} · 配置版本：{agent.versionStatus}
             </p>
           </div>
-          <StatusPill value={agent.status} />
+          <StatusPill value={agent.status} label={agentConfigurationStatusLabel(agent.status)} />
         </div>
         {agent.lastRun ? (
           <Notice tone={runTone(agent.lastRun.status)}>
@@ -112,15 +113,18 @@ export function AgentEditor({
             <input value={name} onChange={(event) => setName(event.target.value)} />
           </label>
           <label>
-            <span>运行状态</span>
+            <span>配置调度状态</span>
             <select
               value={status}
               onChange={(event) => setStatus(event.target.value as typeof status)}
             >
-              <option value="ONLINE">上线</option>
-              <option value="OFFLINE">停用</option>
-              <option value="DISABLED">禁用</option>
+              <option value="ONLINE">启用配置（运行仍需就绪检查）</option>
+              <option value="OFFLINE">配置离线</option>
+              <option value="DISABLED">配置停用</option>
             </select>
+            <small className="form-hint">
+              此处不代表模型在线；实际可联系状态由 Runtime、模型路由和真实成功凭据共同决定。
+            </small>
           </label>
         </div>
         <div className="form-grid two">

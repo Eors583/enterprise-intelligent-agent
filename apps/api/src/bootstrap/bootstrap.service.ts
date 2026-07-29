@@ -1,19 +1,24 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { BootstrapResponse } from '@enterprise/contracts';
+import type { AgentOperationalAvailability, BootstrapResponse } from '@enterprise/contracts';
 
 import { TenantContext } from '../common/context/tenant-context.js';
 import { AgentControlService } from '../modules/agent-control/application/agent-control.service.js';
 import type { MemberAgent } from '../modules/agent-control/domain/agent.models.js';
+import { AgentOperationalReadinessService } from '../modules/ai-safety-model-routing/agent-operational-readiness.service.js';
 import { AuthorizationService } from '../modules/authorization/authorization.service.js';
 import { DirectoryService } from '../modules/directory/application/directory.service.js';
 import { IdentityService } from '../modules/identity/application/identity.service.js';
 
 const NAVIGATION: BootstrapResponse['navigation'] = [
+  { id: 'growth', label: '我的成长' },
   { id: 'home', label: '首页' },
   { id: 'messages', label: '消息' },
   { id: 'contacts', label: '通讯录' },
   { id: 'agents', label: '智能体' },
-  { id: 'work', label: '工作台' },
+  { id: 'roles', label: '我的角色' },
+  { id: 'workbench', label: '目标与任务' },
+  { id: 'memories', label: '我的记忆' },
+  { id: 'experience-usage', label: '经验与用量' },
 ];
 
 @Injectable()
@@ -25,6 +30,8 @@ export class BootstrapService {
     @Inject(AgentControlService) private readonly agents: AgentControlService,
     @Inject(AuthorizationService)
     private readonly authorization: AuthorizationService,
+    @Inject(AgentOperationalReadinessService)
+    private readonly operationalReadiness: AgentOperationalReadinessService,
   ) {}
 
   async getBootstrap(): Promise<BootstrapResponse> {
@@ -38,6 +45,10 @@ export class BootstrapService {
     ]);
     this.authorization.assertTenantAccess(principal.tenantId);
     this.authorization.assertTenantAccess(tenant.id);
+    const operationalAvailabilityByAgentId = await this.operationalReadiness.inspectAgents(
+      tenant.id,
+      agents.map(({ id }) => id),
+    );
 
     const agentsByOwner = new Map<string, MemberAgent>(
       agents.map((agent) => [agent.ownerUserId, agent]),
@@ -60,6 +71,10 @@ export class BootstrapService {
       })),
       members: members.map((member) => {
         const agent = agentsByOwner.get(member.id);
+        const operationalAvailability =
+          agent === undefined
+            ? undefined
+            : (operationalAvailabilityByAgentId.get(agent.id) ?? unknownAvailability());
         return {
           id: member.id,
           name: member.name,
@@ -75,16 +90,23 @@ export class BootstrapService {
                   name: agent.name,
                   status: agent.status,
                   ...(agent.summary === undefined ? {} : { summary: agent.summary }),
+                  operationalAvailability: operationalAvailability ?? unknownAvailability(),
                 },
           capabilities: {
             canContactHuman: member.status === 'active' && member.id !== user.id,
-            canContactAgent:
-              agent !== undefined &&
-              agent.status === 'online' &&
-              agent.versionStatus === 'published',
+            canContactAgent: operationalAvailability?.status === 'AVAILABLE',
           },
         };
       }),
     };
   }
+}
+
+function unknownAvailability(): AgentOperationalAvailability {
+  return {
+    status: 'UNKNOWN',
+    evidenceStatus: 'INSUFFICIENT_EVIDENCE',
+    reasonCodes: ['READINESS_RESULT_MISSING'],
+    checkedAt: null,
+  };
 }

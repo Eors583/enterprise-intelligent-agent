@@ -5,6 +5,7 @@ import type { Request } from 'express';
 
 import type { EnvironmentVariables } from '../../config/environment.js';
 import type { AuthService } from './application/auth.service.js';
+import type { BrowserSessionTransport } from './browser-session.transport.js';
 import type { AuthenticatedPrincipal } from './domain/authenticated-principal.js';
 import { AuthGuard } from './auth.guard.js';
 
@@ -46,6 +47,39 @@ describe('AuthGuard', () => {
     expect(request.authPrincipal).toEqual(principal);
   });
 
+  it('authenticates the HttpOnly browser access cookie', async () => {
+    const token = `ea_access_${'b'.repeat(43)}`;
+    const { guard, context, request, authenticate } = setup({
+      environment: 'production',
+      cookie: `ea_access=${token}`,
+    });
+
+    await expect(guard.canActivate(context)).resolves.toBe(true);
+    expect(authenticate).toHaveBeenCalledWith(token);
+    expect(request.authPrincipal).toEqual(principal);
+  });
+
+  it('requires CSRF proof for browser-cookie mutations', async () => {
+    const token = `ea_access_${'c'.repeat(43)}`;
+    const denied = setup({
+      environment: 'production',
+      cookie: `ea_access=${token}; ea_csrf=csrf-proof`,
+      method: 'POST',
+      csrfValid: false,
+    });
+    await expect(denied.guard.canActivate(denied.context)).rejects.toThrow(
+      'Browser session CSRF validation failed.',
+    );
+
+    const allowed = setup({
+      environment: 'production',
+      cookie: `ea_access=${token}; ea_csrf=csrf-proof`,
+      method: 'POST',
+      csrfValid: true,
+    });
+    await expect(allowed.guard.canActivate(allowed.context)).resolves.toBe(true);
+  });
+
   it('blocks normal application routes until a required password change is completed', async () => {
     const { guard, context } = setup({
       environment: 'production',
@@ -77,6 +111,9 @@ function setup(options: {
   readonly authorization?: string;
   readonly authenticatedPrincipal?: AuthenticatedPrincipal;
   readonly path?: string;
+  readonly cookie?: string;
+  readonly method?: string;
+  readonly csrfValid?: boolean;
 }): {
   readonly guard: AuthGuard;
   readonly context: ExecutionContext;
@@ -84,9 +121,14 @@ function setup(options: {
   readonly authenticate: ReturnType<typeof vi.fn>;
 } {
   const request = {
-    method: 'GET',
+    method: options.method ?? 'GET',
     path: options.path ?? '/api/v1/bootstrap',
-    header: (name: string) => (name === 'authorization' ? options.authorization : undefined),
+    headers: { ...(options.cookie === undefined ? {} : { cookie: options.cookie }) },
+    header: (name: string) => {
+      if (name === 'authorization') return options.authorization;
+      if (name === 'x-csrf-token' && options.csrfValid) return 'csrf-proof';
+      return undefined;
+    },
   } as Request;
   const context = {
     getHandler: () => setup,
@@ -105,8 +147,15 @@ function setup(options: {
       return undefined;
     },
   } as unknown as ConfigService<EnvironmentVariables, true>;
+  const browserSession = {
+    requireCsrf: (value: Request) => {
+      if (value.header('x-csrf-token') !== 'csrf-proof') {
+        throw new ForbiddenException('Browser session CSRF validation failed.');
+      }
+    },
+  } as BrowserSessionTransport;
   return {
-    guard: new AuthGuard(reflector, auth, config),
+    guard: new AuthGuard(reflector, auth, config, browserSession),
     context,
     request,
     authenticate,

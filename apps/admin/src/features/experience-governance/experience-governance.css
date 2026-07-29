@@ -1,0 +1,417 @@
+.experience-governance-page {
+  --experience-violet: #6754e7;
+  --experience-ink: #15233c;
+}
+
+.experience-header {
+  align-items: flex-end;
+}
+
+.experience-header p {
+  max-width: 760px;
+}
+
+.experience-header-actions,
+.experience-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.experience-guardrail {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  margin-bottom: 18px;
+  padding: 14px 18px;
+  color: #4f3db9;
+  border: 1px solid #ded8ff;
+  border-radius: 14px;
+  background: linear-gradient(100deg, #f7f5ff, #fbfcff);
+}
+
+.experience-guardrail strong {
+  flex: none;
+}
+
+.experience-loading {
+  display: grid;
+  min-height: 220px;
+  place-items: center;
+}
+
+.experience-layout {
+  display: grid;
+  grid-template-columns: minmax(250px, 330px) minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.experience-list {
+  position: sticky;
+  top: 82px;
+  overflow: hidden;
+  padding: 0;
+}
+
+.experience-list > header,
+.experience-detail > header,
+.experience-monitoring > header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.experience-list > header {
+  padding: 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.experience-list h2,
+.experience-detail h2,
+.experience-monitoring h2 {
+  margin: 4px 0 0;
+}
+
+.experience-count {
+  min-width: 32px;
+  padding: 6px 10px;
+  text-align: center;
+  color: var(--experience-violet);
+  border-radius: 999px;
+  background: #f0edff;
+  font-weight: 800;
+}
+
+.experience-list-items {
+  max-height: calc(100vh - 260px);
+  overflow: auto;
+  padding: 8px;
+}
+
+.experience-list-items > button {
+  display: grid;
+  width: 100%;
+  grid-template-columns: 38px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  padding: 11px;
+  text-align: left;
+  color: var(--experience-ink);
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+}
+
+.experience-list-items > button:hover,
+.experience-list-items > button.selected {
+  border-color: #ddd7ff;
+  background: #f8f7ff;
+}
+
+.experience-list-items > button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.experience-list-items strong,
+.experience-list-items small,
+.experience-list-items time {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experience-list-items small,
+.experience-list-items time {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.experience-list-mark {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  color: white;
+  border-radius: 12px;
+  background: var(--experience-violet);
+  font-weight: 800;
+}
+
+.experience-list-mark.status-rejected,
+.experience-list-mark.status-retired {
+  background: #8590a3;
+}
+
+.experience-list-mark.status-published,
+.experience-list-mark.status-monitored {
+  background: #13856f;
+}
+
+.experience-detail-stack {
+  display: grid;
+  gap: 18px;
+}
+
+.experience-detail {
+  min-width: 0;
+  padding: 24px;
+}
+
+.experience-detail > header p {
+  max-width: 720px;
+  margin-bottom: 0;
+  color: var(--muted);
+}
+
+.experience-progress {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(60px, 1fr));
+  gap: 6px;
+  margin: 24px 0;
+  padding: 0;
+  list-style: none;
+}
+
+.experience-progress li {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #919aaa;
+}
+
+.experience-progress li::before {
+  width: 100%;
+  height: 3px;
+  content: '';
+  border-radius: 999px;
+  background: #e7e9ef;
+}
+
+.experience-progress li span {
+  display: grid;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border: 1px solid #d9dce5;
+  border-radius: 50%;
+  background: white;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.experience-progress li small {
+  overflow: hidden;
+  max-width: 100%;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.experience-progress li.complete::before,
+.experience-progress li.current::before {
+  background: var(--experience-violet);
+}
+
+.experience-progress li.complete span {
+  color: white;
+  border-color: var(--experience-violet);
+  background: var(--experience-violet);
+}
+
+.experience-progress li.current {
+  color: var(--experience-violet);
+}
+
+.experience-progress li.current span {
+  color: var(--experience-violet);
+  border-color: var(--experience-violet);
+  box-shadow: 0 0 0 4px #efecff;
+}
+
+.experience-identity-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  margin: 0 0 20px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--border);
+}
+
+.experience-identity-grid > div {
+  min-width: 0;
+  padding: 13px 15px;
+  background: white;
+}
+
+.experience-identity-grid dt {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.experience-identity-grid dd {
+  overflow: hidden;
+  margin: 4px 0 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--experience-ink);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.experience-stage-evidence {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.experience-stage-evidence > div {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  gap: 2px 9px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.experience-stage-evidence > div > span {
+  grid-row: 1 / 3;
+  color: #8a93a4;
+  font-size: 20px;
+}
+
+.experience-stage-evidence > div.ready {
+  border-color: #bfe5d9;
+  background: #f7fcfa;
+}
+
+.experience-stage-evidence > div.ready > span {
+  color: #13856f;
+}
+
+.experience-stage-evidence small {
+  color: var(--muted);
+}
+
+.experience-actions {
+  justify-content: flex-end;
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.experience-terminal {
+  color: var(--muted);
+}
+
+.experience-monitoring {
+  padding: 20px 24px;
+}
+
+.experience-monitoring > header small {
+  color: var(--muted);
+}
+
+.experience-monitoring > div {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.experience-monitoring > div > div {
+  display: grid;
+  gap: 5px;
+  padding: 14px;
+  border-radius: 12px;
+  background: #f5f7fa;
+}
+
+.experience-monitoring > div > div.danger {
+  color: #bc3f4e;
+  background: #fff4f5;
+}
+
+.experience-monitoring small {
+  color: var(--muted);
+}
+
+.experience-monitoring strong {
+  font-size: 24px;
+}
+
+.experience-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.experience-projection-note {
+  display: grid;
+  gap: 4px;
+  padding: 13px 15px;
+  color: #4f3db9;
+  border: 1px solid #ded8ff;
+  border-radius: 12px;
+  background: #f8f6ff;
+}
+
+.experience-projection-note span {
+  color: #655d86;
+  line-height: 1.55;
+}
+
+.experience-json-input {
+  min-height: 300px;
+  color: #29344a;
+  background: #f8f9fc;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  line-height: 1.55;
+}
+
+@media (max-width: 1100px) {
+  .experience-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .experience-list {
+    position: static;
+  }
+
+  .experience-list-items {
+    max-height: 320px;
+  }
+
+  .experience-progress {
+    grid-template-columns: repeat(4, minmax(70px, 1fr));
+    row-gap: 16px;
+  }
+}
+
+@media (max-width: 700px) {
+  .experience-header {
+    align-items: stretch;
+  }
+
+  .experience-header-actions,
+  .experience-form-grid,
+  .experience-identity-grid,
+  .experience-stage-evidence,
+  .experience-monitoring > div {
+    grid-template-columns: 1fr;
+  }
+
+  .experience-header-actions {
+    display: grid;
+  }
+
+  .experience-progress {
+    grid-template-columns: repeat(2, minmax(90px, 1fr));
+  }
+}

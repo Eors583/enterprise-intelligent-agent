@@ -1,0 +1,190 @@
+.audit-governance-page {
+  display: grid;
+  gap: 18px;
+}
+
+.audit-integrity-card {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 22px;
+  border-color: #c8e9dd;
+  background: linear-gradient(135deg, #f8fffc, #f2fbf8);
+}
+
+.audit-integrity-card.invalid {
+  border-color: #f5b5b5;
+  background: #fff7f7;
+}
+
+.audit-integrity-mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border-radius: 16px;
+  background: #0f8a72;
+  color: #fff;
+  font-size: 24px;
+  font-weight: 800;
+}
+
+.audit-integrity-card.invalid .audit-integrity-mark {
+  background: #c43b3b;
+}
+
+.audit-integrity-card h2,
+.audit-events-card h2 {
+  margin: 4px 0;
+}
+
+.audit-integrity-card p,
+.audit-events-card p,
+.audit-export-card p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.audit-filter-card {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 18px;
+}
+
+.audit-filter-card label {
+  display: grid;
+  gap: 7px;
+}
+
+.audit-filter-card label > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.audit-filter-card input,
+.audit-export-card input {
+  min-width: 0;
+}
+
+.audit-filter-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.audit-export-card {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(260px, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 18px;
+}
+
+.audit-events-card {
+  overflow: hidden;
+}
+
+.audit-events-card > header {
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-event-list {
+  display: grid;
+}
+
+.audit-event-row {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 16px;
+  padding: 18px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.audit-sequence {
+  color: #5c4fd9;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-weight: 800;
+}
+
+.audit-event-main > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.audit-event-main time,
+.audit-event-main > p {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.audit-event-main dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.audit-event-main dl > div {
+  min-width: 0;
+  padding: 10px;
+  border-radius: 10px;
+  background: var(--surface-muted);
+}
+
+.audit-event-main dt {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.audit-event-main dd {
+  overflow: hidden;
+  margin: 4px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audit-event-main details pre {
+  overflow: auto;
+  max-height: 260px;
+  padding: 12px;
+  border-radius: 10px;
+  background: #111827;
+  color: #e5e7eb;
+}
+
+.audit-load-more {
+  display: block;
+  margin: 16px auto;
+}
+
+@media (max-width: 1100px) {
+  .audit-filter-card {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .audit-export-card {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 720px) {
+  .audit-filter-card,
+  .audit-event-main dl {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-event-row {
+    grid-template-columns: 1fr;
+  }
+
+  .audit-event-main > header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}

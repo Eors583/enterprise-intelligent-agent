@@ -24,11 +24,19 @@ export const departmentSummarySchema = z.object({
   memberCount: z.number().int().nonnegative(),
 });
 
+export const agentOperationalAvailabilitySchema = z.object({
+  status: z.enum(['AVAILABLE', 'NOT_READY', 'DEGRADED', 'UNKNOWN']),
+  evidenceStatus: z.enum(['VERIFIED', 'INSUFFICIENT_EVIDENCE']),
+  reasonCodes: z.array(z.string().regex(/^[A-Z0-9_]{1,120}$/u)),
+  checkedAt: z.iso.datetime().nullable(),
+});
+
 export const memberAgentSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   status: z.enum(['online', 'offline', 'disabled']),
   summary: z.string().min(1).optional(),
+  operationalAvailability: agentOperationalAvailabilitySchema,
 });
 
 export const memberSummarySchema = z.object({
@@ -57,6 +65,7 @@ export type TenantSummary = z.infer<typeof tenantSummarySchema>;
 export type CurrentUser = z.infer<typeof currentUserSchema>;
 export type NavigationItem = z.infer<typeof navigationItemSchema>;
 export type DepartmentSummary = z.infer<typeof departmentSummarySchema>;
+export type AgentOperationalAvailability = z.infer<typeof agentOperationalAvailabilitySchema>;
 export type MemberAgent = z.infer<typeof memberAgentSchema>;
 export type MemberSummary = z.infer<typeof memberSummarySchema>;
 export type BootstrapResponse = z.infer<typeof bootstrapResponseSchema>;

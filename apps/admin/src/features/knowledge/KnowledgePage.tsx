@@ -6,6 +6,7 @@ import type {
   KnowledgeDocument,
   KnowledgeDocumentSummary,
   KnowledgeDocumentVersionDetail,
+  KnowledgeGraphOverview,
 } from '@enterprise/contracts';
 import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
@@ -23,6 +24,7 @@ import {
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
 import { KnowledgeDocumentsPanel } from '@/components/knowledge/KnowledgeDocumentsPanel';
+import { KnowledgeGraphPanel } from '@/components/knowledge/KnowledgeGraphPanel';
 import { KnowledgeReadinessPanel } from '@/components/knowledge/KnowledgeReadinessPanel';
 import {
   KnowledgeImportModal,
@@ -652,12 +654,20 @@ function KnowledgeBaseEditor({
   ]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'documents' | 'retrieval' | 'settings'>('documents');
+  const [activeTab, setActiveTab] = useState<'documents' | 'graph' | 'retrieval' | 'settings'>(
+    'documents',
+  );
   const [enterpriseReadiness, setEnterpriseReadiness] =
     useState<KnowledgeBaseIndexReadiness | null>(null);
+  const [enterpriseGraphOverview, setEnterpriseGraphOverview] =
+    useState<KnowledgeGraphOverview | null>(null);
   const activationRequested = status === 'ACTIVE' && item.status !== 'ACTIVE';
   const activationBlocked =
-    activationRequested && (enterpriseReadiness === null || !enterpriseReadiness.activationAllowed);
+    activationRequested &&
+    (enterpriseReadiness === null ||
+      !enterpriseReadiness.activationAllowed ||
+      enterpriseGraphOverview === null ||
+      !enterpriseGraphOverview.strongRetrievalReady);
   const readinessRefreshToken = knowledgeReadinessRefreshToken(item.documents);
 
   const submit = async (event: FormEvent): Promise<void> => {
@@ -671,7 +681,7 @@ function KnowledgeBaseEditor({
       return;
     }
     if (activationBlocked) {
-      setError('企业就绪度检查尚未通过，请先处理上方列出的索引或模型阻断项。');
+      setError('企业就绪度检查尚未通过，请先处理索引、模型或关系证据阻断项。');
       return;
     }
     setSubmitting(true);
@@ -718,6 +728,14 @@ function KnowledgeBaseEditor({
           </button>
           <button
             type="button"
+            className={activeTab === 'graph' ? 'active' : ''}
+            onClick={() => setActiveTab('graph')}
+          >
+            实体关系
+            <span>{enterpriseGraphOverview?.relationCount ?? 0}</span>
+          </button>
+          <button
+            type="button"
             className={activeTab === 'retrieval' ? 'active' : ''}
             onClick={() => setActiveTab('retrieval')}
           >
@@ -737,12 +755,14 @@ function KnowledgeBaseEditor({
         knowledgeBaseId={item.id}
         refreshToken={readinessRefreshToken}
         onReadinessChange={setEnterpriseReadiness}
+        onGraphOverviewChange={setEnterpriseGraphOverview}
         onReviewFailures={() => setActiveTab('documents')}
       />
 
       {activeTab === 'documents' ? (
         <KnowledgeDocumentsPanel
           item={item}
+          readiness={enterpriseReadiness}
           onCreateDocument={onCreateDocument}
           onEditDocument={onEditDocument}
           onChanged={onChanged}
@@ -750,8 +770,14 @@ function KnowledgeBaseEditor({
       ) : null}
 
       {activeTab === 'retrieval' ? (
-        <KnowledgeRetrievalTestPanel knowledgeBaseId={item.id} knowledgeBaseStatus={item.status} />
+        <KnowledgeRetrievalTestPanel
+          knowledgeBaseId={item.id}
+          knowledgeBaseStatus={item.status}
+          documents={item.documents}
+        />
       ) : null}
+
+      {activeTab === 'graph' ? <KnowledgeGraphPanel knowledgeBaseId={item.id} /> : null}
 
       {activeTab === 'settings' ? (
         <form
@@ -792,13 +818,15 @@ function KnowledgeBaseEditor({
           {activationBlocked ? (
             <Notice tone="info">
               企业就绪度门禁未通过，不能启用知识库。请先完成文档处理、当前模型向量覆盖及 Reranker
-              配置。
+              配置，并确保实体关系与来源证据满足强关系检索门禁。
             </Notice>
           ) : enterpriseReadiness ? (
             <Notice tone="info">
               当前有 {enterpriseReadiness.documents.ready} 篇就绪文档、
               {enterpriseReadiness.publishedChunkCount} 个已发布切片，语义覆盖率为{' '}
-              {Math.round(enterpriseReadiness.semanticCoverage * 100)}%。
+              {Math.round(enterpriseReadiness.semanticCoverage * 100)}%；关系图谱包含{' '}
+              {enterpriseGraphOverview?.entityCount ?? 0} 个实体和{' '}
+              {enterpriseGraphOverview?.relationCount ?? 0} 条关系。
             </Notice>
           ) : null}
           <ScopePicker

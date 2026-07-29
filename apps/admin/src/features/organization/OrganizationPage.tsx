@@ -2,6 +2,8 @@ import type {
   AdminOrganizationResponse,
   AdminOrgUnit,
   BindFeishuOrganizationRequest,
+  FeishuDirectoryPreview,
+  FeishuDirectorySyncRunDetail,
   FeishuOrganizationSyncStatus,
 } from '@enterprise/contracts';
 import {
@@ -16,11 +18,14 @@ import {
 
 import {
   archiveOrgUnit,
+  applyFeishuDirectoryPreview,
   bindFeishuOrganization,
+  createFeishuDirectoryPreview,
   createOrgUnit,
   getFeishuOrganizationSyncStatus,
+  getFeishuDirectoryPreview,
   getOrganization,
-  startFeishuOrganizationSync,
+  listFeishuDirectorySyncRuns,
   updateOrganization,
   updateOrgUnit,
 } from '@/api/admin-api';
@@ -94,6 +99,8 @@ export function OrganizationPage(): ReactNode {
   const [createOpen, setCreateOpen] = useState(false);
   const [renameOpen, setRenameOpen] = useState(false);
   const [feishuStatus, setFeishuStatus] = useState<FeishuOrganizationSyncStatus | null>(null);
+  const [feishuPreview, setFeishuPreview] = useState<FeishuDirectoryPreview | null>(null);
+  const [feishuRun, setFeishuRun] = useState<FeishuDirectorySyncRunDetail | null>(null);
   const [feishuLoading, setFeishuLoading] = useState(true);
   const [feishuStarting, setFeishuStarting] = useState(false);
   const [feishuBinding, setFeishuBinding] = useState(false);
@@ -132,11 +139,20 @@ export function OrganizationPage(): ReactNode {
     const loadStatus = async (initial: boolean): Promise<void> => {
       if (initial) setFeishuLoading(true);
       try {
-        const response = await getFeishuOrganizationSyncStatus(controller.signal);
+        const [response, preview, runs] = await Promise.all([
+          getFeishuOrganizationSyncStatus(controller.signal),
+          getFeishuDirectoryPreview(controller.signal),
+          listFeishuDirectorySyncRuns(controller.signal),
+        ]);
         if (controller.signal.aborted) return;
         setFeishuStatus(response);
+        setFeishuPreview(preview);
+        setFeishuRun(runs.items[0] ?? null);
         setFeishuError(null);
-        shouldPoll = response.status === 'RUNNING';
+        shouldPoll =
+          response.status === 'RUNNING' ||
+          runs.items[0]?.status === 'QUEUED' ||
+          runs.items[0]?.status === 'RUNNING';
         if (shouldPoll) feishuWasRunning.current = true;
         if (response.status === 'SUCCEEDED' && feishuWasRunning.current) {
           feishuWasRunning.current = false;
@@ -170,16 +186,27 @@ export function OrganizationPage(): ReactNode {
     setFeishuStarting(true);
     setFeishuError(null);
     try {
-      const response = await startFeishuOrganizationSync();
-      setFeishuStatus(response);
-      if (response.status === 'RUNNING') {
-        feishuWasRunning.current = true;
-        refreshFeishuStatus();
-      } else if (response.status === 'SUCCEEDED') {
-        feishuWasRunning.current = false;
-        setNotice('飞书组织同步完成，组织架构已刷新。');
-        reload();
-      }
+      const preview = await createFeishuDirectoryPreview();
+      setFeishuPreview(preview);
+      setNotice('飞书通讯录差异预览已生成，请核对后确认应用。');
+    } catch (caught) {
+      setFeishuError(messageFromError(caught));
+    } finally {
+      setFeishuStarting(false);
+    }
+  };
+  const applyFeishuSync = async (): Promise<void> => {
+    if (!feishuPreview || feishuPreview.status !== 'READY') return;
+    setFeishuStarting(true);
+    setFeishuError(null);
+    try {
+      const run = await applyFeishuDirectoryPreview({
+        previewId: feishuPreview.id,
+        idempotencyKey: buildFeishuApplyIdempotencyKey(feishuPreview.id, feishuRun),
+      });
+      setFeishuRun(run);
+      feishuWasRunning.current = true;
+      refreshFeishuStatus();
     } catch (caught) {
       setFeishuError(messageFromError(caught));
     } finally {
@@ -192,7 +219,7 @@ export function OrganizationPage(): ReactNode {
     try {
       const response = await bindFeishuOrganization(input);
       setFeishuStatus(response);
-      setNotice('飞书应用绑定成功，可以开始同步组织通讯录。');
+      setNotice('飞书应用凭据与通讯录权限已通过本次在线验证；尚未导入任何组织数据。');
     } catch (caught) {
       const message = messageFromError(caught);
       setFeishuError(message);
@@ -239,8 +266,11 @@ export function OrganizationPage(): ReactNode {
         starting={feishuStarting}
         binding={feishuBinding}
         error={feishuError}
+        preview={feishuPreview}
+        durableRun={feishuRun}
         onRefresh={refreshFeishuStatus}
         onStart={() => void startFeishuSync()}
+        onApply={() => void applyFeishuSync()}
         onBind={bindFeishu}
       />
       {loading && !data ? <LoadingPanel label="正在读取组织架构…" /> : null}
@@ -377,8 +407,11 @@ function FeishuSyncCard({
   starting,
   binding,
   error,
+  preview,
+  durableRun,
   onRefresh,
   onStart,
+  onApply,
   onBind,
 }: {
   status: FeishuOrganizationSyncStatus | null;
@@ -386,12 +419,16 @@ function FeishuSyncCard({
   starting: boolean;
   binding: boolean;
   error: string | null;
+  preview: FeishuDirectoryPreview | null;
+  durableRun: FeishuDirectorySyncRunDetail | null;
   onRefresh: () => void;
   onStart: () => void;
+  onApply: () => void;
   onBind: (input: BindFeishuOrganizationRequest) => Promise<void>;
 }): ReactNode {
   const [appId, setAppId] = useState('');
   const [appSecret, setAppSecret] = useState('');
+  const [credentialHandlingAttested, setCredentialHandlingAttested] = useState(false);
   const [showBindingForm, setShowBindingForm] = useState(false);
   const running = status?.status === 'RUNNING';
   const notConfigured = status?.status === 'NOT_CONFIGURED';
@@ -403,6 +440,7 @@ function FeishuSyncCard({
     try {
       await onBind({ appId, appSecret });
       setAppSecret('');
+      setCredentialHandlingAttested(false);
       setShowBindingForm(false);
     } catch {
       // The parent renders the sanitized API error in this card.
@@ -418,14 +456,11 @@ function FeishuSyncCard({
           </span>
           <div>
             <h2 id="feishu-sync-title">飞书组织同步</h2>
-            <p>从飞书通讯录同步部门、成员及在离职状态。</p>
+            <p>从飞书通讯录同步部门、成员、调岗与在离职状态。</p>
           </div>
         </div>
         {status ? (
-          <StatusPill
-            value={status.status}
-            {...(status.status === 'READY' ? { label: '已配置' } : {})}
-          />
+          <StatusPill value={status.status} label={feishuSyncStatusLabel(status.status)} />
         ) : null}
       </header>
 
@@ -457,22 +492,40 @@ function FeishuSyncCard({
 
         {notConfigured ? (
           <Notice tone="info">
-            请绑定企业自建应用。App Secret 只会加密保存在服务端，状态接口不会回传。
+            未配置，飞书同步当前不可用。请先绑定企业自建应用；App Secret
+            只会加密保存在服务端，状态接口不会回传。
           </Notice>
         ) : null}
+        {status?.status === 'READY' ? (
+          <Notice tone="info">
+            当前只确认服务端保存了连接配置，不代表此刻仍可访问飞书。生成差异预览时会重新验证真实连接与通讯录权限。
+          </Notice>
+        ) : null}
+
+        {(notConfigured || showBindingForm) && (
+          <Notice tone="error">
+            安全阻断：曾在聊天、工单、截图、日志或源码中暴露的 App Secret
+            不得再次使用。请先在飞书开放平台轮换，再输入新生成且未暴露的
+            Secret；系统不会从历史内容复用密钥。
+          </Notice>
+        )}
 
         {notConfigured || showBindingForm ? (
           <form className="feishu-binding-form" onSubmit={(event) => void submitBinding(event)}>
             <div className="binding-form-heading">
               <div>
                 <strong>{notConfigured ? '绑定飞书应用' : '更新飞书应用凭据'}</strong>
-                <small>请在飞书开放平台创建企业自建应用，并授予只读通讯录权限。</small>
+                <small>请在飞书开放平台创建企业自建应用，并授予部门与成员只读通讯录权限。</small>
               </div>
               {!notConfigured ? (
                 <button
                   className="text-button"
                   type="button"
-                  onClick={() => setShowBindingForm(false)}
+                  onClick={() => {
+                    setAppSecret('');
+                    setCredentialHandlingAttested(false);
+                    setShowBindingForm(false);
+                  }}
                 >
                   收起
                 </button>
@@ -502,8 +555,25 @@ function FeishuSyncCard({
               </label>
             </div>
             <div className="binding-form-actions">
-              <small>绑定时会先连接飞书验证凭据，不会立即导入成员。</small>
-              <button className="button primary" type="submit" disabled={binding || running}>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={credentialHandlingAttested}
+                  onChange={(event) => setCredentialHandlingAttested(event.target.checked)}
+                  required
+                />
+                <span>
+                  我确认当前 Secret 已在飞书后台新生成，且未在聊天、工单、日志或源码中暴露。
+                </span>
+              </label>
+              <small>
+                绑定时会实际探测令牌、部门读取和成员读取权限；通过只代表凭据和权限已验证，不代表目录已同步。
+              </small>
+              <button
+                className="button primary"
+                type="submit"
+                disabled={binding || running || !credentialHandlingAttested}
+              >
                 {binding ? <Spinner label="正在验证…" /> : '验证并绑定'}
               </button>
             </div>
@@ -523,7 +593,7 @@ function FeishuSyncCard({
                   {run.finishedAt ? ` · 完成于 ${formatSyncTime(run.finishedAt)}` : ''}
                 </small>
               </div>
-              <StatusPill value={run.status} />
+              <StatusPill value={run.status} label={feishuSyncStatusLabel(run.status)} />
             </div>
             {run.status === 'RUNNING' ? (
               <Spinner label="同步正在后台执行，页面会自动更新…" />
@@ -571,6 +641,80 @@ function FeishuSyncCard({
             {run.errorMessage ? <Notice tone="error">{run.errorMessage}</Notice> : null}
           </div>
         ) : null}
+        {preview ? (
+          <div className="sync-run-panel" aria-label="飞书同步差异预览">
+            <div className="sync-run-heading">
+              <div>
+                <strong>同步差异预览</strong>
+                <small>
+                  快照 {preview.snapshotCursor.slice(0, 12)}… · 有效期至{' '}
+                  {formatSyncTime(preview.expiresAt)}
+                </small>
+              </div>
+              <StatusPill value={preview.status} />
+            </div>
+            <dl className="sync-result-grid">
+              <div>
+                <dt>新增</dt>
+                <dd>{preview.summary.created}</dd>
+              </div>
+              <div>
+                <dt>更新</dt>
+                <dd>{preview.summary.updated}</dd>
+              </div>
+              <div>
+                <dt>归档</dt>
+                <dd>{preview.summary.archived}</dd>
+              </div>
+              <div>
+                <dt>停用</dt>
+                <dd>{preview.summary.deactivated}</dd>
+              </div>
+              <div>
+                <dt>冲突</dt>
+                <dd>{preview.summary.conflicts}</dd>
+              </div>
+              <div>
+                <dt>无变化</dt>
+                <dd>{preview.summary.unchanged}</dd>
+              </div>
+            </dl>
+            {preview.items.length === 0 ? (
+              <p className="sync-unchanged">当前飞书快照与本地组织一致。</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>对象</th>
+                      <th>类型</th>
+                      <th>动作</th>
+                      <th>应用状态 / 诊断</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {preview.items.map((item) => (
+                      <tr key={item.id}>
+                        <td>{item.displayName}</td>
+                        <td>{item.entityType === 'DEPARTMENT' ? '部门' : '成员'}</td>
+                        <td>{item.action}</td>
+                        <td>
+                          <strong>{item.diagnosticCode ?? item.applyStatus}</strong>
+                          <small>{summarizeFeishuFieldChanges(item.fieldChanges)}</small>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {durableRun?.lastErrorCode ? (
+              <Notice tone="error">
+                同步任务 {durableRun.status}：{durableRun.lastErrorCode}
+              </Notice>
+            ) : null}
+          </div>
+        ) : null}
       </div>
 
       <footer className="integration-actions">
@@ -578,7 +722,11 @@ function FeishuSyncCard({
           <button
             className="button secondary"
             type="button"
-            onClick={() => setShowBindingForm(true)}
+            onClick={() => {
+              setAppSecret('');
+              setCredentialHandlingAttested(false);
+              setShowBindingForm(true);
+            }}
             disabled={loading || starting || binding || running}
           >
             更新绑定
@@ -598,14 +746,87 @@ function FeishuSyncCard({
           ) : running ? (
             <Spinner label="同步中…" />
           ) : status?.status === 'FAILED' ? (
-            '重新同步'
+            '重新生成预览'
           ) : (
-            '立即同步'
+            '生成差异预览'
           )}
+        </button>
+        <button
+          className="button primary"
+          type="button"
+          onClick={onApply}
+          disabled={
+            syncDisabled ||
+            preview?.status !== 'READY' ||
+            durableRun?.status === 'QUEUED' ||
+            durableRun?.status === 'RUNNING'
+          }
+        >
+          {isFeishuRetryableTerminalRun(durableRun, preview?.id)
+            ? '重试后台应用'
+            : '确认并后台应用'}
         </button>
       </footer>
     </section>
   );
+}
+
+export function buildFeishuApplyIdempotencyKey(
+  previewId: string,
+  run: Pick<FeishuDirectorySyncRunDetail, 'id' | 'previewId' | 'status'> | null,
+): string {
+  return run !== null && isFeishuRetryableTerminalRun(run, previewId)
+    ? `admin-${previewId}-retry-${run.id}`
+    : `admin-${previewId}`;
+}
+
+export function isFeishuRetryableTerminalRun(
+  run: Pick<FeishuDirectorySyncRunDetail, 'previewId' | 'status'> | null,
+  previewId: string | undefined,
+): boolean {
+  return (
+    run !== null &&
+    previewId !== undefined &&
+    run.previewId === previewId &&
+    (run.status === 'FAILED' || run.status === 'DEAD_LETTER')
+  );
+}
+
+export function summarizeFeishuFieldChanges(fieldChanges: Record<string, unknown>): string {
+  const labels: Record<string, string> = {
+    name: '名称',
+    parentExternalId: '上级部门',
+    sortOrder: '排序',
+    status: '状态',
+    displayName: '姓名',
+    active: '在职状态',
+    avatarUrl: '头像',
+    openId: 'Open ID',
+    unionId: 'Union ID',
+    departments: '所属部门/调岗',
+    primaryDepartment: '主部门',
+    jobTitle: '岗位',
+    workEmail: '工作邮箱',
+    employeeNumber: '工号',
+  };
+  const fields = Object.keys(fieldChanges)
+    .sort()
+    .map((field) => labels[field] ?? field);
+  return fields.length === 0 ? '无字段变化明细' : `字段：${fields.join('、')}`;
+}
+
+export function feishuSyncStatusLabel(
+  status:
+    | FeishuOrganizationSyncStatus['status']
+    | NonNullable<FeishuOrganizationSyncStatus['run']>['status'],
+): string {
+  return {
+    NOT_CONFIGURED: '未配置',
+    READY: '已配置（尚未同步）',
+    RUNNING: '正在同步',
+    SUCCEEDED: '最近一次同步成功',
+    FAILED: '最近一次同步失败',
+  }[status];
 }
 
 function CreateOrgUnitModal({

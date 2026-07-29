@@ -57,6 +57,21 @@ describe('PrismaKnowledgeIngestionJobRepository', () => {
     ).resolves.toBe(false);
   });
 
+  it.each([
+    ['active ownership', [{ owned: true }], true],
+    ['expired or reclaimed ownership', [{ owned: false }], false],
+    ['an unavailable ownership row', [], false],
+  ] as const)('reports %s without extending the lease', async (_label, queryRows, expected) => {
+    const { repository, transaction } = createRepository({ queryRows });
+
+    await expect(repository.ownsLease({ jobId: JOB_ID, workerId: 'worker-1' })).resolves.toBe(
+      expected,
+    );
+
+    expect(transaction.$queryRaw).toHaveBeenCalledOnce();
+    expect(transaction.$executeRaw).not.toHaveBeenCalled();
+  });
+
   it('refuses to run without the dedicated worker database capability', async () => {
     const prisma = { enabled: false } as unknown as OutboxPrismaService;
     const repository = new PrismaKnowledgeIngestionJobRepository(prisma);

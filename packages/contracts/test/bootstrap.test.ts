@@ -19,6 +19,12 @@ const validPayload = {
         name: '林知夏的工作智能体',
         status: 'online',
         summary: '了解产品目标与当前项目上下文',
+        operationalAvailability: {
+          status: 'AVAILABLE',
+          evidenceStatus: 'VERIFIED',
+          reasonCodes: [],
+          checkedAt: '2026-07-28T01:00:00.000Z',
+        },
       },
       capabilities: { canContactHuman: true, canContactAgent: true },
     },
@@ -34,6 +40,14 @@ describe('bootstrapResponseSchema', () => {
     const invalid = structuredClone(validPayload) as Record<string, unknown>;
     const members = invalid.members as Array<Record<string, unknown>>;
     delete members[0]?.capabilities;
+
+    expect(bootstrapResponseSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  it('rejects an online configuration without explicit operational evidence', () => {
+    const invalid = structuredClone(validPayload) as Record<string, unknown>;
+    const members = invalid.members as Array<Record<string, unknown>>;
+    delete (members[0]?.agent as Record<string, unknown>).operationalAvailability;
 
     expect(bootstrapResponseSchema.safeParse(invalid).success).toBe(false);
   });
