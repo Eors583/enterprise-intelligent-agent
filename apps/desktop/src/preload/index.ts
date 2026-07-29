@@ -1,5 +1,4 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { randomUUID } from 'node:crypto';
 import type {
   ChangePasswordRequest,
   LoginRequest,
@@ -17,6 +16,7 @@ import {
   type DesktopOidcLoginRequest,
   type DesktopRuntimeInfo,
 } from '../shared/desktop-api';
+import { createSubscriptionId } from './subscription-id';
 
 const desktopBridge: DesktopBridge = Object.freeze({
   getRuntimeInfo: async (): Promise<DesktopRuntimeInfo> =>
@@ -43,7 +43,7 @@ const desktopBridge: DesktopBridge = Object.freeze({
     request: DesktopAgentRunStreamRequest,
     listener: (update: DesktopAgentRunStreamUpdate) => void,
   ) => {
-    const subscriptionId = randomUUID();
+    const subscriptionId = createSubscriptionId();
     let stopped = false;
     const wrapped = (
       _event: Electron.IpcRendererEvent,

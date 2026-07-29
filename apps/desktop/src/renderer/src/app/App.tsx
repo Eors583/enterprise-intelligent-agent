@@ -10,6 +10,7 @@ import { setExpectedDesktopSessionId } from '../shared/api/client';
 
 export function App(): React.JSX.Element {
   const queryClient = useQueryClient();
+  const desktopBridge = window.enterpriseDesktop;
   const [authState, setAuthState] = useState<DesktopAuthState | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [showAddAccount, setShowAddAccount] = useState(false);
@@ -28,10 +29,15 @@ export function App(): React.JSX.Element {
   );
 
   useEffect(() => {
-    const unsubscribe = window.enterpriseDesktop.onAuthStateChanged((next) => {
+    if (!desktopBridge) {
+      setAuthError('桌面安全桥未加载，请重新启动应用；若问题持续，请联系管理员。');
+      return;
+    }
+
+    const unsubscribe = desktopBridge.onAuthStateChanged((next) => {
       void acceptAuthState(next);
     });
-    void window.enterpriseDesktop
+    void desktopBridge
       .getAuthState()
       .then(acceptAuthState)
       .catch((error: unknown) => setAuthError(readableError(error)));
@@ -39,7 +45,7 @@ export function App(): React.JSX.Element {
       unsubscribe();
       setExpectedDesktopSessionId(null);
     };
-  }, [acceptAuthState]);
+  }, [acceptAuthState, desktopBridge]);
 
   const activeAccount = useMemo(
     () => authState?.accounts.find((item) => item.sessionId === authState.activeSessionId) ?? null,
