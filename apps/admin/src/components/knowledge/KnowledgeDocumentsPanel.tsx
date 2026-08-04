@@ -331,14 +331,6 @@ export function KnowledgeDocumentsPanel({
             <button
               className="button secondary compact"
               type="button"
-              onClick={onCreateDocument}
-              disabled={item.status === 'ARCHIVED'}
-            >
-              <Icon name="plus" size={16} /> 手工录入
-            </button>
-            <button
-              className="button secondary compact"
-              type="button"
               onClick={() => setWebImportOpen(true)}
               disabled={item.status === 'ARCHIVED'}
             >
@@ -352,6 +344,17 @@ export function KnowledgeDocumentsPanel({
             >
               <span aria-hidden="true">↑</span> 上传文件
             </button>
+            <details className="knowledge-source-more">
+              <summary>更多录入方式</summary>
+              <button
+                className="button secondary compact"
+                type="button"
+                onClick={onCreateDocument}
+                disabled={item.status === 'ARCHIVED'}
+              >
+                <Icon name="plus" size={16} /> 粘贴文本
+              </button>
+            </details>
           </div>
         </header>
         {item.documents.length > 0 ? (
@@ -407,7 +410,7 @@ export function KnowledgeDocumentsPanel({
         {item.documents.length === 0 ? (
           <EmptyState
             title="还没有文档"
-            description="上传 PDF、Word、TXT 或 Markdown，也可以直接录入文本。"
+            description="优先上传 PDF、Word、Excel、TXT 或 Markdown 文件；网页和粘贴文本作为辅助来源。"
             action={
               <button
                 className="button primary"

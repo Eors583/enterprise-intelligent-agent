@@ -41,9 +41,27 @@ describe('EmployeeInsightsService', () => {
     expect(result.items[0]?.sanitized).toBeNull();
   });
 
-  it('derives contributor identity and raw hash after an exact Task grant', async () => {
+  it('derives contributor identity, permissions and raw hash after an exact Task grant', async () => {
     const harness = createHarness();
     grantTask(harness.authorization);
+    harness.insights.experienceSources.mockResolvedValueOnce({
+      task: {
+        id: TASK,
+        title: 'Customer handoff',
+        permissionLabels: ['TASK:CONFIDENTIAL'],
+      },
+      deliverables: [],
+      evidence: [
+        {
+          id: EVIDENCE,
+          version: 1,
+          code: 'EVIDENCE.ACCEPTANCE',
+          sourceType: 'DOCUMENT',
+          summary: 'Customer acceptance',
+          observedAt: NOW,
+        },
+      ],
+    });
     harness.authorization.resolveExperienceActor.mockResolvedValueOnce(actorFixture());
     harness.experiences.createExperience.mockResolvedValueOnce({
       kind: 'APPLIED',
@@ -55,8 +73,8 @@ describe('EmployeeInsightsService', () => {
       sourceDeliverableIds: [],
       sourceEvidenceIds: [EVIDENCE],
       candidateSummary: 'Raw employee contribution for governed sanitization.',
-      permissionLabels: [],
-      sensitivity: 'INTERNAL' as const,
+      permissionLabels: ['FORGED:PUBLIC'],
+      sensitivity: 'PUBLIC' as const,
       idempotencyKey: 'employee-experience-0001',
     };
 
@@ -74,6 +92,8 @@ describe('EmployeeInsightsService', () => {
         enforceContributorTaskScope: true,
         request: {
           ...request,
+          permissionLabels: ['TASK:CONFIDENTIAL'],
+          sensitivity: 'INTERNAL',
           rawInputHash: createHash('sha256').update(request.candidateSummary, 'utf8').digest('hex'),
         },
       }),

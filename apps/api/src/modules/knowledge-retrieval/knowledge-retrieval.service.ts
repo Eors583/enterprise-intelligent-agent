@@ -754,7 +754,7 @@ export class KnowledgeRetrievalService {
         rerankClassification,
       );
       const scoreById = new Map(reranked.results.map((item) => [item.id, item.relevanceScore]));
-      return buildResponse(
+      const crossEncoderResponse = buildResponse(
         input,
         loaded,
         embedding,
@@ -763,6 +763,15 @@ export class KnowledgeRetrievalService {
         degradedReason,
         scoreById,
       );
+      if (crossEncoderResponse.items.length === 0 && eligible.length > 0) {
+        return this.rankWithoutRemote(
+          input,
+          loaded,
+          embedding,
+          'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK',
+        );
+      }
+      return crossEncoderResponse;
     } catch (error) {
       return this.rankWithoutRemote(input, loaded, embedding, safeSemanticErrorCode(error));
     }

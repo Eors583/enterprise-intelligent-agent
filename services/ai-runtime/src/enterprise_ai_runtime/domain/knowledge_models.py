@@ -119,14 +119,14 @@ class CapabilityStatus(StrEnum):
 
 class EmbeddingCapability(StrictModel):
     status: CapabilityStatus
-    provider: Literal["disabled", "openai_compatible"]
+    provider: Literal["disabled", "openai_compatible", "local_fastembed"]
     model: str | None = None
     dimensions: int = Field(ge=1)
 
 
 class RerankCapability(StrictModel):
     status: CapabilityStatus
-    provider: Literal["disabled", "cohere_compatible"]
+    provider: Literal["disabled", "cohere_compatible", "local_fastembed"]
     model: str | None = None
 
 

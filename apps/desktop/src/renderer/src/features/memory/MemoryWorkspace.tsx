@@ -23,7 +23,6 @@ import {
   memoryScopeLabel,
   memoryStatusLabel,
   shortMemoryId,
-  splitMemoryLabels,
 } from './memory-view';
 import './memory.css';
 
@@ -315,22 +314,8 @@ function MemoryDetail({
 
       <dl className="memory-metadata">
         <div>
-          <dt>来源</dt>
-          <dd>
-            {memory.sourceType} · {shortMemoryId(memory.sourceId)} · v{memory.sourceVersion}
-          </dd>
-        </div>
-        <div>
-          <dt>敏感级别</dt>
-          <dd>{memory.sensitivity}</dd>
-        </div>
-        <div>
           <dt>证据</dt>
           <dd>{memory.sourceEvidenceIds.length} 条</dd>
-        </div>
-        <div>
-          <dt>权限标签</dt>
-          <dd>{memory.permissionLabels.join('、') || '无附加标签'}</dd>
         </div>
         <div>
           <dt>生效</dt>
@@ -340,15 +325,33 @@ function MemoryDetail({
           <dt>到期</dt>
           <dd>{formatMemoryDate(memory.expiresAt ?? memory.effectiveTo)}</dd>
         </div>
-        <div>
-          <dt>保留动作</dt>
-          <dd>{memory.retentionAction}</dd>
-        </div>
-        <div>
-          <dt>内容指纹</dt>
-          <dd>{memory.contentHash.slice(0, 16)}…</dd>
-        </div>
       </dl>
+      <p className="memory-policy-note">
+        权限范围、敏感级别和保留策略由当前业务范围与企业策略自动继承。
+      </p>
+      <details className="memory-advanced-details">
+        <summary>高级详情</summary>
+        <dl className="memory-metadata">
+          <div>
+            <dt>来源记录</dt>
+            <dd>
+              {memory.sourceType} · {shortMemoryId(memory.sourceId)} · v{memory.sourceVersion}
+            </dd>
+          </div>
+          <div>
+            <dt>策略级别</dt>
+            <dd>{memory.sensitivity}</dd>
+          </div>
+          <div>
+            <dt>保留动作</dt>
+            <dd>{memory.retentionAction}</dd>
+          </div>
+          <div>
+            <dt>内容指纹</dt>
+            <dd>{memory.contentHash.slice(0, 16)}…</dd>
+          </div>
+        </dl>
+      </details>
 
       {memory.scope === 'EMPLOYEE_PRIVATE' ? (
         <div className="memory-consent" role="note">
@@ -359,9 +362,7 @@ function MemoryDetail({
       ) : null}
 
       <footer>
-        <small>
-          r{memory.revision} · 更新于 {formatMemoryDate(memory.updatedAt)}
-        </small>
+        <small>更新于 {formatMemoryDate(memory.updatedAt)}</small>
         <div>
           {actions.map((action) => (
             <button
@@ -398,9 +399,6 @@ function CreateMemoryDialog({
 }): React.JSX.Element {
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
-  const [labels, setLabels] = useState('');
-  const [sensitivity, setSensitivity] =
-    useState<CreateMemoryCandidateRequest['sensitivity']>('INTERNAL');
   const [selectedAssignmentId, setSelectedAssignmentId] = useState(assignments[0]?.id ?? '');
   const [selectedTaskId, setSelectedTaskId] = useState(tasks[0]?.id ?? '');
   const [selectedConversationId, setSelectedConversationId] = useState(conversations[0]?.id ?? '');
@@ -408,6 +406,7 @@ function CreateMemoryDialog({
   const [error, setError] = useState<string | null>(null);
   const create = useCreateMemoryCandidate(scope, purpose);
   const assignment = assignments.find((item) => item.id === selectedAssignmentId) ?? null;
+  const task = tasks.find((item) => item.id === selectedTaskId) ?? null;
 
   const sourceId = useMemo(() => {
     if (scope === 'ROLE' || scope === 'EMPLOYEE_PRIVATE') return assignment?.id ?? '';
@@ -448,8 +447,8 @@ function CreateMemoryDialog({
               expiresAt: memoryExpiryIso(expiresAt),
             }
           : {}),
-        permissionLabels: splitMemoryLabels(labels),
-        sensitivity,
+        permissionLabels: scope === 'TASK' ? (task?.permissionLabels ?? []) : [],
+        sensitivity: 'INTERNAL',
         retentionAction:
           scope === 'EMPLOYEE_PRIVATE' ? 'SEAL' : scope === 'CONVERSATION' ? 'DELETE' : 'ARCHIVE',
         idempotencyKey: crypto.randomUUID(),
@@ -551,23 +550,10 @@ function CreateMemoryDialog({
             </small>
           </div>
         ) : null}
-        <div className="memory-dialog-grid">
-          <label>
-            <span>权限标签</span>
-            <input value={labels} onChange={(event) => setLabels(event.target.value)} />
-          </label>
-          <label>
-            <span>敏感级别</span>
-            <select
-              value={sensitivity}
-              onChange={(event) => setSensitivity(event.target.value as typeof sensitivity)}
-            >
-              <option value="PUBLIC">PUBLIC</option>
-              <option value="INTERNAL">INTERNAL</option>
-              <option value="CONFIDENTIAL">CONFIDENTIAL</option>
-              <option value="RESTRICTED">RESTRICTED</option>
-            </select>
-          </label>
+        <div className="memory-dialog-consent">
+          <strong>策略自动继承</strong>
+          <span>权限范围、敏感级别和保留策略由所选业务范围及企业策略确定。</span>
+          <small>员工无需填写技术标签；服务端仍会在保存和读取时执行权限复核。</small>
         </div>
         {error ? (
           <p className="memory-dialog-error" role="alert">
@@ -634,9 +620,7 @@ function MemoryTransitionDialog({
       <form onSubmit={(event) => void submit(event)}>
         <div className="memory-transition-warning">
           <strong>{memory.title}</strong>
-          <span>
-            当前 {memoryStatusLabel(memory.status)} · r{memory.revision}
-          </span>
+          <span>当前 {memoryStatusLabel(memory.status)}</span>
         </div>
         <label>
           <span>操作理由</span>

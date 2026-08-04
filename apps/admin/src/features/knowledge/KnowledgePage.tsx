@@ -232,14 +232,6 @@ export function KnowledgePage(): ReactNode {
             <Icon name="refresh" size={17} /> 刷新
           </button>
           <button
-            className="button secondary"
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            disabled={loading}
-          >
-            <Icon name="plus" size={17} /> 新建空库
-          </button>
-          <button
             className="button primary"
             type="button"
             onClick={() => setImportOpen(true)}
@@ -247,6 +239,17 @@ export function KnowledgePage(): ReactNode {
           >
             <span aria-hidden="true">↑</span> 上传资料
           </button>
+          <details className="page-action-advanced">
+            <summary>高级</summary>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => setCreateOpen(true)}
+              disabled={loading}
+            >
+              <Icon name="plus" size={17} /> 新建空库
+            </button>
+          </details>
         </div>
       </header>
 
@@ -312,9 +315,7 @@ export function KnowledgePage(): ReactNode {
                   <span className="knowledge-glyph">知</span>
                   <span className="knowledge-list-copy">
                     <strong>{item.name}</strong>
-                    <small>
-                      {item.key} · {item.documentCount} 篇文档
-                    </small>
+                    <small>{item.documentCount} 篇文档</small>
                   </span>
                   <StatusPill value={item.status} />
                 </button>
@@ -514,9 +515,7 @@ function CreateKnowledgeBaseModal({
   onCreated: () => void;
 }): ReactNode {
   const [name, setName] = useState('');
-  const [key, setKey] = useState('');
   const [description, setDescription] = useState('');
-  const [status, setStatus] = useState<'DRAFT' | 'ACTIVE'>('DRAFT');
   const [visibilityMode, setVisibilityMode] = useState<KnowledgeVisibilityMode>('ENTERPRISE');
   const [orgUnitScopes, setOrgUnitScopes] = useState<KnowledgeBaseOrgUnitScope[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -532,18 +531,13 @@ function CreateKnowledgeBaseModal({
       setError('请选择至少一个可见部门，或改为全企业可见。');
       return;
     }
-    if (status === 'ACTIVE') {
-      setError('新知识库尚无已发布且已建立索引的文档，请先以草稿状态创建。');
-      return;
-    }
     setSubmitting(true);
     setError(null);
     try {
       await createKnowledgeBase({
-        key,
         name,
         description: description || null,
-        status,
+        status: 'DRAFT',
         orgUnitIds: [],
         orgUnitScopes,
       });
@@ -557,30 +551,20 @@ function CreateKnowledgeBaseModal({
   return (
     <Modal
       title="新建知识库"
-      description="知识库标识创建后不可修改，请使用稳定的业务名称。"
+      description="空知识库会自动生成内部标识并以草稿创建；更推荐直接上传资料。"
       onClose={onClose}
       size="wide"
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
-        <div className="form-grid two">
-          <label>
-            <span>知识库名称</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="例如 产品知识中心"
-            />
-          </label>
-          <label>
-            <span>唯一标识</span>
-            <input
-              value={key}
-              onChange={(event) => setKey(event.target.value.toLowerCase())}
-              placeholder="product-knowledge"
-            />
-          </label>
-        </div>
+        <label>
+          <span>知识库名称</span>
+          <input
+            autoFocus
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="例如 产品知识中心"
+          />
+        </label>
         <label>
           <span>说明</span>
           <textarea
@@ -590,18 +574,7 @@ function CreateKnowledgeBaseModal({
             placeholder="说明知识来源、维护责任和适用场景"
           />
         </label>
-        <label>
-          <span>初始状态</span>
-          <select
-            value={status}
-            onChange={(event) => setStatus(event.target.value as typeof status)}
-          >
-            <option value="DRAFT">草稿（暂不提供使用）</option>
-            <option value="ACTIVE" disabled>
-              启用（需先发布至少一篇已建立索引的文档）
-            </option>
-          </select>
-        </label>
+        <p className="form-hint">创建后先上传资料并完成解析、评测与发布，知识库才会对员工可用。</p>
         <ScopePicker
           units={units}
           scopes={orgUnitScopes}
@@ -663,11 +636,7 @@ function KnowledgeBaseEditor({
     useState<KnowledgeGraphOverview | null>(null);
   const activationRequested = status === 'ACTIVE' && item.status !== 'ACTIVE';
   const activationBlocked =
-    activationRequested &&
-    (enterpriseReadiness === null ||
-      !enterpriseReadiness.activationAllowed ||
-      enterpriseGraphOverview === null ||
-      !enterpriseGraphOverview.strongRetrievalReady);
+    activationRequested && (enterpriseReadiness === null || !enterpriseReadiness.activationAllowed);
   const readinessRefreshToken = knowledgeReadinessRefreshToken(item.documents);
 
   const submit = async (event: FormEvent): Promise<void> => {
@@ -863,8 +832,6 @@ function CreateDocumentModal({
   onCreated: (message: string) => void;
 }): ReactNode {
   const [title, setTitle] = useState('');
-  const [sourceType, setSourceType] = useState<'TEXT' | 'MARKDOWN'>('TEXT');
-  const [status, setStatus] = useState<'DRAFT' | 'READY'>('DRAFT');
   const [contentText, setContentText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -873,12 +840,13 @@ function CreateDocumentModal({
     setSubmitting(true);
     setError(null);
     try {
-      await createKnowledgeDocument(knowledgeBase.id, { title, sourceType, status, contentText });
-      onCreated(
-        status === 'DRAFT'
-          ? '知识文档草稿已保存，尚未发布。'
-          : '知识文档已提交处理，解析、切片和索引完成后将自动发布。',
-      );
+      await createKnowledgeDocument(knowledgeBase.id, {
+        title,
+        sourceType: 'TEXT',
+        status: 'DRAFT',
+        contentText,
+      });
+      onCreated('文本资料草稿已保存；完成质检和发布后才会进入员工检索。');
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -887,38 +855,22 @@ function CreateDocumentModal({
   };
   return (
     <Modal
-      title="新建知识文档"
-      description={`将文档添加到“${knowledgeBase.name}”`}
+      title="粘贴文本资料"
+      description={`这是“${knowledgeBase.name}”的辅助录入方式；正式资料建议使用文件上传。`}
       onClose={onClose}
       size="wide"
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
-        <div className="form-grid document-fields">
-          <label>
-            <span>文档标题</span>
-            <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} />
-          </label>
-          <label>
-            <span>格式</span>
-            <select
-              value={sourceType}
-              onChange={(event) => setSourceType(event.target.value as typeof sourceType)}
-            >
-              <option value="TEXT">纯文本</option>
-              <option value="MARKDOWN">Markdown</option>
-            </select>
-          </label>
-          <label>
-            <span>状态</span>
-            <select
-              value={status}
-              onChange={(event) => setStatus(event.target.value as typeof status)}
-            >
-              <option value="DRAFT">草稿</option>
-              <option value="READY">可用</option>
-            </select>
-          </label>
-        </div>
+        <label>
+          <span>资料标题</span>
+          <input
+            autoFocus
+            required
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="例如 售后服务处理规范"
+          />
+        </label>
         <label>
           <span>文档正文</span>
           <textarea
@@ -926,9 +878,7 @@ function CreateDocumentModal({
             rows={15}
             value={contentText}
             onChange={(event) => setContentText(event.target.value)}
-            placeholder={
-              sourceType === 'MARKDOWN' ? '# 标题\n\n输入 Markdown 内容…' : '输入企业知识内容…'
-            }
+            placeholder="粘贴需要纳入知识库的正文内容…"
           />
         </label>
         <div className="content-counter">
@@ -940,7 +890,7 @@ function CreateDocumentModal({
             取消
           </button>
           <button className="button primary" type="submit" disabled={submitting}>
-            {submitting ? <Spinner label="正在创建…" /> : '创建文档'}
+            {submitting ? <Spinner label="正在保存…" /> : '保存文本草稿'}
           </button>
         </div>
       </form>

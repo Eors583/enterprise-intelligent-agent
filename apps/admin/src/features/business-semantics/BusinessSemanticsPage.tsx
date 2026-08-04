@@ -39,6 +39,10 @@ import {
 } from './business-semantics-view';
 import { ContractJsonEditor, type ContractJsonEditorConfig } from './ContractJsonEditor';
 import {
+  EvidenceBusinessDialog,
+  type EvidenceBusinessDialogState,
+} from './EvidenceBusinessDialogs';
+import {
   createEntityEditorConfig,
   transitionEntityEditorConfig,
   updateEntityEditorConfig,
@@ -56,6 +60,7 @@ export function BusinessSemanticsPage({ currentUserId }: { currentUserId: string
   const [loadError, setLoadError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [editor, setEditor] = useState<ContractJsonEditorConfig | null>(null);
+  const [evidenceDialog, setEvidenceDialog] = useState<EvidenceBusinessDialogState | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
@@ -90,13 +95,24 @@ export function BusinessSemanticsPage({ currentUserId }: { currentUserId: string
     );
   }, [items, query]);
   const selected = items?.find((item) => item.id === selectedId) ?? null;
-  const transition = selected ? transitionEntityEditorConfig(resource, selected) : null;
+  const transition =
+    selected && resource !== 'evidence' ? transitionEntityEditorConfig(resource, selected) : null;
+  const evidenceTransition =
+    selected && resource === 'evidence' ? evidenceTransitionAction(selected as Evidence) : null;
 
   const reload = (): void => setReloadKey((value) => value + 1);
   const editorSaved = (): void => {
     setEditor(null);
+    setEvidenceDialog(null);
     setNotice(`${definition.label}操作已由服务端确认，列表已刷新。`);
     reload();
+  };
+  const openCreate = (): void => {
+    if (resource === 'evidence') {
+      setEvidenceDialog({ kind: 'create' });
+      return;
+    }
+    setEditor(createEntityEditorConfig(resource, currentUserId));
   };
 
   return (
@@ -117,7 +133,7 @@ export function BusinessSemanticsPage({ currentUserId }: { currentUserId: string
             className="button primary"
             type="button"
             aria-haspopup="dialog"
-            onClick={() => setEditor(createEntityEditorConfig(resource, currentUserId))}
+            onClick={openCreate}
           >
             <Icon name="plus" size={17} /> 新建{definition.label}
           </button>
@@ -205,7 +221,7 @@ export function BusinessSemanticsPage({ currentUserId }: { currentUserId: string
                     className="button primary"
                     type="button"
                     aria-haspopup="dialog"
-                    onClick={() => setEditor(createEntityEditorConfig(resource, currentUserId))}
+                    onClick={openCreate}
                   >
                     新建{definition.label}
                   </button>
@@ -264,22 +280,43 @@ export function BusinessSemanticsPage({ currentUserId }: { currentUserId: string
                     </div>
                   </div>
                   <div className="semantic-detail-actions">
-                    <button
-                      className="button compact secondary"
-                      type="button"
-                      aria-haspopup="dialog"
-                      onClick={() => setEditor(updateEntityEditorConfig(resource, selected))}
-                    >
-                      编辑
-                    </button>
-                    {transition ? (
+                    {resource !== 'evidence' || (selected as Evidence).status === 'DRAFT' ? (
+                      <button
+                        className="button compact secondary"
+                        type="button"
+                        aria-haspopup="dialog"
+                        onClick={() => {
+                          if (resource === 'evidence') {
+                            setEvidenceDialog({
+                              kind: 'edit',
+                              evidence: selected as Evidence,
+                            });
+                          } else {
+                            setEditor(updateEntityEditorConfig(resource, selected));
+                          }
+                        }}
+                      >
+                        编辑
+                      </button>
+                    ) : null}
+                    {transition || evidenceTransition ? (
                       <button
                         className="button compact primary"
                         type="button"
                         aria-haspopup="dialog"
-                        onClick={() => setEditor(transition.editor)}
+                        onClick={() => {
+                          if (resource === 'evidence' && evidenceTransition) {
+                            setEvidenceDialog({
+                              kind: 'transition',
+                              evidence: selected as Evidence,
+                              action: evidenceTransition.action,
+                            });
+                          } else if (transition) {
+                            setEditor(transition.editor);
+                          }
+                        }}
                       >
-                        {transition.label}
+                        {evidenceTransition?.label ?? transition?.label}
                       </button>
                     ) : null}
                   </div>
@@ -375,8 +412,28 @@ export function BusinessSemanticsPage({ currentUserId }: { currentUserId: string
       {editor ? (
         <ContractJsonEditor config={editor} onClose={() => setEditor(null)} onSaved={editorSaved} />
       ) : null}
+      {evidenceDialog ? (
+        <EvidenceBusinessDialog
+          state={evidenceDialog}
+          currentUserId={currentUserId}
+          onClose={() => setEvidenceDialog(null)}
+          onSaved={editorSaved}
+        />
+      ) : null}
     </section>
   );
+}
+
+function evidenceTransitionAction(
+  evidence: Evidence,
+): { readonly action: 'VERIFY' | 'REVOKE'; readonly label: string } | null {
+  if (evidence.status === 'DRAFT') {
+    return { action: 'VERIFY', label: '验证并生效' };
+  }
+  if (evidence.status === 'ACTIVE') {
+    return { action: 'REVOKE', label: '撤销证据' };
+  }
+  return null;
 }
 
 function EntitySpecificDetails({

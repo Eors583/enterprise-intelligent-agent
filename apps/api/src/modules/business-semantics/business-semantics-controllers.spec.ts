@@ -82,6 +82,7 @@ describe('business semantics HTTP surface', () => {
     ],
     [TaskAdminController, 'transition', ':id/transition', RequestMethod.POST],
     [TaskDependencyAdminController, 'update', ':id', RequestMethod.PATCH],
+    [EvidenceAdminController, 'createGuided', 'guided', RequestMethod.POST],
     [
       DeliverableAcceptanceAdminController,
       'createAcceptance',

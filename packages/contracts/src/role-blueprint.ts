@@ -76,6 +76,12 @@ export const agentVersionReviewStatusSchema = z.enum([
   'CHANGES_REQUESTED',
 ]);
 
+export const roleKnowledgeScopeSchema = z
+  .object({
+    knowledgeBaseIds: z.array(z.uuid()).max(50).optional(),
+  })
+  .catchall(z.unknown());
+
 export const roleVersionSchema = z
   .object({
     id: z.uuid(),
@@ -86,7 +92,7 @@ export const roleVersionSchema = z
     systemPrompt: z.string().min(1),
     modelPolicy: z.record(z.string(), z.unknown()),
     toolPolicy: z.record(z.string(), z.unknown()),
-    knowledgeScope: z.record(z.string(), z.unknown()),
+    knowledgeScope: roleKnowledgeScopeSchema,
     roleDefinitionSnapshot: roleDefinitionSnapshotSchema.nullable(),
     blueprintRevision: z.number().int().positive(),
     changeSummary: z.string().nullable(),
@@ -190,7 +196,7 @@ const roleVersionConfigurationShape = {
   systemPrompt: z.string().trim().min(20).max(20_000),
   modelPolicy: z.record(z.string(), z.unknown()),
   toolPolicy: z.record(z.string(), z.unknown()),
-  knowledgeScope: z.record(z.string(), z.unknown()),
+  knowledgeScope: roleKnowledgeScopeSchema,
   changeSummary: z.string().trim().min(1).max(500),
 } as const;
 

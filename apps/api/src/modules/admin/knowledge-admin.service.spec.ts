@@ -37,6 +37,78 @@ describe('KnowledgeAdminService', () => {
     expect(query.include.documents).not.toHaveProperty('include');
   });
 
+  it('serializes generated knowledge-base keys and allocates a deterministic collision suffix', async () => {
+    const queryRaw = vi.fn().mockResolvedValue([]);
+    const create = vi
+      .fn()
+      .mockImplementation(({ data }: { data: { key: string } }) =>
+        Promise.resolve({ id: KNOWLEDGE_BASE_ID, key: data.key }),
+      );
+    const findFirst = vi
+      .fn()
+      .mockResolvedValueOnce({ id: '00000000-0000-7000-8000-000000000099' })
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(storedKnowledgeBase('employee-handbook-2'));
+    const transaction = {
+      $queryRaw: queryRaw,
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      knowledgeBase: { create, findFirst },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = createService({ transaction });
+
+    await expect(
+      service.create({
+        name: 'Employee handbook',
+        status: 'DRAFT',
+        orgUnitIds: [],
+      }),
+    ).resolves.toMatchObject({ key: 'employee-handbook-2' });
+
+    expect(queryRaw).toHaveBeenCalledOnce();
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ tenantId: TENANT_ID, key: 'employee-handbook-2' }),
+      }),
+    );
+    expect(queryRaw.mock.invocationCallOrder[0]).toBeLessThan(create.mock.invocationCallOrder[0]!);
+    expect(findFirst.mock.calls[0]?.[0]).toMatchObject({
+      where: { tenantId: TENANT_ID, key: 'employee-handbook' },
+    });
+    expect(findFirst.mock.calls[1]?.[0]).toMatchObject({
+      where: { tenantId: TENANT_ID, key: 'employee-handbook-2' },
+    });
+  });
+
+  it('preserves an explicit legacy knowledge-base key without applying generated suffixes', async () => {
+    const create = vi.fn().mockResolvedValue({
+      id: KNOWLEDGE_BASE_ID,
+      key: 'legacy-handbook',
+    });
+    const findFirst = vi.fn().mockResolvedValue(storedKnowledgeBase('legacy-handbook'));
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      knowledgeBase: { create, findFirst },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = createService({ transaction });
+
+    await service.create({
+      key: 'legacy-handbook',
+      name: 'Legacy handbook',
+      status: 'DRAFT',
+      orgUnitIds: [],
+    });
+
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ key: 'legacy-handbook' }),
+      }),
+    );
+    expect(findFirst).toHaveBeenCalledTimes(1);
+  });
+
   it('routes text publication through the versioned ingestion service', async () => {
     const ingestion = { createTextVersion: vi.fn().mockResolvedValue(DOCUMENT_ID) };
     const service = createService({ ingestion });
@@ -961,17 +1033,32 @@ describe('KnowledgeAdminService', () => {
     expect(transaction.knowledgeDocument.findMany).toHaveBeenCalled();
   });
 
-  it('does not activate a semantically ready knowledge base without an evidence-backed graph', async () => {
+  it('activates a semantically ready knowledge base while graph curation remains optional', async () => {
+    const current = {
+      id: KNOWLEDGE_BASE_ID,
+      tenantId: TENANT_ID,
+      key: 'company-policies',
+      name: 'Company policies',
+      description: null,
+      status: 'DRAFT',
+      version: 1,
+      orgUnits: [],
+      documents: [],
+      _count: { documents: 1 },
+      updatedAt: new Date('2026-07-27T00:00:00.000Z'),
+    };
+    const updated = { ...current, status: 'ACTIVE', version: 2 };
     const transaction = {
       knowledgeBase: {
-        findFirst: vi.fn().mockResolvedValue({
-          id: KNOWLEDGE_BASE_ID,
-          tenantId: TENANT_ID,
-          status: 'DRAFT',
-          version: 1,
-        }),
-        updateMany: vi.fn(),
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(current)
+          .mockResolvedValueOnce(current)
+          .mockResolvedValueOnce(updated),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      knowledgeDocument: { findFirst: vi.fn().mockResolvedValue({ id: DOCUMENT_ID }) },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
     };
     const service = createService({ transaction });
     vi.spyOn(service, 'readiness').mockResolvedValue({
@@ -997,33 +1084,16 @@ describe('KnowledgeAdminService', () => {
       activationAllowed: true,
       activationBlockers: [],
     });
-    vi.spyOn(service, 'graphOverview').mockResolvedValue({
-      knowledgeBaseId: KNOWLEDGE_BASE_ID,
-      status: 'DEGRADED',
-      entityCount: 3,
-      relationCount: 0,
-      mentionCount: 3,
-      evidenceCount: 0,
-      orphanEntityCount: 0,
-      relationsWithoutEvidenceCount: 0,
-      publishedChunkCount: 1,
-      linkedChunkCount: 1,
-      mentionCoverage: 1,
-      evidenceCoverage: 0,
-      entityTypes: [{ type: 'TOPIC', count: 3 }],
-      relationTypes: [],
-      strongRetrievalReady: false,
-      readinessBlockers: ['NO_RELATIONS'],
-      lastBuiltAt: null,
-    });
+    const graphOverview = vi.spyOn(service, 'graphOverview');
 
     await expect(
       service.update(KNOWLEDGE_BASE_ID, {
         status: 'ACTIVE',
         expectedVersion: 1,
       }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(transaction.knowledgeBase.updateMany).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ status: 'ACTIVE', version: 2 });
+    expect(graphOverview).not.toHaveBeenCalled();
+    expect(transaction.knowledgeBase.updateMany).toHaveBeenCalledOnce();
   });
 
   it('does not reapply new activation gates to an already active knowledge base', async () => {
@@ -1346,6 +1416,24 @@ function documentResponse(status: 'DRAFT' | 'READY') {
     currentVersionId: status === 'READY' ? '00000000-0000-7000-8000-000000000007' : null,
     versions: [],
     updatedAt: '2026-07-20T00:00:00.000Z',
+  };
+}
+
+function storedKnowledgeBase(key: string) {
+  return {
+    id: KNOWLEDGE_BASE_ID,
+    tenantId: TENANT_ID,
+    key,
+    name: 'Employee handbook',
+    description: null,
+    status: 'DRAFT' as const,
+    version: 1,
+    createdById: ADMIN_ID,
+    createdAt: new Date('2026-07-29T00:00:00.000Z'),
+    updatedAt: new Date('2026-07-29T00:00:00.000Z'),
+    orgUnits: [],
+    documents: [],
+    _count: { documents: 0 },
   };
 }
 

@@ -125,6 +125,7 @@ export function AiModelRoutingPage(): ReactNode {
 
       <div className="ai-routing-editor-grid">
         <CatalogForm
+          catalogs={dashboard?.catalogVersions ?? []}
           onSaved={() => {
             setNotice('模型目录草稿已创建。请提交后由另一位管理员发布。');
             reload();
@@ -133,6 +134,7 @@ export function AiModelRoutingPage(): ReactNode {
         />
         <PolicyForm
           catalogs={dashboard?.catalogVersions ?? []}
+          policies={dashboard?.routePolicies ?? []}
           onSaved={() => {
             setNotice('任务路由草稿已创建。');
             reload();
@@ -146,9 +148,19 @@ export function AiModelRoutingPage(): ReactNode {
         records={dashboard?.catalogVersions ?? []}
         busyId={busyId}
         onTransition={(record, action) => void transition('catalog', record, action)}
-        renderDetail={(record) =>
-          `${record.provider} · ${record.modelName} · ${record.dataResidency} · ${record.credentialReference}`
-        }
+        renderDetail={(record) => (
+          <details className="ai-routing-advanced-details">
+            <summary>高级技术详情</summary>
+            <span>
+              {record.provider} · {record.modelName} · {record.dataResidency} ·{' '}
+              {record.credentialReference}
+            </span>
+            <small>
+              能力 {record.capabilities.join('、')} · Context {record.maxContextTokens} · Output{' '}
+              {record.maxOutputTokens} · P95 {record.p95LatencyMs}ms
+            </small>
+          </details>
+        )}
       />
       <GovernanceTable
         title="任务路由版本"
@@ -324,26 +336,54 @@ function readinessRecoveryGuidance(dashboard: AiModelRoutingDashboard): string {
 }
 
 function CatalogForm({
+  catalogs,
   onSaved,
   onError,
 }: {
+  catalogs: readonly AiModelCatalogVersion[];
   onSaved: () => void;
   onError: (message: string) => void;
 }): ReactNode {
   const [busy, setBusy] = useState(false);
-  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+  const [selectedId, setSelectedId] = useState(catalogs[0]?.id ?? '');
+  const [provider, setProvider] = useState<'OPENAI_COMPATIBLE' | 'MANUS'>('OPENAI_COMPATIBLE');
+  const [modelName, setModelName] = useState('');
+  const [capabilities, setCapabilities] = useState<string[]>(['chat']);
+  const selected = catalogs.find((catalog) => catalog.id === selectedId) ?? null;
+
+  useEffect(() => {
+    setSelectedId((current) =>
+      catalogs.some((catalog) => catalog.id === current) ? current : (catalogs[0]?.id ?? ''),
+    );
+  }, [catalogs]);
+
+  const cloneExisting = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!selected) return;
+    setBusy(true);
+    try {
+      await createAiModelCatalogVersion(catalogDraftFromExisting(selected, crypto.randomUUID()));
+      onSaved();
+    } catch (caught) {
+      onError(messageFromError(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const submitAdvanced = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
     setBusy(true);
     try {
       await createAiModelCatalogVersion({
-        routeKey: text(data, 'routeKey').toUpperCase(),
-        provider: text(data, 'provider') as 'OPENAI_COMPATIBLE' | 'MANUS',
-        modelName: text(data, 'modelName'),
+        routeKey: aiRouteCode(provider, modelName || 'MODEL'),
+        provider,
+        modelName,
         credentialReference: text(data, 'credentialReference'),
         dataResidency: text(data, 'dataResidency'),
         maximumClassification: text(data, 'maximumClassification') as 'INTERNAL',
-        capabilities: splitList(text(data, 'capabilities')),
+        capabilities,
         maxContextTokens: number(data, 'maxContextTokens'),
         maxOutputTokens: number(data, 'maxOutputTokens'),
         inputCostMicrosPerMillion: text(data, 'inputCostMicrosPerMillion'),
@@ -360,110 +400,266 @@ function CatalogForm({
     }
   };
   return (
-    <form className="card ai-routing-form" onSubmit={(event) => void submit(event)}>
+    <section className="card ai-routing-form">
       <header>
-        <h2>新建模型目录版本</h2>
-        <p>模型端点和真实密钥由 Runtime 运维配置维护。</p>
+        <h2>选择模型服务</h2>
+        <p>优先复用已登记模型服务；能力、上下文、成本与延迟会从所选目录版本继承。</p>
       </header>
-      <label>
-        Route Key
-        <input name="routeKey" required placeholder="GENERAL.PRIMARY" />
-      </label>
-      <label>
-        Provider
-        <select name="provider" defaultValue="OPENAI_COMPATIBLE">
-          <option value="OPENAI_COMPATIBLE">OpenAI Compatible</option>
-          <option value="MANUS">Manus</option>
-        </select>
-      </label>
-      <label>
-        模型名
-        <input name="modelName" required placeholder="model-a" />
-      </label>
-      <label>
-        凭据引用
-        <input name="credentialReference" required placeholder="vault://ai/providers/general" />
-      </label>
-      <div className="ai-routing-form-row">
-        <label>
-          数据驻留
-          <input name="dataResidency" defaultValue="CN" required />
-        </label>
-        <label>
-          最高分级
-          <select name="maximumClassification" defaultValue="CONFIDENTIAL">
-            <option value="PUBLIC">PUBLIC</option>
-            <option value="INTERNAL">INTERNAL</option>
-            <option value="CONFIDENTIAL">CONFIDENTIAL</option>
-            <option value="RESTRICTED">RESTRICTED</option>
-          </select>
-        </label>
-      </div>
-      <label>
-        能力（逗号分隔）
-        <input name="capabilities" defaultValue="chat" required />
-      </label>
-      <div className="ai-routing-form-row">
-        <label>
-          上下文 Token
-          <input name="maxContextTokens" type="number" defaultValue="128000" min="1" required />
-        </label>
-        <label>
-          输出 Token
-          <input name="maxOutputTokens" type="number" defaultValue="4000" min="1" required />
-        </label>
-      </div>
-      <div className="ai-routing-form-row">
-        <label>
-          输入成本 μ/百万
-          <input name="inputCostMicrosPerMillion" defaultValue="1000" required />
-        </label>
-        <label>
-          输出成本 μ/百万
-          <input name="outputCostMicrosPerMillion" defaultValue="2000" required />
-        </label>
-      </div>
-      <label>
-        P95 延迟上限（ms）
-        <input name="p95LatencyMs" type="number" defaultValue="8000" min="1" required />
-      </label>
-      <button className="button primary" type="submit" disabled={busy}>
-        {busy ? '保存中…' : '创建草稿'}
-      </button>
-    </form>
+      {catalogs.length > 0 ? (
+        <form className="ai-routing-business-form" onSubmit={(event) => void cloneExisting(event)}>
+          <label>
+            已登记模型服务
+            <select
+              name="existingCatalogId"
+              value={selectedId}
+              onChange={(event) => setSelectedId(event.target.value)}
+            >
+              {catalogs.map((catalog) => (
+                <option key={catalog.id} value={catalog.id}>
+                  {catalog.routeKey} v{catalog.version} · {catalog.status}
+                </option>
+              ))}
+            </select>
+          </label>
+          {selected ? (
+            <p className="ai-routing-inheritance-note">
+              将继承所选服务的能力、上下文窗口、输出上限、成本、延迟、安全分级和凭据引用，并创建新的治理草稿。
+            </p>
+          ) : null}
+          <button className="button primary" type="submit" disabled={busy || !selected}>
+            {busy ? '保存中…' : '确认并创建新版本'}
+          </button>
+        </form>
+      ) : (
+        <p className="ai-routing-empty">
+          当前没有可选择的模型服务。系统不会生成示例模型；请由有权限的运维人员在下方高级技术设置中登记真实服务。
+        </p>
+      )}
+      <details className="ai-routing-advanced-details">
+        <summary>高级技术设置：登记外部模型服务</summary>
+        <p>
+          Provider、模型标识和凭据引用必须来自实际
+          Runtime/密钥库配置；此处不接收明文密钥，也不会探测或伪造凭据。
+        </p>
+        <form
+          className="ai-routing-technical-form"
+          onSubmit={(event) => void submitAdvanced(event)}
+        >
+          <label>
+            Provider
+            <select
+              name="provider"
+              value={provider}
+              onChange={(event) => setProvider(event.target.value as 'OPENAI_COMPATIBLE' | 'MANUS')}
+            >
+              <option value="OPENAI_COMPATIBLE">OpenAI Compatible</option>
+              <option value="MANUS">Manus</option>
+            </select>
+          </label>
+          <label>
+            模型标识
+            <input
+              name="modelName"
+              required
+              value={modelName}
+              onChange={(event) => setModelName(event.target.value)}
+              placeholder="来自供应商或 Runtime 配置"
+            />
+          </label>
+          <label>
+            凭据引用
+            <input name="credentialReference" required placeholder="vault://ai/providers/general" />
+          </label>
+          <div className="ai-routing-form-row">
+            <label>
+              数据驻留
+              <select name="dataResidency" defaultValue="CN" required>
+                <option value="CN">中国大陆</option>
+                <option value="SG">新加坡</option>
+                <option value="EU">欧盟</option>
+                <option value="US">美国</option>
+              </select>
+            </label>
+            <label>
+              最高分级
+              <select name="maximumClassification" defaultValue="CONFIDENTIAL">
+                <option value="PUBLIC">PUBLIC</option>
+                <option value="INTERNAL">INTERNAL</option>
+                <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+                <option value="RESTRICTED">RESTRICTED</option>
+              </select>
+            </label>
+          </div>
+          <fieldset className="ai-routing-capability-picker">
+            <legend>服务能力</legend>
+            {(
+              [
+                ['chat', '文字对话'],
+                ['vision', '图片理解'],
+                ['tools', '工具调用'],
+                ['embedding', '知识向量化'],
+                ['rerank', '检索重排'],
+              ] as const
+            ).map(([value, label]) => (
+              <label key={value}>
+                <input
+                  type="checkbox"
+                  checked={capabilities.includes(value)}
+                  onChange={(event) =>
+                    setCapabilities((current) =>
+                      event.target.checked
+                        ? [...new Set([...current, value])]
+                        : current.filter((item) => item !== value),
+                    )
+                  }
+                />
+                <span>{label}</span>
+              </label>
+            ))}
+          </fieldset>
+          <div className="ai-routing-form-row">
+            <label>
+              上下文 Token
+              <input name="maxContextTokens" type="number" defaultValue="128000" min="1" required />
+            </label>
+            <label>
+              输出 Token
+              <input name="maxOutputTokens" type="number" defaultValue="4000" min="1" required />
+            </label>
+          </div>
+          <div className="ai-routing-form-row">
+            <label>
+              输入成本 μ/百万
+              <input name="inputCostMicrosPerMillion" defaultValue="1000" required />
+            </label>
+            <label>
+              输出成本 μ/百万
+              <input name="outputCostMicrosPerMillion" defaultValue="2000" required />
+            </label>
+          </div>
+          <label>
+            P95 延迟上限（ms）
+            <input name="p95LatencyMs" type="number" defaultValue="8000" min="1" required />
+          </label>
+          <button
+            className="button primary"
+            type="submit"
+            disabled={busy || !modelName.trim() || capabilities.length === 0}
+          >
+            {busy ? '保存中…' : '登记真实服务草稿'}
+          </button>
+        </form>
+      </details>
+    </section>
   );
+}
+
+export function aiRouteCode(
+  provider: AiModelCatalogVersion['provider'],
+  modelName: string,
+): string {
+  return `MODEL.${provider}.${modelName}`
+    .toUpperCase()
+    .replace(/[^A-Z0-9._-]+/gu, '.')
+    .replace(/\.+/gu, '.')
+    .replace(/\.$/u, '')
+    .slice(0, 120);
+}
+
+export function catalogDraftFromExisting(
+  catalog: AiModelCatalogVersion,
+  idempotencyKey: string,
+): Parameters<typeof createAiModelCatalogVersion>[0] {
+  return {
+    routeKey: catalog.routeKey,
+    provider: catalog.provider,
+    modelName: catalog.modelName,
+    credentialReference: catalog.credentialReference,
+    dataResidency: catalog.dataResidency,
+    maximumClassification: catalog.maximumClassification,
+    capabilities: [...catalog.capabilities],
+    maxContextTokens: catalog.maxContextTokens,
+    maxOutputTokens: catalog.maxOutputTokens,
+    inputCostMicrosPerMillion: catalog.inputCostMicrosPerMillion,
+    outputCostMicrosPerMillion: catalog.outputCostMicrosPerMillion,
+    p95LatencyMs: catalog.p95LatencyMs,
+    idempotencyKey,
+  };
 }
 
 function PolicyForm({
   catalogs,
+  policies,
   onSaved,
   onError,
 }: {
   catalogs: readonly AiModelCatalogVersion[];
+  policies: readonly AiModelRoutePolicyVersion[];
   onSaved: () => void;
   onError: (message: string) => void;
 }): ReactNode {
   const [busy, setBusy] = useState(false);
+  const [selectedPolicyId, setSelectedPolicyId] = useState(policies[0]?.id ?? '');
+  const [selectedCatalogIds, setSelectedCatalogIds] = useState<string[]>([]);
+  const [taskClass, setTaskClass] = useState('GENERAL_QA');
+  const [preset, setPreset] = useState<PolicyPreset>('BALANCED');
+  const [maximumClassification, setMaximumClassification] =
+    useState<AiModelRoutePolicyVersion['maximumClassification']>('INTERNAL');
   const eligible = catalogs.filter(
     ({ status }) => status === 'IN_REVIEW' || status === 'PUBLISHED',
   );
+  const selectedPolicy = policies.find((policy) => policy.id === selectedPolicyId) ?? null;
+  const selectedCatalogs = selectedCatalogIds
+    .map((id) => eligible.find((catalog) => catalog.id === id))
+    .filter((catalog): catalog is AiModelCatalogVersion => catalog !== undefined);
+  const constraints = derivePolicyConstraints(selectedCatalogs, preset);
+
+  useEffect(() => {
+    setSelectedPolicyId((current) =>
+      policies.some((policy) => policy.id === current) ? current : (policies[0]?.id ?? ''),
+    );
+  }, [policies]);
+
+  const clonePolicy = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!selectedPolicy) return;
+    setBusy(true);
+    try {
+      await createAiModelRoutePolicyVersion(
+        policyDraftFromExisting(selectedPolicy, crypto.randomUUID()),
+      );
+      onSaved();
+    } catch (caught) {
+      onError(messageFromError(caught));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const data = new FormData(event.currentTarget);
+    if (!constraints) {
+      onError('请选择至少一个已有模型服务。');
+      return;
+    }
+    if (constraints.requiredCapabilities.length === 0) {
+      onError('所选模型服务没有共同能力，不能组成同一路由策略。');
+      return;
+    }
     setBusy(true);
     try {
       await createAiModelRoutePolicyVersion({
-        taskClass: text(data, 'taskClass').toUpperCase(),
-        allowedResidencies: splitList(text(data, 'allowedResidencies')),
-        maximumClassification: text(data, 'maximumClassification') as 'INTERNAL',
-        requiredCapabilities: splitList(text(data, 'requiredCapabilities')),
-        maxP95LatencyMs: number(data, 'maxP95LatencyMs'),
-        maxInputCostMicrosPerMillion: text(data, 'maxInputCostMicrosPerMillion'),
-        maxOutputCostMicrosPerMillion: text(data, 'maxOutputCostMicrosPerMillion'),
-        maximumAttempts: number(data, 'maximumAttempts'),
-        circuitFailureThreshold: number(data, 'circuitFailureThreshold'),
-        circuitOpenSeconds: number(data, 'circuitOpenSeconds'),
-        catalogVersionIds: data.getAll('catalogVersionIds').map(String),
+        taskClass,
+        allowedResidencies: constraints.allowedResidencies,
+        maximumClassification,
+        requiredCapabilities: constraints.requiredCapabilities,
+        maxP95LatencyMs: constraints.maxP95LatencyMs,
+        maxInputCostMicrosPerMillion: constraints.maxInputCostMicrosPerMillion,
+        maxOutputCostMicrosPerMillion: constraints.maxOutputCostMicrosPerMillion,
+        maximumAttempts: constraints.maximumAttempts,
+        circuitFailureThreshold: constraints.circuitFailureThreshold,
+        circuitOpenSeconds: constraints.circuitOpenSeconds,
+        catalogVersionIds: selectedCatalogIds,
         idempotencyKey: crypto.randomUUID(),
       });
       event.currentTarget.reset();
@@ -475,79 +671,210 @@ function PolicyForm({
     }
   };
   return (
-    <form className="card ai-routing-form" onSubmit={(event) => void submit(event)}>
+    <section className="card ai-routing-form">
       <header>
-        <h2>新建任务路由版本</h2>
-        <p>候选顺序即主模型与有限 fallback 顺序，最多三次。</p>
+        <h2>选择路由策略</h2>
+        <p>可复用既有策略，或从已登记模型服务创建受控路由；能力、驻留、成本和延迟自动继承。</p>
       </header>
-      <label>
-        任务分类
-        <input name="taskClass" defaultValue="GENERAL_QA" required />
-      </label>
-      <label>
-        候选模型（按选择顺序）
-        <select name="catalogVersionIds" multiple size={Math.min(5, Math.max(2, eligible.length))}>
-          {eligible.map((catalog) => (
-            <option key={catalog.id} value={catalog.id}>
-              {catalog.routeKey} v{catalog.version} · {catalog.status}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="ai-routing-form-row">
+      {policies.length > 0 ? (
+        <form className="ai-routing-business-form" onSubmit={(event) => void clonePolicy(event)}>
+          <label>
+            已有路由策略
+            <select
+              name="existingPolicyId"
+              value={selectedPolicyId}
+              onChange={(event) => setSelectedPolicyId(event.target.value)}
+            >
+              {policies.map((policy) => (
+                <option key={policy.id} value={policy.id}>
+                  {policy.taskClass} v{policy.version} · {policy.status}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            className="button primary"
+            type="submit"
+            disabled={busy || !selectedPolicy || selectedPolicy.candidates.length === 0}
+          >
+            {busy ? '保存中…' : '确认并复用策略'}
+          </button>
+          {selectedPolicy?.candidates.length === 0 ? (
+            <p className="ai-routing-empty">该历史策略没有候选模型，不能直接复用。</p>
+          ) : null}
+        </form>
+      ) : (
+        <p className="ai-routing-empty">当前没有可复用的路由策略，可从下方已登记模型服务创建。</p>
+      )}
+      <form className="ai-routing-business-form" onSubmit={(event) => void submit(event)}>
         <label>
-          驻留（逗号分隔）
-          <input name="allowedResidencies" defaultValue="CN" required />
-        </label>
-        <label>
-          最高分级
-          <select name="maximumClassification" defaultValue="INTERNAL">
-            <option value="PUBLIC">PUBLIC</option>
-            <option value="INTERNAL">INTERNAL</option>
-            <option value="CONFIDENTIAL">CONFIDENTIAL</option>
-            <option value="RESTRICTED">RESTRICTED</option>
+          任务分类
+          <select
+            name="taskClass"
+            value={taskClass}
+            onChange={(event) => setTaskClass(event.target.value)}
+          >
+            <option value="GENERAL_QA">通用问答</option>
+            <option value="KNOWLEDGE_QA">企业知识问答</option>
+            <option value="DOCUMENT_ANALYSIS">文档分析</option>
+            <option value="TOOL_EXECUTION">工具执行</option>
           </select>
         </label>
-      </div>
-      <label>
-        必需能力
-        <input name="requiredCapabilities" defaultValue="chat" required />
-      </label>
-      <div className="ai-routing-form-row">
-        <label>
-          最大尝试
-          <input name="maximumAttempts" type="number" min="1" max="3" defaultValue="2" required />
-        </label>
-        <label>
-          P95 上限
-          <input name="maxP95LatencyMs" type="number" min="1" defaultValue="8000" required />
-        </label>
-      </div>
-      <div className="ai-routing-form-row">
-        <label>
-          输入成本上限
-          <input name="maxInputCostMicrosPerMillion" defaultValue="5000" required />
-        </label>
-        <label>
-          输出成本上限
-          <input name="maxOutputCostMicrosPerMillion" defaultValue="10000" required />
-        </label>
-      </div>
-      <div className="ai-routing-form-row">
-        <label>
-          熔断失败阈值
-          <input name="circuitFailureThreshold" type="number" min="1" defaultValue="5" required />
-        </label>
-        <label>
-          熔断秒数
-          <input name="circuitOpenSeconds" type="number" min="1" defaultValue="60" required />
-        </label>
-      </div>
-      <button className="button primary" type="submit" disabled={busy || eligible.length === 0}>
-        {busy ? '保存中…' : eligible.length === 0 ? '先创建模型目录' : '创建草稿'}
-      </button>
-    </form>
+        <fieldset>
+          <legend>候选模型服务（最多三个，按勾选顺序路由）</legend>
+          {eligible.length > 0 ? (
+            eligible.map((catalog) => (
+              <label key={catalog.id}>
+                <input
+                  type="checkbox"
+                  checked={selectedCatalogIds.includes(catalog.id)}
+                  disabled={
+                    !selectedCatalogIds.includes(catalog.id) && selectedCatalogIds.length >= 3
+                  }
+                  onChange={(event) =>
+                    setSelectedCatalogIds((current) =>
+                      event.target.checked
+                        ? [...current, catalog.id]
+                        : current.filter((id) => id !== catalog.id),
+                    )
+                  }
+                />
+                <span>
+                  {catalog.routeKey} v{catalog.version} · {catalog.status}
+                </span>
+              </label>
+            ))
+          ) : (
+            <p>没有可用于路由的审核中或已发布模型服务。</p>
+          )}
+        </fieldset>
+        <div className="ai-routing-form-row">
+          <label>
+            路由偏好
+            <select
+              name="policyPreset"
+              value={preset}
+              onChange={(event) => setPreset(event.target.value as PolicyPreset)}
+            >
+              <option value="BALANCED">均衡</option>
+              <option value="RELIABILITY">可靠性优先</option>
+              <option value="FAST_FAIL">快速失败</option>
+            </select>
+          </label>
+          <label>
+            最高分级
+            <select
+              name="maximumClassification"
+              value={maximumClassification}
+              onChange={(event) =>
+                setMaximumClassification(
+                  event.target.value as AiModelRoutePolicyVersion['maximumClassification'],
+                )
+              }
+            >
+              <option value="PUBLIC">PUBLIC</option>
+              <option value="INTERNAL">INTERNAL</option>
+              <option value="CONFIDENTIAL">CONFIDENTIAL</option>
+              <option value="RESTRICTED">RESTRICTED</option>
+            </select>
+          </label>
+        </div>
+        {constraints ? (
+          <p className="ai-routing-inheritance-note">
+            已自动继承驻留 {constraints.allowedResidencies.join('、')}、共同能力{' '}
+            {constraints.requiredCapabilities.join('、') || '无'}、P95/成本上限，并按“
+            {POLICY_PRESETS[preset].label}”应用有限重试与熔断。
+          </p>
+        ) : null}
+        <button className="button primary" type="submit" disabled={busy || eligible.length === 0}>
+          {busy
+            ? '保存中…'
+            : eligible.length === 0
+              ? '先登记模型服务'
+              : selectedCatalogIds.length === 0
+                ? '请选择模型服务'
+                : '确认并创建路由草稿'}
+        </button>
+      </form>
+    </section>
   );
+}
+
+export type PolicyPreset = 'BALANCED' | 'RELIABILITY' | 'FAST_FAIL';
+
+const POLICY_PRESETS: Record<
+  PolicyPreset,
+  {
+    readonly label: string;
+    readonly maximumAttempts: number;
+    readonly failureThreshold: number;
+    readonly openSeconds: number;
+  }
+> = {
+  BALANCED: { label: '均衡', maximumAttempts: 2, failureThreshold: 5, openSeconds: 60 },
+  RELIABILITY: {
+    label: '可靠性优先',
+    maximumAttempts: 3,
+    failureThreshold: 8,
+    openSeconds: 30,
+  },
+  FAST_FAIL: { label: '快速失败', maximumAttempts: 1, failureThreshold: 3, openSeconds: 120 },
+};
+
+export interface DerivedPolicyConstraints {
+  readonly allowedResidencies: string[];
+  readonly requiredCapabilities: string[];
+  readonly maxP95LatencyMs: number;
+  readonly maxInputCostMicrosPerMillion: string;
+  readonly maxOutputCostMicrosPerMillion: string;
+  readonly maximumAttempts: number;
+  readonly circuitFailureThreshold: number;
+  readonly circuitOpenSeconds: number;
+}
+
+export function derivePolicyConstraints(
+  catalogs: readonly AiModelCatalogVersion[],
+  preset: PolicyPreset,
+): DerivedPolicyConstraints | null {
+  if (catalogs.length === 0) return null;
+  const settings = POLICY_PRESETS[preset];
+  const commonCapabilities = catalogs[0]!.capabilities.filter((capability) =>
+    catalogs.every((catalog) => catalog.capabilities.includes(capability)),
+  );
+  return {
+    allowedResidencies: [...new Set(catalogs.map((catalog) => catalog.dataResidency))],
+    requiredCapabilities: commonCapabilities,
+    maxP95LatencyMs: Math.max(...catalogs.map((catalog) => catalog.p95LatencyMs)),
+    maxInputCostMicrosPerMillion: maxIntegerString(
+      catalogs.map((catalog) => catalog.inputCostMicrosPerMillion),
+    ),
+    maxOutputCostMicrosPerMillion: maxIntegerString(
+      catalogs.map((catalog) => catalog.outputCostMicrosPerMillion),
+    ),
+    maximumAttempts: Math.max(settings.maximumAttempts, catalogs.length),
+    circuitFailureThreshold: settings.failureThreshold,
+    circuitOpenSeconds: settings.openSeconds,
+  };
+}
+
+export function policyDraftFromExisting(
+  policy: AiModelRoutePolicyVersion,
+  idempotencyKey: string,
+): Parameters<typeof createAiModelRoutePolicyVersion>[0] {
+  return {
+    taskClass: policy.taskClass,
+    allowedResidencies: [...policy.allowedResidencies],
+    maximumClassification: policy.maximumClassification,
+    requiredCapabilities: [...policy.requiredCapabilities],
+    maxP95LatencyMs: policy.maxP95LatencyMs,
+    maxInputCostMicrosPerMillion: policy.maxInputCostMicrosPerMillion,
+    maxOutputCostMicrosPerMillion: policy.maxOutputCostMicrosPerMillion,
+    maximumAttempts: policy.maximumAttempts,
+    circuitFailureThreshold: policy.circuitFailureThreshold,
+    circuitOpenSeconds: policy.circuitOpenSeconds,
+    catalogVersionIds: policy.candidates.map((candidate) => candidate.catalogVersionId),
+    idempotencyKey,
+  };
 }
 
 function GovernanceTable<
@@ -563,7 +890,7 @@ function GovernanceTable<
   records: readonly T[];
   busyId: string | null;
   onTransition: (record: T, action: 'SUBMIT' | 'PUBLISH' | 'RETIRE') => void;
-  renderDetail: (record: T) => string;
+  renderDetail: (record: T) => ReactNode;
 }): ReactNode {
   return (
     <article className="card ai-routing-table">
@@ -644,13 +971,12 @@ function number(data: FormData, key: string): number {
   return Number.parseInt(text(data, key), 10);
 }
 
-function splitList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(',')
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ];
+function maxIntegerString(values: readonly string[]): string {
+  return values.reduce((highest, value) => {
+    const normalized = value.replace(/^0+(?=\d)/u, '');
+    if (normalized.length !== highest.length) {
+      return normalized.length > highest.length ? normalized : highest;
+    }
+    return normalized > highest ? normalized : highest;
+  }, '0');
 }

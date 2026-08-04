@@ -5,9 +5,16 @@ import { renderInTestDom } from '@/test/dom-test-utils';
 import * as identityApi from './api';
 import { IdentityGovernancePage } from './IdentityGovernancePage';
 import { IdentitySecurityPage } from './IdentitySecurityPage';
-import { ScimGovernancePanel } from './ScimGovernancePanel';
+import { ScimGovernancePanel, scimConnectorKey } from './ScimGovernancePanel';
 
 const CURRENT_USER_ID = '10000000-0000-7000-8000-000000000001';
+
+it('generates a safe SCIM connector key without asking administrators to type one', () => {
+  expect(scimConnectorKey('企业通讯录', 'ABCDEF12-3456')).toBe('scim-directory-abcdef1234');
+  expect(scimConnectorKey('Corporate Directory', 'ABCDEF12-3456')).toBe(
+    'scim-corporate-directory-abcdef1234',
+  );
+});
 
 vi.mock('./api', () => ({
   listIdentityProviders: vi.fn().mockResolvedValue({

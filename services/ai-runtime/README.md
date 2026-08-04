@@ -17,6 +17,25 @@ python -m pip install -e ".[dev]"
 uvicorn enterprise_ai_runtime.main:app --reload --port 8100
 ```
 
+## 本地中文语义检索
+
+开发和私有化部署可以使用 `local_fastembed`，无需 Embedding/Reranker API Key：
+
+```dotenv
+AI_RUNTIME_EMBEDDING_DRIVER=local_fastembed
+AI_RUNTIME_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+AI_RUNTIME_RERANK_DRIVER=local_fastembed
+AI_RUNTIME_RERANK_MODEL=BAAI/bge-reranker-base
+AI_RUNTIME_LOCAL_MODEL_CACHE_DIR=.data/ai-models
+AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD=true
+AI_RUNTIME_LOCAL_MODEL_THREADS=2
+```
+
+中文 Embedding 原生输出 512 维归一化向量，适配器以零填充方式保持现有 1536 维
+pgvector 契约，余弦相似度不变。Reranker 使用真实 BGE Cross Encoder，并将模型
+logit 通过 sigmoid 归一化为 0～1 相关性分数。生产环境禁止运行时下载，必须提前
+准备模型缓存并设置 `AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD=false`。
+
 质量检查：
 
 ```bash

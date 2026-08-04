@@ -43,12 +43,15 @@ describe('Feishu directory production preview', () => {
               status: 'ACTIVE',
               isPrimary: true,
               workEmail: 'old@example.com',
+              workEmailOverridden: false,
               employeeNumber: 'E-001',
               position: { name: '旧岗位' },
             },
           },
         ]),
       },
+      user: { count: vi.fn().mockResolvedValue(0) },
+      employment: { count: vi.fn().mockResolvedValue(0) },
     } as unknown as Prisma.TransactionClient;
     const snapshot: FeishuDirectorySnapshot = {
       departments: [
@@ -93,6 +96,154 @@ describe('Feishu directory production preview', () => {
         },
       }),
     ]);
+  });
+
+  it('does not preview a remote email overwrite after a tenant-local override', async () => {
+    const conflictingCanonicalOwners = vi.fn().mockResolvedValue(0);
+    const transaction = {
+      directoryOrgUnitBinding: {
+        findMany: vi.fn().mockResolvedValue([departmentBinding('od-1', 'unit-1', 'Unit')]),
+      },
+      directoryUserBinding: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            externalUserId: 'u-1',
+            userId: 'user-1',
+            openId: 'ou-1',
+            unionId: 'on-1',
+            user: {
+              displayName: 'Member',
+              status: 'ACTIVE',
+              avatarUrl: null,
+              role: 'MEMBER',
+            },
+          },
+        ]),
+      },
+      directoryEmploymentBinding: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            externalUserId: 'u-1',
+            externalDepartmentId: 'od-1',
+            employment: {
+              status: 'ACTIVE',
+              isPrimary: true,
+              workEmail: 'local@example.test',
+              workEmailOverridden: true,
+              employeeNumber: null,
+              position: null,
+            },
+          },
+        ]),
+      },
+      user: { count: conflictingCanonicalOwners },
+      employment: { count: vi.fn().mockResolvedValue(0) },
+    } as unknown as Prisma.TransactionClient;
+
+    const input = {
+      tenantId: 'tenant-1',
+      integrationId: 'integration-1',
+      snapshot: {
+        departments: [{ externalId: 'od-1', name: 'Unit', parentExternalId: '0', sortOrder: 0 }],
+        users: [
+          {
+            externalId: 'u-1',
+            openId: 'ou-1',
+            unionId: 'on-1',
+            name: 'Member',
+            email: 'remote@example.test',
+            active: true,
+            departmentExternalIds: ['od-1'],
+            primaryDepartmentExternalId: 'od-1',
+          },
+        ],
+      },
+      now: new Date('2026-08-04T00:00:00.000Z'),
+      reconcileRemovals: true,
+    } as const;
+    const result = await buildPreviewChanges(transaction, input);
+
+    expect(result.changes.filter(({ entityType }) => entityType === 'MEMBER')).toEqual([]);
+
+    conflictingCanonicalOwners.mockResolvedValue(1);
+    const conflicted = await buildPreviewChanges(transaction, input);
+    expect(conflicted.changes).toContainEqual(
+      expect.objectContaining({
+        entityType: 'MEMBER',
+        action: 'CONFLICT',
+        diagnosticCode: 'USER_EMAIL_CONFLICT',
+      }),
+    );
+  });
+
+  it('marks a remote email owned by another local identity as a conflict', async () => {
+    const transaction = {
+      directoryOrgUnitBinding: {
+        findMany: vi.fn().mockResolvedValue([departmentBinding('od-1', 'unit-1', 'Unit')]),
+      },
+      directoryUserBinding: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            externalUserId: 'u-1',
+            userId: 'user-1',
+            openId: null,
+            unionId: null,
+            user: {
+              displayName: 'Member',
+              status: 'ACTIVE',
+              avatarUrl: null,
+              role: 'MEMBER',
+            },
+          },
+        ]),
+      },
+      directoryEmploymentBinding: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            externalUserId: 'u-1',
+            externalDepartmentId: 'od-1',
+            employment: {
+              status: 'ACTIVE',
+              isPrimary: true,
+              workEmail: 'old@example.test',
+              workEmailOverridden: false,
+              employeeNumber: null,
+              position: null,
+            },
+          },
+        ]),
+      },
+      user: { count: vi.fn().mockResolvedValue(1) },
+      employment: { count: vi.fn().mockResolvedValue(0) },
+    } as unknown as Prisma.TransactionClient;
+
+    const result = await buildPreviewChanges(transaction, {
+      tenantId: 'tenant-1',
+      integrationId: 'integration-1',
+      snapshot: {
+        departments: [{ externalId: 'od-1', name: 'Unit', parentExternalId: '0', sortOrder: 0 }],
+        users: [
+          {
+            externalId: 'u-1',
+            name: 'Member',
+            email: 'owned@example.test',
+            active: true,
+            departmentExternalIds: ['od-1'],
+            primaryDepartmentExternalId: 'od-1',
+          },
+        ],
+      },
+      now: new Date('2026-08-04T00:00:00.000Z'),
+      reconcileRemovals: true,
+    });
+
+    expect(result.changes).toContainEqual(
+      expect.objectContaining({
+        entityType: 'MEMBER',
+        action: 'CONFLICT',
+        diagnosticCode: 'USER_EMAIL_CONFLICT',
+      }),
+    );
   });
 
   it('scopes transfer revocation to the terminated employment', async () => {

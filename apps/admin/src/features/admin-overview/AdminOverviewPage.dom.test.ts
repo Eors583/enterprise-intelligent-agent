@@ -102,13 +102,14 @@ describe('AdminOverviewPage', () => {
       expect(dom.container.textContent).toContain('管理概览');
       expect(dom.container.textContent).toContain('真实可用智能体');
       expect(dom.container.textContent).toContain('1/3');
-      expect(dom.container.textContent).toContain('未报告用量');
       expect(dom.container.textContent).toContain('近 7 天活跃 6');
       expect(dom.container.textContent).toContain('75.0% (4)');
-      expect(dom.container.textContent).toContain('210,000 微单位');
-      expect(dom.container.textContent).not.toContain('¥');
+      expect(dom.container.textContent).toContain('智能体使用效果');
+      expect(dom.container.textContent).toContain('组织通讯录同步');
+      expect(dom.container.textContent).not.toContain('成本微单位');
+      expect(dom.container.textContent).not.toContain('Outbox');
       expect(dom.container.textContent).toContain('指定模型');
-      expect(dom.container.textContent).toContain('AGENTS_NOT_OPERATIONALLY_AVAILABLE');
+      expect(dom.container.textContent).not.toContain('AGENTS_NOT_OPERATIONALLY_AVAILABLE');
     } finally {
       await dom.cleanup();
     }

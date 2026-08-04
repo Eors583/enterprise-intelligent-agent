@@ -9,6 +9,8 @@ import { ConversationService, isExecutableAgent } from './conversation.service.j
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000001';
 const USER_ID = '00000000-0000-7000-8000-000000000101';
+const TARGET_USER_ID = '00000000-0000-7000-8000-000000000102';
+const AGENT_ID = '00000000-0000-7000-8000-000000000201';
 
 describe('ConversationService authorization integration', () => {
   it('requires a decision before loading conversations', async () => {
@@ -63,6 +65,7 @@ describe('ConversationService operational Agent boundary', () => {
             name: 'Operations Agent',
           },
         ]),
+        listDepartmentAgents: vi.fn().mockResolvedValue([]),
       } as unknown as AgentControlService,
       conversations as unknown as ConversationRepository,
       { requireCurrent: vi.fn() } as unknown as AuthorizationService,
@@ -96,6 +99,112 @@ describe('ConversationService operational Agent boundary', () => {
   });
 });
 
+describe('ConversationService shared member and Agent channel', () => {
+  const identity = {
+    getCurrentIdentity: vi.fn().mockResolvedValue({
+      tenant: { id: TENANT_ID },
+      user: { id: USER_ID, tenantId: TENANT_ID, name: '林晓' },
+    }),
+  } as unknown as IdentityService;
+  const memberAgent = {
+    id: AGENT_ID,
+    tenantId: TENANT_ID,
+    ownerUserId: TARGET_USER_ID,
+    name: '周睿的研发助手',
+    status: 'online' as const,
+    versionStatus: 'published' as const,
+    visibility: 'tenant' as const,
+    assignedToPrincipal: false,
+    requiresActiveAssignment: false,
+  };
+
+  it('opens a human target with the member and their Agent in one conversation', async () => {
+    const conversations = {
+      createDirect: vi.fn().mockResolvedValue({ id: 'conversation-id' }),
+    };
+    const service = new ConversationService(
+      identity,
+      {
+        findUserById: vi.fn().mockResolvedValue({
+          id: TARGET_USER_ID,
+          name: '周睿',
+          status: 'active',
+        }),
+      } as unknown as IdentityRepository,
+      {
+        listMemberAgents: vi.fn().mockResolvedValue([memberAgent]),
+        listDepartmentAgents: vi.fn().mockResolvedValue([]),
+      } as unknown as AgentControlService,
+      conversations as unknown as ConversationRepository,
+      { requireCurrent: vi.fn() } as unknown as AuthorizationService,
+      { inspectAgents: vi.fn() } as never,
+    );
+
+    await service.create({ type: 'direct', target: { type: 'human', userId: TARGET_USER_ID } });
+
+    expect(conversations.createDirect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directKey: `member-assistant:${USER_ID}:${TARGET_USER_ID}`,
+        preserveExistingParticipants: true,
+        participants: [
+          { type: 'user', id: USER_ID, name: '林晓' },
+          { type: 'user', id: TARGET_USER_ID, name: '周睿' },
+          { type: 'agent', id: AGENT_ID, name: '周睿的智能体' },
+        ],
+      }),
+    );
+  });
+
+  it('uses the same channel key when entering through the member Agent', async () => {
+    const conversations = {
+      createDirect: vi.fn().mockResolvedValue({ id: 'conversation-id' }),
+    };
+    const service = new ConversationService(
+      identity,
+      {
+        findUserById: vi.fn().mockResolvedValue({
+          id: TARGET_USER_ID,
+          name: '周睿',
+          status: 'active',
+        }),
+      } as unknown as IdentityRepository,
+      {
+        listMemberAgents: vi.fn().mockResolvedValue([memberAgent]),
+        listDepartmentAgents: vi.fn().mockResolvedValue([]),
+      } as unknown as AgentControlService,
+      conversations as unknown as ConversationRepository,
+      { requireCurrent: vi.fn() } as unknown as AuthorizationService,
+      {
+        inspectAgents: vi.fn().mockResolvedValue(
+          new Map([
+            [
+              AGENT_ID,
+              {
+                status: 'AVAILABLE',
+                evidenceStatus: 'VERIFIED',
+                reasonCodes: [],
+                checkedAt: new Date().toISOString(),
+              },
+            ],
+          ]),
+        ),
+      } as never,
+    );
+
+    await service.create({ type: 'direct', target: { type: 'agent', agentId: AGENT_ID } });
+
+    expect(conversations.createDirect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        directKey: `member-assistant:${USER_ID}:${TARGET_USER_ID}`,
+        participants: expect.arrayContaining([
+          { type: 'user', id: TARGET_USER_ID, name: '周睿' },
+          { type: 'agent', id: AGENT_ID, name: '周睿的智能体' },
+        ]),
+      }),
+    );
+  });
+});
+
 describe('isExecutableAgent', () => {
   it('keeps an immutable retired version executable only for its existing assignment', () => {
     expect(
@@ -122,5 +231,75 @@ describe('isExecutableAgent', () => {
         assignedToPrincipal: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe('ConversationService Agent brainstorming group', () => {
+  it('creates an Agent-only group and configures the selected pair for four relay turns', async () => {
+    const secondAgentId = '00000000-0000-7000-8000-000000000202';
+    const conversations = {
+      createGroup: vi.fn().mockResolvedValue({ id: 'brainstorm-conversation' }),
+    };
+    const service = new ConversationService(
+      {
+        getCurrentIdentity: vi.fn().mockResolvedValue({
+          tenant: { id: TENANT_ID },
+          user: { id: USER_ID, tenantId: TENANT_ID, name: 'Requester' },
+        }),
+      } as unknown as IdentityService,
+      { findUserById: vi.fn() } as unknown as IdentityRepository,
+      {
+        listMemberAgents: vi.fn().mockResolvedValue([
+          {
+            id: AGENT_ID,
+            ownerUserId: TARGET_USER_ID,
+            name: '员工智能体',
+            status: 'online',
+            versionStatus: 'published',
+            assignedToPrincipal: false,
+            requiresActiveAssignment: false,
+          },
+        ]),
+        listDepartmentAgents: vi.fn().mockResolvedValue([
+          {
+            id: secondAgentId,
+            orgUnitId: '00000000-0000-7000-8000-000000000401',
+            name: '部门智能体',
+            status: 'online',
+            versionStatus: 'published',
+            assignedToPrincipal: false,
+            requiresActiveAssignment: false,
+          },
+        ]),
+      } as unknown as AgentControlService,
+      conversations as unknown as ConversationRepository,
+      { requireCurrent: vi.fn() } as unknown as AuthorizationService,
+      {
+        inspectAgents: vi.fn().mockResolvedValue(
+          new Map([
+            [AGENT_ID, { status: 'AVAILABLE' }],
+            [secondAgentId, { status: 'AVAILABLE' }],
+          ]),
+        ),
+      } as never,
+    );
+
+    await service.create({
+      type: 'group',
+      title: '产品头脑风暴',
+      memberUserIds: [],
+      agentIds: [AGENT_ID, secondAgentId],
+    });
+
+    expect(conversations.createGroup).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: '产品头脑风暴',
+        relay: { agentAId: AGENT_ID, agentBId: secondAgentId, turnLimit: 4 },
+        participants: expect.arrayContaining([
+          { type: 'agent', id: AGENT_ID, name: '员工智能体', role: 'member' },
+          { type: 'agent', id: secondAgentId, name: '部门智能体', role: 'member' },
+        ]),
+      }),
+    );
   });
 });

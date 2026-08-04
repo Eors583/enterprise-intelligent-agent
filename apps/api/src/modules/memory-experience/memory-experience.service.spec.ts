@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryExperienceAuthorizationPort } from './memory-experience-authorization.port.js';
 import { ExperienceKnowledgeProjectionPort } from './experience-knowledge-projection.port.js';
 import { MemoryExperienceRepository } from './memory-experience.repository.js';
-import { MemoryExperienceService } from './memory-experience.service.js';
+import { experienceInputHash, MemoryExperienceService } from './memory-experience.service.js';
 import { RuntimeIdentityPort } from '../process-orchestration/application/runtime-identity.port.js';
 
 const PRINCIPAL = {
@@ -130,6 +130,48 @@ describe('MemoryExperienceService', () => {
     );
     await expect(service.listExperiences({ limit: 50 })).rejects.toBeInstanceOf(ForbiddenException);
     expect(repository.listExperiences).not.toHaveBeenCalled();
+  });
+
+  it('derives the Experience input hash on the server and ignores a legacy client hash', async () => {
+    const repository = repositoryMock();
+    const authorization = authorizationMock();
+    const service = createService(repository, authorization);
+    authorization.resolveExperienceActor.mockResolvedValueOnce({
+      tenantId: PRINCIPAL.tenantId,
+      userId: PRINCIPAL.userId,
+      roleAssignmentId: ASSIGNMENT,
+      assignmentStatus: 'ACTIVE',
+      employmentStatus: 'ACTIVE',
+      permissions: ['EXPERIENCE_CONTRIBUTE'],
+      effectiveFrom: '2026-01-01T00:00:00.000Z',
+      effectiveTo: null,
+    });
+    repository.createExperience.mockResolvedValueOnce({
+      kind: 'APPLIED',
+      value: { id: EXPERIENCE, status: 'RAW' },
+    });
+    const request = {
+      title: '可复用交付经验',
+      sourceTaskId: TASK,
+      sourceDeliverableIds: [],
+      sourceEvidenceIds: [EVIDENCE],
+      rawInputHash: 'f'.repeat(64),
+      candidateSummary: '以可信证据总结的业务做法。',
+      permissionLabels: ['INTERNAL'],
+      sensitivity: 'INTERNAL' as const,
+      idempotencyKey: 'experience-create-1',
+    };
+
+    await expect(service.createExperience(request)).resolves.toMatchObject({ id: EXPERIENCE });
+    expect(repository.createExperience).toHaveBeenCalledWith(
+      expect.objectContaining({
+        request: {
+          ...request,
+          rawInputHash: experienceInputHash(request),
+        },
+      }),
+    );
+    expect(experienceInputHash(request)).not.toBe(request.rawInputHash);
   });
 
   it('binds an Experience review transition to an independent trusted actor', async () => {

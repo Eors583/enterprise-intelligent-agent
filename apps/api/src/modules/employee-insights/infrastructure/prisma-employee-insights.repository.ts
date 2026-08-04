@@ -26,8 +26,10 @@ export class PrismaEmployeeInsightsRepository extends EmployeeInsightsRepository
     now: Date,
   ): Promise<EmployeeExperienceSource | null> {
     return withEmployeeInsights(this.prisma, principal, async (transaction) => {
-      const tasks = await transaction.$queryRaw<Array<{ id: string; title: string }>>(Prisma.sql`
-        SELECT task."id", task."title"
+      const tasks = await transaction.$queryRaw<
+        Array<{ id: string; title: string; permission_labels: Prisma.JsonValue }>
+      >(Prisma.sql`
+        SELECT task."id", task."title", task."permission_labels"
         FROM public."tasks" task
         WHERE task."tenant_id" = ${principal.tenantId}::uuid
           AND task."id" = ${taskId}::uuid
@@ -86,7 +88,11 @@ export class PrismaEmployeeInsightsRepository extends EmployeeInsightsRepository
         LIMIT 500
       `);
       return employeeExperienceSourceSchema.parse({
-        task,
+        task: {
+          id: task.id,
+          title: task.title,
+          permissionLabels: jsonStringArray(task.permission_labels),
+        },
         deliverables,
         evidence: evidence.map((row) => ({
           id: row.id,
@@ -335,6 +341,10 @@ function emptyUsageAggregate(): UsageAggregateRow {
     p50_latency_ms: null,
     p95_latency_ms: null,
   };
+}
+
+function jsonStringArray(value: Prisma.JsonValue): string[] {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : [];
 }
 
 interface UsageAggregateRow {

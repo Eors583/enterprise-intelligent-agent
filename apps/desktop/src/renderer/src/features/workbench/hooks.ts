@@ -3,7 +3,9 @@ import type {
   CorrectionFeedbackRequest,
   CreateCollaborationRequest,
   EmployeeAcceptanceRequestInput,
+  EmployeeDeliverableSubmissionCommand,
   EmployeeDeliverableSubmissionRequest,
+  EmployeeEvidenceContributionCommand,
   EmployeeEvidenceContributionRequest,
   EmployeeTaskTransitionRequest,
 } from '@enterprise/contracts';
@@ -15,6 +17,7 @@ import {
   getEmployeeTaskExecution,
   getWorkbenchTaskTrace,
   contributeEmployeeEvidence,
+  contributeEmployeeEvidenceCommand,
   listTaskCollaborations,
   listTaskCollaborationCandidates,
   listTaskCorrections,
@@ -22,6 +25,7 @@ import {
   listWorkbenchTasks,
   requestEmployeeAcceptance,
   submitEmployeeDeliverable,
+  submitEmployeeDeliverableCommand,
   submitTaskCollaborationCommand,
   submitTaskCorrectionFeedback,
   transitionEmployeeTask,
@@ -192,6 +196,15 @@ export function useContributeEmployeeEvidence(taskId: string) {
   });
 }
 
+export function useContributeEmployeeEvidenceCommand(taskId: string) {
+  const invalidate = useInvalidateEmployeeTaskExecution(taskId);
+  return useMutation({
+    mutationFn: (input: EmployeeEvidenceContributionCommand) =>
+      contributeEmployeeEvidenceCommand(taskId, input),
+    onSuccess: invalidate,
+  });
+}
+
 export function useSubmitEmployeeDeliverable(taskId: string) {
   const invalidate = useInvalidateEmployeeTaskExecution(taskId);
   return useMutation({
@@ -202,6 +215,20 @@ export function useSubmitEmployeeDeliverable(taskId: string) {
       deliverableId: string;
       input: EmployeeDeliverableSubmissionRequest;
     }) => submitEmployeeDeliverable(taskId, deliverableId, input),
+    onSuccess: invalidate,
+  });
+}
+
+export function useSubmitEmployeeDeliverableCommand(taskId: string) {
+  const invalidate = useInvalidateEmployeeTaskExecution(taskId);
+  return useMutation({
+    mutationFn: ({
+      deliverableId,
+      input,
+    }: {
+      deliverableId: string;
+      input: EmployeeDeliverableSubmissionCommand;
+    }) => submitEmployeeDeliverableCommand(taskId, deliverableId, input),
     onSuccess: invalidate,
   });
 }

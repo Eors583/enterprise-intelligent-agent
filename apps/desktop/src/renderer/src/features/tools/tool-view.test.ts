@@ -4,7 +4,10 @@ import {
   initialToolInput,
   parseToolInput,
   requesterActionsFor,
+  toolInputFields,
+  toolInputValue,
   toolInvocationStatusLabel,
+  updateToolInput,
 } from './tool-view';
 import { availableToolFixture, toolInvocationFixture } from './test-fixtures';
 
@@ -15,6 +18,34 @@ describe('employee Tool workbench view', () => {
       customerId: 'customer-1',
     });
     expect(() => parseToolInput('[]')).toThrow('JSON 对象');
+  });
+
+  it('projects supported input schema properties into business form fields', () => {
+    const tool = availableToolFixture({
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          customerId: { type: 'string', title: '客户' },
+          priority: { type: 'integer', title: '优先级' },
+          notify: { type: 'boolean', title: '完成后通知' },
+          format: { type: 'string', title: '结果格式', enum: ['摘要', '完整记录'] },
+        },
+        required: ['customerId'],
+      },
+    });
+    expect(
+      toolInputFields(tool).map(({ key, kind, required }) => ({ key, kind, required })),
+    ).toEqual([
+      { key: 'customerId', kind: 'string', required: true },
+      { key: 'priority', kind: 'number', required: false },
+      { key: 'notify', kind: 'boolean', required: false },
+      { key: 'format', kind: 'string', required: false },
+    ]);
+
+    const updated = updateToolInput(initialToolInput(tool), 'customerId', 'customer-42');
+    expect(toolInputValue(updated, 'customerId')).toBe('customer-42');
+    expect(parseToolInput(updated)).toMatchObject({ customerId: 'customer-42' });
   });
 
   it('offers only requester-safe actions for each state', () => {

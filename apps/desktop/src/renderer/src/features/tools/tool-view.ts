@@ -12,6 +12,15 @@ export type RequesterToolAction =
   | Extract<ToolInvocationDecisionRequest['action'], 'CONFIRM' | 'CANCEL' | 'RETRY' | 'RECONCILE'>
   | 'COMPENSATE';
 
+export interface ToolInputField {
+  readonly key: string;
+  readonly label: string;
+  readonly description: string | null;
+  readonly kind: 'string' | 'number' | 'boolean' | 'unsupported';
+  readonly required: boolean;
+  readonly enumValues: readonly string[];
+}
+
 const STATUS_LABELS: Record<ToolInvocationStatus, string> = {
   REQUESTED: '已登记',
   POLICY_DENIED: '策略拒绝',
@@ -91,6 +100,53 @@ export function initialToolInput(tool: AvailableTool): string {
               : '';
   }
   return JSON.stringify(value, null, 2);
+}
+
+export function toolInputFields(tool: AvailableTool): readonly ToolInputField[] {
+  const properties = record(tool.inputSchema.properties);
+  const required = new Set(
+    Array.isArray(tool.inputSchema.required)
+      ? tool.inputSchema.required.filter((value): value is string => typeof value === 'string')
+      : [],
+  );
+  return Object.entries(properties).map(([key, schema]) => {
+    const field = record(schema);
+    const type = typeof field.type === 'string' ? field.type : 'string';
+    return {
+      key,
+      label: typeof field.title === 'string' && field.title.trim() ? field.title.trim() : key,
+      description:
+        typeof field.description === 'string' && field.description.trim()
+          ? field.description.trim()
+          : null,
+      kind:
+        type === 'number' || type === 'integer'
+          ? 'number'
+          : type === 'boolean'
+            ? 'boolean'
+            : type === 'string'
+              ? 'string'
+              : 'unsupported',
+      required: required.has(key),
+      enumValues: Array.isArray(field.enum)
+        ? field.enum.filter((value): value is string => typeof value === 'string')
+        : [],
+    };
+  });
+}
+
+export function toolInputValue(source: string, key: string): unknown {
+  try {
+    return parseToolInput(source)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+export function updateToolInput(source: string, key: string, value: unknown): string {
+  const input = parseToolInput(source);
+  input[key] = value;
+  return JSON.stringify(input, null, 2);
 }
 
 export function parseToolInput(value: string): Record<string, unknown> {

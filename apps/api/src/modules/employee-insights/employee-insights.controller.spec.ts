@@ -72,7 +72,7 @@ describe('employee experience and AI usage controllers', () => {
 
   it('requires an exact Task source selector and an exact usage window', async () => {
     service.experienceSources.mockResolvedValueOnce({
-      task: { id: TASK, title: 'Task' },
+      task: { id: TASK, title: 'Task', permissionLabels: [] },
       deliverables: [],
       evidence: [],
     });

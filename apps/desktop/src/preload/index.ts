@@ -13,6 +13,9 @@ import {
   type DesktopAgentRunStreamUpdate,
   type DesktopAuthState,
   type DesktopBridge,
+  type DesktopImRealtimeRequest,
+  type DesktopImRealtimeStartRequest,
+  type DesktopImRealtimeUpdate,
   type DesktopOidcLoginRequest,
   type DesktopRuntimeInfo,
 } from '../shared/desktop-api';
@@ -70,6 +73,33 @@ const desktopBridge: DesktopBridge = Object.freeze({
       stopped = true;
       ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.agentRunStreamUpdate, wrapped);
       void ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.stopAgentRunStream, subscriptionId);
+    };
+  },
+  subscribeImRealtime: (
+    request: DesktopImRealtimeRequest,
+    listener: (update: DesktopImRealtimeUpdate) => void,
+  ) => {
+    const subscriptionId = createSubscriptionId();
+    let stopped = false;
+    const wrapped = (_event: Electron.IpcRendererEvent, update: DesktopImRealtimeUpdate): void => {
+      if (update.subscriptionId === subscriptionId) listener(update);
+    };
+    ipcRenderer.on(DESKTOP_IPC_CHANNELS.imRealtimeUpdate, wrapped);
+    const startRequest: DesktopImRealtimeStartRequest = { ...request, subscriptionId };
+    void ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.startImRealtime, startRequest).catch((error) => {
+      if (stopped) return;
+      listener({
+        subscriptionId,
+        kind: 'state',
+        state: 'closed',
+        error: error instanceof Error ? error.message : 'Realtime messaging could not start.',
+      });
+    });
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      ipcRenderer.removeListener(DESKTOP_IPC_CHANNELS.imRealtimeUpdate, wrapped);
+      void ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.stopImRealtime, subscriptionId);
     };
   },
   onAuthStateChanged: (listener: (state: DesktopAuthState) => void) => {

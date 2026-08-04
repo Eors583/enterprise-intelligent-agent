@@ -30,6 +30,8 @@ from enterprise_ai_runtime.domain.knowledge_models import (
 class OpenAIEmbeddingProvider:
     """OpenAI-compatible ``/embeddings`` adapter with a fixed vector dimension."""
 
+    provider = "openai_compatible"
+
     def __init__(
         self,
         *,

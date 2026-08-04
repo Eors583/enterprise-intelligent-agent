@@ -11,7 +11,9 @@ import {
   deliverableSchema,
   employeeAcceptanceRequestInputSchema,
   employeeAcceptanceRequestSchema,
+  employeeDeliverableSubmissionCommandSchema,
   employeeDeliverableSubmissionRequestSchema,
+  employeeEvidenceContributionCommandSchema,
   employeeEvidenceContributionRequestSchema,
   employeeTaskExecutionSnapshotSchema,
   employeeTaskTransitionRequestSchema,
@@ -31,7 +33,9 @@ import {
   type Deliverable,
   type EmployeeAcceptanceRequest,
   type EmployeeAcceptanceRequestInput,
+  type EmployeeDeliverableSubmissionCommand,
   type EmployeeDeliverableSubmissionRequest,
+  type EmployeeEvidenceContributionCommand,
   type EmployeeEvidenceContributionRequest,
   type EmployeeTaskExecutionSnapshot,
   type EmployeeTaskTransitionRequest,
@@ -62,8 +66,12 @@ export const workbenchApiPaths = {
     `/api/v1/workbench/tasks/${encodeURIComponent(taskId)}/execution/task-transitions`,
   deliverableSubmission: (taskId: string, deliverableId: string) =>
     `/api/v1/workbench/tasks/${encodeURIComponent(taskId)}/execution/deliverables/${encodeURIComponent(deliverableId)}/submit`,
+  deliverableSubmissionCommand: (taskId: string, deliverableId: string) =>
+    `/api/v1/workbench/tasks/${encodeURIComponent(taskId)}/execution/deliverables/${encodeURIComponent(deliverableId)}/submissions`,
   evidenceContribution: (taskId: string) =>
     `/api/v1/workbench/tasks/${encodeURIComponent(taskId)}/execution/evidence`,
+  evidenceContributionCommand: (taskId: string) =>
+    `/api/v1/workbench/tasks/${encodeURIComponent(taskId)}/execution/evidence/contributions`,
   acceptanceRequest: (taskId: string, deliverableId: string) =>
     `/api/v1/workbench/tasks/${encodeURIComponent(taskId)}/execution/deliverables/${encodeURIComponent(deliverableId)}/acceptance-requests`,
 } as const;
@@ -345,6 +353,32 @@ export async function submitEmployeeDeliverable(
   return response;
 }
 
+export async function submitEmployeeDeliverableCommand(
+  taskId: string,
+  deliverableId: string,
+  input: EmployeeDeliverableSubmissionCommand,
+  apiBaseUrl?: string,
+): Promise<Deliverable> {
+  const parsed = employeeDeliverableSubmissionCommandSchema.parse(input);
+  const response = await apiRequest(
+    workbenchApiPaths.deliverableSubmissionCommand(taskId, deliverableId),
+    {
+      method: 'POST',
+      body: parsed,
+      schema: deliverableSchema,
+      ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    },
+  );
+  if (
+    response.id !== deliverableId ||
+    response.taskId !== taskId ||
+    response.status !== 'SUBMITTED'
+  ) {
+    throw new ApiClientError('contract', '交付物响应未确认当前业务提交，已拒绝显示成功。');
+  }
+  return response;
+}
+
 export async function contributeEmployeeEvidence(
   taskId: string,
   input: EmployeeEvidenceContributionRequest,
@@ -365,6 +399,32 @@ export async function contributeEmployeeEvidence(
     response.trustLevel !== 'UNVERIFIED'
   ) {
     throw new ApiClientError('contract', '证据响应未确认草稿和待核验状态，已拒绝显示成功。');
+  }
+  return response;
+}
+
+export async function contributeEmployeeEvidenceCommand(
+  taskId: string,
+  input: EmployeeEvidenceContributionCommand,
+  apiBaseUrl?: string,
+): Promise<Evidence> {
+  const parsed = employeeEvidenceContributionCommandSchema.parse(input);
+  const response = await apiRequest(workbenchApiPaths.evidenceContributionCommand(taskId), {
+    method: 'POST',
+    body: parsed,
+    schema: evidenceSchema,
+    ...(apiBaseUrl ? { apiBaseUrl } : {}),
+  });
+  if (
+    response.sourceType !== parsed.sourceType ||
+    response.summary !== parsed.businessDescription ||
+    response.status !== 'DRAFT' ||
+    response.trustLevel !== 'UNVERIFIED'
+  ) {
+    throw new ApiClientError(
+      'contract',
+      '证据响应未确认当前业务贡献和待核验状态，已拒绝显示成功。',
+    );
   }
   return response;
 }

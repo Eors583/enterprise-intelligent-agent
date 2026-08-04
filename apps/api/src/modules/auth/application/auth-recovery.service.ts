@@ -76,18 +76,21 @@ export class AuthRecoveryService {
 
       await transaction.$queryRaw`SELECT set_config('app.tenant_id', ${identity.tenantId}, true)`;
       await lockPasswordFlow(transaction, identity.tenantId, identity.userId);
-      // Re-check status after taking the same lock used by login/password writes.
-      const eligible = await transaction.user.findFirst({
-        where: {
-          id: identity.userId,
-          tenantId: identity.tenantId,
-          status: 'ACTIVE',
-          passwordCredential: { isNot: null },
-          tenant: { status: 'ACTIVE' },
-        },
-        select: { id: true },
-      });
-      if (eligible === null) return null;
+      // Re-resolve the submitted alias after taking the same lock used by
+      // profile edits. A reset request that raced an email change remains an
+      // enumeration-safe no-op and cannot deliver to the stale address.
+      const lockedIdentity = await findEligibleIdentity(
+        transaction,
+        request.tenantSlug,
+        request.email,
+      );
+      if (
+        lockedIdentity === null ||
+        lockedIdentity.tenantId !== identity.tenantId ||
+        lockedIdentity.userId !== identity.userId
+      ) {
+        return null;
+      }
 
       await transaction.authActionToken.updateMany({
         where: {
@@ -105,6 +108,8 @@ export class AuthRecoveryService {
           userId: identity.userId,
           purpose: 'PASSWORD_RESET',
           tokenHash: opaque.hash,
+          deliveryTargetEmail: identity.email,
+          deliveryTargetEvidence: 'ISSUED',
           deliveryStatus: 'PENDING',
           expiresAt,
         },
@@ -355,6 +360,8 @@ async function findEligibleIdentity(
   // rows or see another tenant.
   await transaction.$queryRaw`SELECT set_config('app.tenant_id', ${tenant.id}, true)`;
 
+  if (isReservedInternalEmail(email)) return null;
+
   const direct = await transaction.user.findFirst({
     where: {
       tenantId: tenant.id,
@@ -379,7 +386,7 @@ async function findEligibleIdentity(
     where: {
       tenantId: tenant.id,
       workEmail: { equals: email, mode: 'insensitive' },
-      status: { not: 'TERMINATED' },
+      status: 'ACTIVE',
     },
     orderBy: { userId: 'asc' },
     take: 2,
@@ -423,6 +430,10 @@ function addSeconds(value: Date, seconds: number): Date {
 
 function invalidActionToken(): BadRequestException {
   return new BadRequestException('The recovery link is invalid or has expired.');
+}
+
+function isReservedInternalEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith('@external.invalid');
 }
 
 function isConsumable(

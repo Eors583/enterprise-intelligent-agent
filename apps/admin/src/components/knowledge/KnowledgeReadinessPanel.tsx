@@ -345,5 +345,6 @@ function providerLabel(provider: KnowledgeCapabilityReadiness['provider']): stri
     disabled: '未配置',
     openai_compatible: 'OpenAI Compatible',
     cohere_compatible: 'Cohere Compatible',
+    local_fastembed: '本地中文模型',
   }[provider];
 }

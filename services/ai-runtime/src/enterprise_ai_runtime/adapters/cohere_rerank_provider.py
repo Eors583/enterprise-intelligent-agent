@@ -27,6 +27,8 @@ from enterprise_ai_runtime.domain.knowledge_models import (
 class CohereRerankProvider:
     """Cohere-compatible ``/rerank`` adapter that never trusts provider document ids."""
 
+    provider = "cohere_compatible"
+
     def __init__(
         self,
         *,

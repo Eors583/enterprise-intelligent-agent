@@ -51,6 +51,7 @@ export const employeeExperienceSourceSchema = z
       .object({
         id: UUID,
         title: z.string().trim().min(1).max(300),
+        permissionLabels: UNIQUE_LABELS,
       })
       .strict(),
     deliverables: z.array(

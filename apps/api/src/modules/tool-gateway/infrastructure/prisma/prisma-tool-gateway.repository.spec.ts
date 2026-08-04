@@ -19,6 +19,14 @@ const MIGRATION_SOURCE = readFileSync(
 );
 
 describe('Prisma Tool Gateway hardening', () => {
+  it('serializes tenant key allocation and suffixes server-generated collisions only', () => {
+    expect(REPOSITORY_SOURCE).toContain('tool-definition-key:${input.principal.tenantId}');
+    expect(REPOSITORY_SOURCE).toContain('pg_advisory_xact_lock');
+    expect(REPOSITORY_SOURCE).toContain('input.keyWasGenerated');
+    expect(REPOSITORY_SOURCE).toContain('nextGeneratedDefinitionKey(');
+    expect(REPOSITORY_SOURCE).toContain('keySource: input.keyWasGenerated');
+  });
+
   it('always demotes raw SQL to a dedicated no-bypass capability role with tenant and user context', () => {
     expect(SUPPORT_SOURCE).toContain(
       "role: 'enterprise_agent_admin' | 'enterprise_agent_tool_gateway'",

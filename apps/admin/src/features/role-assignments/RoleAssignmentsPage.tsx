@@ -1,5 +1,6 @@
 import type {
   AdminMember,
+  AdminOrgUnit,
   CreateRoleAssignmentRequest,
   RoleAssignment,
   RoleAssignmentCandidate,
@@ -28,16 +29,20 @@ import {
 } from '@/components/ui';
 
 import {
+  assignmentEffectiveFrom,
   canRevokeRoleAssignment,
+  controlledMemoryPolicy,
+  controlledOrganizationScope,
   eligibleAssignmentMembers,
   formatRoleAssignmentDate,
   formatRoleAssignmentPeriod,
   localDateTimeToIso,
   localDateTimeValue,
-  parseScopeJson,
   roleAssignmentSourceLabel,
   roleAssignmentStatusLabel,
   type EligibleAssignmentMember,
+  type MemoryPolicyPreset,
+  type OrganizationScopeMode,
 } from './role-assignment-view';
 
 type CreateSource = Extract<RoleAssignmentSource, 'LOCAL' | 'PROJECT' | 'TEMPORARY'>;
@@ -48,6 +53,7 @@ const ASSIGNMENT_STATUSES = ['PENDING', 'ACTIVE', 'SUSPENDED', 'REVOKED', 'EXPIR
 export function RoleAssignmentsPage(): ReactNode {
   const [items, setItems] = useState<RoleAssignment[] | null>(null);
   const [members, setMembers] = useState<AdminMember[]>([]);
+  const [orgUnits, setOrgUnits] = useState<AdminOrgUnit[]>([]);
   const [roleCandidates, setRoleCandidates] = useState<RoleAssignmentCandidate[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -70,6 +76,7 @@ export function RoleAssignmentsPage(): ReactNode {
       .then(([assignmentResult, organization, candidateResult]) => {
         setItems(assignmentResult.items);
         setMembers(organization.members);
+        setOrgUnits(organization.orgUnits);
         setRoleCandidates(candidateResult.items);
       })
       .catch((caught: unknown) => {
@@ -292,6 +299,7 @@ export function RoleAssignmentsPage(): ReactNode {
       {createOpen ? (
         <CreateRoleAssignmentModal
           members={eligibleMembers}
+          orgUnits={orgUnits}
           roleCandidates={roleCandidates}
           onClose={() => setCreateOpen(false)}
           onCreated={(created) => {
@@ -321,11 +329,13 @@ export function RoleAssignmentsPage(): ReactNode {
 
 function CreateRoleAssignmentModal({
   members,
+  orgUnits,
   roleCandidates,
   onClose,
   onCreated,
 }: {
   members: ReadonlyArray<EligibleAssignmentMember>;
+  orgUnits: ReadonlyArray<AdminOrgUnit>;
   roleCandidates: ReadonlyArray<RoleAssignmentCandidate>;
   onClose: () => void;
   onCreated: (assignment: RoleAssignment) => void;
@@ -333,12 +343,18 @@ function CreateRoleAssignmentModal({
   const [userId, setUserId] = useState(members[0]?.id ?? '');
   const [roleVersionId, setRoleVersionId] = useState(roleCandidates[0]?.id ?? '');
   const [agentName, setAgentName] = useState('');
-  const [key, setKey] = useState('');
   const [source, setSource] = useState<CreateSource>('LOCAL');
+  const [startsImmediately, setStartsImmediately] = useState(true);
   const [effectiveFrom, setEffectiveFrom] = useState(() => localDateTimeValue());
   const [effectiveTo, setEffectiveTo] = useState('');
-  const [organizationScope, setOrganizationScope] = useState('{}');
-  const [memoryPolicy, setMemoryPolicy] = useState('{}');
+  const [organizationScopeMode, setOrganizationScopeMode] =
+    useState<OrganizationScopeMode>('MEMBER_UNIT');
+  const [selectedOrgUnitId, setSelectedOrgUnitId] = useState(
+    members[0]?.employment.orgUnitId ?? '',
+  );
+  const [includeDescendants, setIncludeDescendants] = useState(false);
+  const [memoryPolicyPreset, setMemoryPolicyPreset] =
+    useState<MemoryPolicyPreset>('BLUEPRINT_DEFAULT');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -352,7 +368,7 @@ function CreateRoleAssignmentModal({
       if (!roleCandidates.some((item) => item.id === roleVersionId)) {
         throw new Error('请选择一个已通过审核并发布的角色蓝图版本。');
       }
-      const effectiveFromIso = localDateTimeToIso(effectiveFrom, '生效时间');
+      const effectiveFromIso = assignmentEffectiveFrom(startsImmediately, effectiveFrom);
       const effectiveToIso = effectiveTo ? localDateTimeToIso(effectiveTo, '失效时间') : null;
       if (
         effectiveToIso !== null &&
@@ -367,10 +383,14 @@ function CreateRoleAssignmentModal({
         effectiveFrom: effectiveFromIso,
         effectiveTo: effectiveToIso,
         source,
-        organizationScope: parseScopeJson(organizationScope, '组织范围'),
+        organizationScope: controlledOrganizationScope(
+          organizationScopeMode,
+          member.employment.orgUnitId,
+          selectedOrgUnitId,
+          includeDescendants,
+        ),
         permissionScope: {},
-        memoryPolicy: parseScopeJson(memoryPolicy, '记忆策略'),
-        ...(key.trim() ? { key } : {}),
+        memoryPolicy: controlledMemoryPolicy(memoryPolicyPreset),
         ...(agentName.trim() ? { agentName } : {}),
       };
       onCreated(await createRoleAssignment(input));
@@ -396,7 +416,12 @@ function CreateRoleAssignmentModal({
               autoFocus
               required
               value={userId}
-              onChange={(event) => setUserId(event.target.value)}
+              onChange={(event) => {
+                const nextUserId = event.target.value;
+                setUserId(nextUserId);
+                const nextMember = members.find((member) => member.id === nextUserId);
+                if (nextMember) setSelectedOrgUnitId(nextMember.employment.orgUnitId);
+              }}
             >
               {members.map((member) => (
                 <option key={member.id} value={member.id}>
@@ -422,27 +447,32 @@ function CreateRoleAssignmentModal({
         </div>
         <div className="form-grid two">
           <label>
-            <span>Agent 显示名称（可选）</span>
-            <input
-              value={agentName}
-              maxLength={200}
-              onChange={(event) => setAgentName(event.target.value)}
-              placeholder="留空时由系统生成"
-            />
+            <span>生效方式</span>
+            <select
+              value={startsImmediately ? 'IMMEDIATE' : 'SCHEDULED'}
+              onChange={(event) => setStartsImmediately(event.target.value === 'IMMEDIATE')}
+            >
+              <option value="IMMEDIATE">创建后立即生效</option>
+              <option value="SCHEDULED">预约生效时间</option>
+            </select>
           </label>
           <label>
-            <span>任命标识（可选）</span>
-            <input
-              value={key}
-              maxLength={160}
-              onChange={(event) => setKey(event.target.value)}
-              placeholder="例如 project:alpha:reviewer"
-            />
+            <span>任命来源</span>
+            <select
+              value={source}
+              onChange={(event) => setSource(event.target.value as CreateSource)}
+            >
+              {CREATE_SOURCES.map((value) => (
+                <option key={value} value={value}>
+                  {roleAssignmentSourceLabel(value)}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
-        <div className="form-grid two">
+        {!startsImmediately ? (
           <label>
-            <span>生效时间</span>
+            <span>预约生效时间</span>
             <input
               required
               type="datetime-local"
@@ -450,53 +480,87 @@ function CreateRoleAssignmentModal({
               onChange={(event) => setEffectiveFrom(event.target.value)}
             />
           </label>
+        ) : null}
+        <div className="form-grid two">
           <label>
-            <span>失效时间（可选）</span>
-            <input
-              type="datetime-local"
-              min={effectiveFrom}
-              value={effectiveTo}
-              onChange={(event) => setEffectiveTo(event.target.value)}
-            />
+            <span>组织范围</span>
+            <select
+              value={organizationScopeMode}
+              onChange={(event) =>
+                setOrganizationScopeMode(event.target.value as OrganizationScopeMode)
+              }
+            >
+              <option value="MEMBER_UNIT">成员当前所在部门</option>
+              <option value="SELECTED_UNIT">指定部门</option>
+              <option value="UNRESTRICTED">不增加组织限制</option>
+            </select>
+          </label>
+          <label>
+            <span>记忆策略</span>
+            <select
+              value={memoryPolicyPreset}
+              onChange={(event) => setMemoryPolicyPreset(event.target.value as MemoryPolicyPreset)}
+            >
+              <option value="BLUEPRINT_DEFAULT">遵循角色蓝图默认</option>
+              <option value="ROLE_ONLY_30">仅当前角色使用 · 保留 30 天</option>
+              <option value="SHARED_90">允许授权范围内复用 · 保留 90 天</option>
+            </select>
           </label>
         </div>
-        <label>
-          <span>任命来源</span>
-          <select
-            value={source}
-            onChange={(event) => setSource(event.target.value as CreateSource)}
-          >
-            {CREATE_SOURCES.map((value) => (
-              <option key={value} value={value}>
-                {roleAssignmentSourceLabel(value)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <details className="role-assignment-advanced">
-          <summary>高级范围配置（JSON）</summary>
-          <p>
-            组织范围和记忆策略必须是 JSON
-            对象。工具与数据权限只能来自已审核发布的角色蓝图版本，不能在任命时临时扩权。
-          </p>
-          <div className="form-grid role-assignment-json-grid">
+        {organizationScopeMode === 'SELECTED_UNIT' ? (
+          <div className="form-grid two">
             <label>
-              <span>组织范围</span>
-              <textarea
-                spellCheck={false}
-                value={organizationScope}
-                onChange={(event) => setOrganizationScope(event.target.value)}
+              <span>指定部门</span>
+              <select
+                required
+                value={selectedOrgUnitId}
+                onChange={(event) => setSelectedOrgUnitId(event.target.value)}
+              >
+                {orgUnits
+                  .filter((unit) => unit.status === 'ACTIVE')
+                  .map((unit) => (
+                    <option key={unit.id} value={unit.id}>
+                      {unit.name}
+                    </option>
+                  ))}
+              </select>
+            </label>
+            <label className="checkbox-row">
+              <input
+                type="checkbox"
+                checked={includeDescendants}
+                onChange={(event) => setIncludeDescendants(event.target.checked)}
+              />
+              <span>同时包含下级部门</span>
+            </label>
+          </div>
+        ) : null}
+        <details className="role-assignment-advanced">
+          <summary>高级选项</summary>
+          <p>系统会自动生成 Agent 名称和任命标识。仅在兼容既有策略或预约失效时调整这些字段。</p>
+          <div className="form-grid two">
+            <label>
+              <span>Agent 显示名称（可选）</span>
+              <input
+                value={agentName}
+                maxLength={200}
+                onChange={(event) => setAgentName(event.target.value)}
+                placeholder="留空时由系统生成"
               />
             </label>
             <label>
-              <span>记忆策略</span>
-              <textarea
-                spellCheck={false}
-                value={memoryPolicy}
-                onChange={(event) => setMemoryPolicy(event.target.value)}
+              <span>失效时间（可选）</span>
+              <input
+                type="datetime-local"
+                min={startsImmediately ? undefined : effectiveFrom}
+                value={effectiveTo}
+                onChange={(event) => setEffectiveTo(event.target.value)}
               />
             </label>
           </div>
+          <Notice tone="info">
+            组织范围和记忆策略只能通过上方受控选项设置，系统会生成并校验实际策略。
+          </Notice>
         </details>
         <FieldError message={error} />
         <div className="modal-actions">

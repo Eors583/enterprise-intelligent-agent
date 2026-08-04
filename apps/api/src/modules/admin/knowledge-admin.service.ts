@@ -598,10 +598,17 @@ export class KnowledgeAdminService {
           principal.tenantId,
           scopes.map((scope) => scope.orgUnitId),
         );
+        await lockKnowledgeBaseKeyspace(transaction, principal.tenantId);
+        const knowledgeBaseKey = await resolveKnowledgeBaseKey(
+          transaction,
+          principal.tenantId,
+          request.name,
+          request.key,
+        );
         const knowledgeBase = await transaction.knowledgeBase.create({
           data: {
             tenantId: principal.tenantId,
-            key: request.key,
+            key: knowledgeBaseKey,
             name: request.name,
             description: request.description ?? null,
             status: request.status,
@@ -729,12 +736,9 @@ export class KnowledgeAdminService {
           `Knowledge base enterprise readiness checks failed: ${readiness.activationBlockers.join(', ')}.`,
         );
       }
-      const graph = await this.graphOverview(id);
-      if (!graph.strongRetrievalReady) {
-        throw new ConflictException(
-          `Knowledge graph strong-retrieval checks failed: ${graph.readinessBlockers.join(', ')}.`,
-        );
-      }
+      // Relationship expansion is an optional retrieval enhancement. A governed semantic
+      // index may be activated while its graph is still being curated; graph readiness
+      // remains visible to administrators as an independent quality signal.
     }
     return this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const current = await transaction.knowledgeBase.findFirst({
@@ -2601,6 +2605,61 @@ async function lockKnowledgeDocument(
   await transaction.$queryRaw`
     SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:knowledge-document:${documentId}`}, 0))::text
   `;
+}
+
+async function lockKnowledgeBaseKeyspace(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+): Promise<void> {
+  await transaction.$queryRaw`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(${`${tenantId}:knowledge-base:keyspace`}, 0)
+    )::text
+  `;
+}
+
+async function resolveKnowledgeBaseKey(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  name: string,
+  explicitKey: string | undefined,
+): Promise<string> {
+  if (explicitKey !== undefined) {
+    const key = explicitKey.trim();
+    if (key.length < 2 || key.length > 100 || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(key)) {
+      throw new BadRequestException(
+        'Knowledge base key must be a lowercase slug containing letters, numbers, and hyphens.',
+      );
+    }
+    return key;
+  }
+
+  const base = generatedKnowledgeBaseKey(name);
+  for (let ordinal = 1; ordinal <= 10_000; ordinal += 1) {
+    const suffix = ordinal === 1 ? '' : `-${ordinal}`;
+    const prefix = base.slice(0, 100 - suffix.length).replace(/-+$/u, '');
+    const candidate = `${prefix}${suffix}`;
+    const existing = await transaction.knowledgeBase.findFirst({
+      where: { tenantId, key: candidate },
+      select: { id: true },
+    });
+    if (existing === null) return candidate;
+  }
+  throw new ConflictException('No available knowledge base key could be allocated.');
+}
+
+function generatedKnowledgeBaseKey(name: string): string {
+  const normalized = name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .replace(/-{2,}/gu, '-')
+    .slice(0, 100)
+    .replace(/-+$/u, '');
+  if (normalized.length >= 2) return normalized;
+  return `knowledge-${createHash('sha256').update(name.trim()).digest('hex').slice(0, 12)}`;
 }
 
 function knowledgeBaseNotFound(): NotFoundException {

@@ -10,6 +10,11 @@ import {
   correctionFixture,
   runtimePage,
 } from './interaction-test-fixtures';
+import {
+  executionDeliverableFixture,
+  employeeTaskExecutionFixture,
+  executionEvidenceFixture,
+} from './employee-task-execution-test-fixtures';
 
 const apiMocks = vi.hoisted(() => ({
   getWorkbenchTaskTrace: vi.fn(),
@@ -25,13 +30,16 @@ const apiMocks = vi.hoisted(() => ({
   getEmployeeTaskExecution: vi.fn(),
   transitionEmployeeTask: vi.fn(),
   contributeEmployeeEvidence: vi.fn(),
+  contributeEmployeeEvidenceCommand: vi.fn(),
   submitEmployeeDeliverable: vi.fn(),
+  submitEmployeeDeliverableCommand: vi.fn(),
   requestEmployeeAcceptance: vi.fn(),
 }));
 
 vi.mock('./api', () => apiMocks);
 
 import {
+  collaborationOutputSchema,
   TaskCollaborationPanel,
   TaskCorrectionPanel,
   WorkbenchTaskModeTabs,
@@ -43,9 +51,31 @@ beforeEach(() => {
   apiMocks.listTaskCollaborations.mockResolvedValue(runtimePage([]));
   apiMocks.listTaskCollaborationCandidates.mockResolvedValue({ items: [] });
   apiMocks.listTaskCorrections.mockResolvedValue(runtimePage([]));
+  apiMocks.getEmployeeTaskExecution.mockResolvedValue(
+    employeeTaskExecutionFixture({
+      evidence: [
+        executionEvidenceFixture({
+          trustLevel: 'VERIFIED',
+          verifiedBy: { type: 'USER', id: '00000000-0000-7000-8000-000000000299' },
+          verifiedAt: '2026-07-28T08:10:00.000Z',
+        }),
+      ],
+    }),
+  );
 });
 
 describe('task collaboration and correction DOM acceptance', () => {
+  it('maps business output templates to governed structured schemas', () => {
+    expect(collaborationOutputSchema('document')).toMatchObject({
+      type: 'object',
+      required: ['title', 'content'],
+    });
+    expect(collaborationOutputSchema('approval')).toMatchObject({
+      type: 'object',
+      required: ['decision', 'comment'],
+    });
+  });
+
   it('exposes accessible overview, execution, collaboration, correction, and governed Tool tabs', async () => {
     const onChange = vi.fn();
     const dom = await renderInTestDom(
@@ -187,6 +217,72 @@ describe('task collaboration and correction DOM acceptance', () => {
     }
   });
 
+  it('builds delivery commands from readable task records without placeholder identifiers', async () => {
+    const committed = collaborationFixture({ status: 'COMMITTED', revision: 2 });
+    const delivered = collaborationFixture({ status: 'DELIVERED', revision: 3 });
+    const deliverable = executionDeliverableFixture({
+      status: 'SUBMITTED',
+      submittedAt: '2026-07-28T08:30:00.000Z',
+      artifactUri: 'https://documents.example.test/delivery',
+      contentHash: 'b'.repeat(64),
+    });
+    const evidence = executionEvidenceFixture({ status: 'ACTIVE' });
+    apiMocks.listTaskCollaborations.mockResolvedValue(runtimePage([committed]));
+    apiMocks.getTaskCollaborationDetail.mockResolvedValue(collaborationDetailFixture(committed));
+    apiMocks.getEmployeeTaskExecution.mockResolvedValue(
+      employeeTaskExecutionFixture({ deliverables: [deliverable], evidence: [evidence] }),
+    );
+    apiMocks.submitTaskCollaborationCommand.mockResolvedValue(
+      collaborationDetailFixture(delivered),
+    );
+    const { dom, queryClient } = await renderWithClient(
+      createElement(TaskCollaborationPanel, { taskId: taskFixture().id }),
+    );
+    try {
+      await dom.flush();
+      await dom.flush();
+      const action = [...dom.container.querySelectorAll('button')].find(
+        (button) => button.textContent?.trim() === '提交交付',
+      );
+      await dom.click(action!);
+      await dom.flush();
+      const form = dom.container.querySelector('.collaboration-dialog form') as HTMLFormElement;
+      expect(form.textContent).not.toContain('JSON');
+      expect(form.textContent).not.toContain('ID');
+      await dom.change(form.querySelector('select')!, deliverable.id);
+      const evidenceCheckbox = form.querySelector('input[type="checkbox"]') as HTMLInputElement;
+      evidenceCheckbox.checked = true;
+      await dom.click(evidenceCheckbox);
+      await dom.change(form.querySelector('textarea')!, '已完成客户留存分析并附上可信依据。');
+      await dom.flush();
+      await dom.submit(form);
+      await dom.flush();
+      expect(apiMocks.submitTaskCollaborationCommand).toHaveBeenCalledWith(
+        taskFixture().id,
+        committed.id,
+        expect.objectContaining({
+          type: 'DELIVER',
+          payload: {
+            deliverableId: deliverable.id,
+            deliverableVersion: deliverable.version,
+            evidenceRefs: [
+              {
+                evidenceId: evidence.id,
+                version: evidence.version,
+                contentHash: evidence.contentHash,
+              },
+            ],
+            summary: '已完成客户留存分析并附上可信依据。',
+          },
+        }),
+      );
+    } finally {
+      queryClient.clear();
+      await dom.flush();
+      await dom.cleanup();
+    }
+  });
+
   it('keeps revision conflict visible and reports success only after server confirmation', async () => {
     const correction = correctionFixture();
     const updated = correctionFixture({
@@ -207,9 +303,13 @@ describe('task collaboration and correction DOM acceptance', () => {
         (button) => button.textContent?.trim() === '确认收到',
       );
       if (action) await dom.click(action);
+      await dom.flush();
+      await dom.flush();
       const form = dom.container.querySelector('.correction-dialog form') as HTMLFormElement | null;
       const comment = form?.querySelector('textarea') as HTMLTextAreaElement | null;
       const submit = form?.querySelector('button[type="submit"]') as HTMLButtonElement | null;
+      expect(form?.textContent).not.toContain('证据 ID');
+      expect(form?.querySelector('input[type="checkbox"]')).not.toBeNull();
       expect(submit?.disabled).toBe(true);
       if (comment) await dom.change(comment, '已收到纠偏并核对最新修订。');
       expect(submit?.disabled).toBe(false);

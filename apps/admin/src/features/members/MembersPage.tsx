@@ -54,6 +54,7 @@ function invitationStatusLabel(status: MemberInvitation['status']): string {
 export function buildMemberUpdateRequest(
   member: AdminMember,
   values: {
+    email: string;
     displayName: string;
     role: TenantRole;
     status: AdminMember['status'];
@@ -61,14 +62,26 @@ export function buildMemberUpdateRequest(
     title: string;
   },
 ): UpdateMemberRequest {
-  if (member.source === 'FEISHU') return { role: values.role };
+  const email = values.email.trim().toLowerCase();
+  const emailChanged = email !== member.email.trim().toLowerCase();
+  if (member.source === 'FEISHU') {
+    return {
+      ...(emailChanged ? { email } : {}),
+      role: values.role,
+    };
+  }
   return {
+    ...(emailChanged ? { email } : {}),
     displayName: values.displayName,
     role: values.role,
     status: values.status,
     ...(values.orgUnitId ? { orgUnitId: values.orgUnitId } : {}),
     ...(values.title.trim() ? { title: values.title } : {}),
   };
+}
+
+export function isPlaceholderMemberEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith('@external.invalid');
 }
 
 export function MembersPage({ currentUserId }: { currentUserId: string }): ReactNode {
@@ -123,28 +136,31 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
         <div>
           <span className="eyebrow">PEOPLE & ACCESS</span>
           <h1>成员管理</h1>
-          <p>创建成员账号，分配部门、岗位和企业管理角色。</p>
+          <p>通过一次性邀请安全加入成员，并分配部门、岗位和企业角色。</p>
         </div>
         <div className="page-actions">
           <button className="button secondary" type="button" onClick={reload} disabled={loading}>
             <Icon name="refresh" size={17} /> 刷新
           </button>
           <button
-            className="button secondary"
+            className="button primary"
             type="button"
             onClick={() => setInviteOpen(true)}
             disabled={!data?.orgUnits.some((unit) => unit.status === 'ACTIVE')}
           >
             <Icon name="plus" size={17} /> 邀请成员
           </button>
-          <button
-            className="button primary"
-            type="button"
-            onClick={() => setCreateOpen(true)}
-            disabled={!data?.orgUnits.some((unit) => unit.status === 'ACTIVE')}
-          >
-            <Icon name="plus" size={17} /> 添加成员
-          </button>
+          <details className="page-action-advanced">
+            <summary>高级</summary>
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => setCreateOpen(true)}
+              disabled={!data?.orgUnits.some((unit) => unit.status === 'ACTIVE')}
+            >
+              使用初始密码建号
+            </button>
+          </details>
         </div>
       </header>
       {notice ? (
@@ -186,7 +202,7 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
               title={data.members.length === 0 ? '还没有成员' : '没有匹配的成员'}
               description={
                 data.members.length === 0
-                  ? '添加成员并为其分配部门和初始密码。'
+                  ? '发送一次性邀请，成员自行设置密码并激活账号。'
                   : '尝试更换搜索词或筛选条件。'
               }
             />
@@ -268,7 +284,7 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
           onClose={() => setCreateOpen(false)}
           onCreated={() => {
             setCreateOpen(false);
-            setNotice('成员账号已创建，可使用企业标识、邮箱和初始密码登录。');
+            setNotice('成员账号已通过兼容方式创建，请通过安全渠道发送初始密码。');
             reload();
           }}
         />
@@ -495,7 +511,7 @@ function CreateMemberModal({
   return (
     <Modal
       title="添加企业成员"
-      description="创建账号后，将初始密码通过安全渠道告知成员。"
+      description="兼容旧系统的高级建号方式。常规成员请使用一次性邀请，避免管理员接触初始密码。"
       onClose={onClose}
       size="wide"
     >
@@ -604,6 +620,7 @@ function EditMemberModal({
   onClose: () => void;
   onSaved: () => void;
 }): ReactNode {
+  const [email, setEmail] = useState(member.email);
   const [displayName, setDisplayName] = useState(member.displayName);
   const [role, setRole] = useState<TenantRole>(member.role);
   const [status, setStatus] = useState(member.status);
@@ -622,6 +639,9 @@ function EditMemberModal({
   const [invitationError, setInvitationError] = useState<string | null>(null);
   const externallyManaged = member.source === 'FEISHU';
   const isCurrentUser = member.id === currentUserId;
+  const hasUnsavedEmail = email.trim().toLowerCase() !== member.email.trim().toLowerCase();
+  const hasPlaceholderEmail = isPlaceholderMemberEmail(member.email);
+  const identityActionBlocked = hasUnsavedEmail || hasPlaceholderEmail;
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
@@ -631,6 +651,7 @@ function EditMemberModal({
       await updateMember(
         member.id,
         buildMemberUpdateRequest(member, {
+          email,
           displayName,
           role,
           status,
@@ -701,6 +722,18 @@ function EditMemberModal({
       size="wide"
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
+        <label>
+          <span>登录邮箱</span>
+          <input
+            type="email"
+            autoComplete="email"
+            aria-label="登录邮箱"
+            autoFocus={externallyManaged}
+            required
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+          />
+        </label>
         <div className="form-grid two">
           <label>
             <span>显示姓名</span>
@@ -727,11 +760,7 @@ function EditMemberModal({
         <div className="form-grid two">
           <label>
             <span>企业角色</span>
-            <select
-              autoFocus={externallyManaged}
-              value={role}
-              onChange={(event) => setRole(event.target.value as TenantRole)}
-            >
+            <select value={role} onChange={(event) => setRole(event.target.value as TenantRole)}>
               {ROLES.map((item) => (
                 <option
                   key={item}
@@ -772,8 +801,8 @@ function EditMemberModal({
         </label>
         <Notice tone="info">
           {externallyManaged
-            ? '姓名、部门、职位和账号状态由飞书管理；企业角色由本系统维护，但绑定登录身份前不能设为所有者。'
-            : '角色或账号状态变更会影响该成员后续请求的访问权限。'}
+            ? '姓名、部门、职位和账号状态由飞书管理；登录邮箱与企业角色由本地身份系统维护，飞书同步不会覆盖。邮箱保存后可用于登录、邀请和账号恢复，但绑定登录身份前不能设为所有者。'
+            : '登录邮箱由本地身份系统维护，用于登录、邀请和账号恢复；角色或账号状态变更会影响后续请求的访问权限。'}
         </Notice>
         <FieldError message={error} />
         <div className="member-modal-actions">
@@ -792,8 +821,18 @@ function EditMemberModal({
             <p>
               当前状态：{invitationStatusLabel(invitation.status)}。重发会立即撤销此前未使用的链接。
             </p>
+            {invitation.deliveryTargetEvidence === 'LEGACY_INFERRED' ? (
+              <p>该历史投递地址由旧数据推断，并非精确投递凭证；请以当前登录邮箱为准。</p>
+            ) : null}
           </div>
           <div className="form-stack">
+            {identityActionBlocked ? (
+              <Notice tone="info">
+                {hasPlaceholderEmail
+                  ? '当前是飞书同步生成的占位邮箱。请先填写并保存真实登录邮箱，再重新发送邀请。'
+                  : '登录邮箱尚未保存。请先保存成员设置，再重新发送邀请。'}
+              </Notice>
+            ) : null}
             {invitationEmailSent ? (
               <Notice tone="success">
                 邀请邮件已发送；安全起见，管理端不会显示邀请令牌或链接。
@@ -819,7 +858,7 @@ function EditMemberModal({
             <button
               className="button secondary"
               type="button"
-              disabled={resendingInvitation}
+              disabled={resendingInvitation || identityActionBlocked}
               onClick={() => void resendInvitation()}
             >
               {resendingInvitation ? <Spinner label="正在重发…" /> : '重新发送邀请'}
@@ -835,6 +874,13 @@ function EditMemberModal({
             </p>
           </div>
           <div className="form-stack">
+            {identityActionBlocked ? (
+              <Notice tone="info">
+                {hasPlaceholderEmail
+                  ? '当前是飞书同步生成的占位邮箱。请先填写并保存真实登录邮箱，再发送一次性邀请。'
+                  : '登录邮箱尚未保存。请先保存成员设置，再发送一次性邀请。'}
+              </Notice>
+            ) : null}
             {invitationEmailSent ? (
               <Notice tone="success">
                 邀请邮件已发送；安全起见，管理端不会显示邀请令牌或链接。
@@ -860,7 +906,7 @@ function EditMemberModal({
             <button
               className="button secondary"
               type="button"
-              disabled={resendingInvitation}
+              disabled={resendingInvitation || identityActionBlocked}
               onClick={() => void issueInvitation()}
             >
               {resendingInvitation ? <Spinner label="正在发送…" /> : '发送一次性邀请'}
@@ -896,6 +942,9 @@ function EditMemberModal({
               <Notice tone="info">
                 重置后成员必须在下次登录时设置新密码；系统不会通过邮件发送该密码。
               </Notice>
+              {hasUnsavedEmail ? (
+                <Notice tone="info">登录邮箱尚未保存。请先保存成员设置，再重置密码。</Notice>
+              ) : null}
               {revokedSessionCount === null ? null : (
                 <Notice tone="success">
                   密码已重置，已退出 {revokedSessionCount} 个活跃会话。请通过安全渠道告知成员。
@@ -906,7 +955,7 @@ function EditMemberModal({
                 <button
                   className="button danger-ghost"
                   type="submit"
-                  disabled={resettingPassword || temporaryPassword.length < 10}
+                  disabled={resettingPassword || temporaryPassword.length < 10 || hasUnsavedEmail}
                 >
                   {resettingPassword ? <Spinner label="正在重置…" /> : '重置密码并退出全部设备'}
                 </button>

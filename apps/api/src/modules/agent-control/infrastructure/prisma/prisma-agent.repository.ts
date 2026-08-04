@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../../../database/prisma.service.js';
-import type { MemberAgent } from '../../domain/agent.models.js';
+import type { DepartmentAgent, MemberAgent } from '../../domain/agent.models.js';
 import { AgentRepository } from '../../domain/agent.repository.js';
 import { hasRoleAgentAssignmentMarker } from '../../domain/role-agent-assignment.policy.js';
 
@@ -18,7 +18,7 @@ export class PrismaAgentRepository extends AgentRepository {
       const agents = await transaction.agentInstance.findMany({
         where: { tenantId, ownerUserId: { not: null } },
         include: {
-          version: { select: { status: true } },
+          version: { select: { status: true, knowledgeScope: true } },
           _count: { select: { roleAssignments: true } },
           roleAssignments: {
             where: {
@@ -38,8 +38,20 @@ export class PrismaAgentRepository extends AgentRepository {
         orderBy: { name: 'asc' },
       });
 
-      const result: MemberAgent[] = [];
+      const preferredByOwner = new Map<string, (typeof agents)[number]>();
       for (const agent of agents) {
+        if (agent.ownerUserId === null) continue;
+        const current = preferredByOwner.get(agent.ownerUserId);
+        if (
+          current === undefined ||
+          memberAgentPreference(agent) > memberAgentPreference(current)
+        ) {
+          preferredByOwner.set(agent.ownerUserId, agent);
+        }
+      }
+
+      const result: MemberAgent[] = [];
+      for (const agent of preferredByOwner.values()) {
         if (agent.ownerUserId === null) continue;
         result.push({
           id: agent.id,
@@ -58,6 +70,76 @@ export class PrismaAgentRepository extends AgentRepository {
       return result;
     });
   }
+
+  listDepartmentAgents(
+    tenantId: string,
+    principalUserId: string,
+  ): Promise<readonly DepartmentAgent[]> {
+    return this.prisma.withTenant(tenantId, async (transaction) => {
+      const employments = await transaction.employment.findMany({
+        where: { tenantId, userId: principalUserId, status: 'ACTIVE' },
+        select: { orgUnitId: true },
+      });
+      const orgUnitIds = [...new Set(employments.map((item) => item.orgUnitId))];
+      if (orgUnitIds.length === 0) return [];
+      const agents = await transaction.agentInstance.findMany({
+        where: {
+          tenantId,
+          kind: 'DEPARTMENT',
+          orgUnitId: { in: orgUnitIds },
+        },
+        include: {
+          version: { select: { status: true } },
+          orgUnit: { select: { id: true, name: true, status: true } },
+        },
+        orderBy: [{ orgUnit: { name: 'asc' } }, { name: 'asc' }],
+      });
+      return agents.flatMap((agent): DepartmentAgent[] => {
+        if (agent.orgUnit === null || agent.orgUnit.status !== 'ACTIVE') return [];
+        return [
+          {
+            id: agent.id,
+            tenantId: agent.tenantId,
+            orgUnitId: agent.orgUnit.id,
+            departmentName: agent.orgUnit.name,
+            name: agent.name,
+            status: agent.status.toLowerCase() as DepartmentAgent['status'],
+            versionStatus: agent.version.status.toLowerCase() as DepartmentAgent['versionStatus'],
+            visibility: 'tenant',
+            assignedToPrincipal: false,
+            requiresActiveAssignment: false,
+            ...(agent.summary === null ? {} : { summary: agent.summary }),
+          },
+        ];
+      });
+    });
+  }
+}
+
+function memberAgentPreference(agent: {
+  readonly status: string;
+  readonly settings: Prisma.JsonValue;
+  readonly version: { readonly status: string; readonly knowledgeScope: Prisma.JsonValue };
+}): number {
+  return (
+    (agent.status === 'ONLINE' ? 1_000 : agent.status === 'OFFLINE' ? 100 : 0) +
+    (agent.version.status === 'PUBLISHED' ? 500 : 0) +
+    effectiveKnowledgeBaseCount(agent.settings, agent.version.knowledgeScope) * 10
+  );
+}
+
+function effectiveKnowledgeBaseCount(
+  settings: Prisma.JsonValue,
+  versionScope: Prisma.JsonValue,
+): number {
+  for (const value of [settings, versionScope]) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) continue;
+    const candidate = value === settings ? value.knowledgeBaseIdsOverride : value.knowledgeBaseIds;
+    if (Array.isArray(candidate)) {
+      return new Set(candidate.filter((id): id is string => typeof id === 'string')).size;
+    }
+  }
+  return 0;
 }
 
 function readVisibility(settings: Prisma.JsonValue): MemberAgent['visibility'] {

@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiClientError } from '../../shared/api/client';
 import { renderInTestDom } from '../../test/dom-test-utils';
 import {
+  executionDeliverableFixture,
+  executionEvidenceFixture,
   employeeTaskExecutionFixture,
   executionAssignmentId,
 } from './employee-task-execution-test-fixtures';
@@ -20,7 +22,9 @@ const apiMocks = vi.hoisted(() => ({
   getEmployeeTaskExecution: vi.fn(),
   transitionEmployeeTask: vi.fn(),
   contributeEmployeeEvidence: vi.fn(),
+  contributeEmployeeEvidenceCommand: vi.fn(),
   submitEmployeeDeliverable: vi.fn(),
+  submitEmployeeDeliverableCommand: vi.fn(),
   requestEmployeeAcceptance: vi.fn(),
 }));
 
@@ -138,6 +142,98 @@ describe('employee task execution DOM acceptance', () => {
       await dom.flush();
       expect(dom.container.querySelector('[role="status"]')?.textContent).toContain(
         '服务端已确认任务状态',
+      );
+    } finally {
+      queryClient.clear();
+      await dom.flush();
+      await dom.cleanup();
+    }
+  });
+
+  it('submits business evidence and deliverables without exposing technical metadata fields', async () => {
+    const evidence = executionEvidenceFixture({
+      trustLevel: 'VERIFIED',
+      verifiedBy: { type: 'USER', id: '00000000-0000-7000-8000-000000000299' },
+      verifiedAt: '2026-07-28T08:10:00.000Z',
+    });
+    const deliverable = executionDeliverableFixture();
+    const snapshot = employeeTaskExecutionFixture({
+      task: {
+        ...employeeTaskExecutionFixture().task,
+        status: 'IN_PROGRESS',
+      },
+      deliverables: [deliverable],
+      evidence: [evidence],
+    });
+    apiMocks.getEmployeeTaskExecution.mockResolvedValue(snapshot);
+    apiMocks.contributeEmployeeEvidenceCommand.mockResolvedValue({
+      ...evidence,
+      status: 'DRAFT',
+      trustLevel: 'UNVERIFIED',
+      summary: '客户确认已完成全部检查。',
+      verifiedBy: null,
+      verifiedAt: null,
+    });
+    apiMocks.submitEmployeeDeliverableCommand.mockResolvedValue({
+      ...deliverable,
+      status: 'SUBMITTED',
+      revision: deliverable.revision + 1,
+      submittedAt: '2026-07-29T10:00:00.000Z',
+      artifactUri: 'https://documents.example.test/result',
+      contentHash: 'a'.repeat(64),
+    });
+    const { dom, queryClient } = await renderWithClient(
+      createElement(TaskExecutionPanel, { taskId: snapshot.task.id }),
+    );
+
+    try {
+      await dom.flush();
+      await dom.flush();
+      const evidenceForm = dom.container.querySelector(
+        '.task-evidence-form',
+      ) as HTMLFormElement | null;
+      expect(evidenceForm?.textContent).toContain('证据说明');
+      expect(evidenceForm?.textContent).not.toMatch(
+        /证据编码|来源记录|来源版本|SHA-256|revision|UUID/u,
+      );
+      const evidenceDescription = evidenceForm?.querySelector('textarea');
+      if (evidenceDescription) await dom.change(evidenceDescription, '客户确认已完成全部检查。');
+      if (evidenceForm) await dom.submit(evidenceForm);
+      await dom.flush();
+      expect(apiMocks.contributeEmployeeEvidenceCommand).toHaveBeenCalledWith(snapshot.task.id, {
+        roleAssignmentId: executionAssignmentId,
+        businessDescription: '客户确认已完成全部检查。',
+        sourceType: 'DOCUMENT',
+        sourceUri: null,
+      });
+
+      const deliverableForm = dom.container.querySelector(
+        '.task-deliverable-form',
+      ) as HTMLFormElement | null;
+      expect(deliverableForm?.textContent).not.toMatch(/来源记录|来源版本|SHA-256|revision|UUID/u);
+      const description = deliverableForm?.querySelector('textarea');
+      if (description) await dom.change(description, '交付资料已整理完成。');
+      const sourceUri = deliverableForm?.querySelector('input[type="url"]');
+      if (sourceUri instanceof HTMLInputElement) {
+        await dom.change(sourceUri, 'https://documents.example.test/result');
+      }
+      const evidenceChoice = deliverableForm?.querySelector('input[type="checkbox"]');
+      if (evidenceChoice instanceof HTMLInputElement) {
+        evidenceChoice.checked = true;
+        await dom.click(evidenceChoice);
+      }
+      if (deliverableForm) await dom.submit(deliverableForm);
+      await dom.flush();
+      expect(apiMocks.submitEmployeeDeliverableCommand).toHaveBeenCalledWith(
+        snapshot.task.id,
+        deliverable.id,
+        {
+          roleAssignmentId: executionAssignmentId,
+          businessDescription: '交付资料已整理完成。',
+          sourceType: 'DOCUMENT',
+          sourceUri: 'https://documents.example.test/result',
+          evidenceIds: [evidence.id],
+        },
       );
     } finally {
       queryClient.clear();

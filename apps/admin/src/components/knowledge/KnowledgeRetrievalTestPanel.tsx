@@ -1,7 +1,11 @@
-import type { KnowledgeBase, KnowledgeRetrievalTestResponse } from '@enterprise/contracts';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import type {
+  AdminMember,
+  KnowledgeBase,
+  KnowledgeRetrievalTestResponse,
+} from '@enterprise/contracts';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
-import { testKnowledgeRetrieval } from '@/api/admin-api';
+import { getOrganization, testKnowledgeRetrieval } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { EmptyState, FieldError, Notice, Spinner } from '@/components/ui';
 
@@ -12,8 +16,6 @@ import {
   relationshipEvidencePath,
   relationshipPathEdgeLabel,
 } from './knowledge-graph-view';
-
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function score(value: number): string {
   return value.toFixed(3);
@@ -30,6 +32,7 @@ export function KnowledgeRetrievalTestPanel({
 }): ReactNode {
   const [query, setQuery] = useState('');
   const [userId, setUserId] = useState('');
+  const [members, setMembers] = useState<readonly AdminMember[]>([]);
   const [limit, setLimit] = useState(8);
   const [documentVersionId, setDocumentVersionId] = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -53,6 +56,16 @@ export function KnowledgeRetrievalTestPanel({
       })),
   );
 
+  useEffect(() => {
+    const controller = new AbortController();
+    void getOrganization(controller.signal)
+      .then((response) =>
+        setMembers(response.members.filter((member) => member.status === 'ACTIVE')),
+      )
+      .catch(() => setMembers([]));
+    return () => controller.abort();
+  }, []);
+
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setResult(null);
@@ -62,11 +75,6 @@ export function KnowledgeRetrievalTestPanel({
       setError('请输入至少 2 个字符的问题。');
       return;
     }
-    if (normalizedUserId && !UUID_PATTERN.test(normalizedUserId)) {
-      setError('模拟用户 ID 必须是有效的 UUID。');
-      return;
-    }
-
     setSubmitting(true);
     setError(null);
     try {
@@ -116,12 +124,15 @@ export function KnowledgeRetrievalTestPanel({
         </label>
         <div className="form-grid two">
           <label>
-            <span>模拟用户 ID（可选）</span>
-            <input
-              value={userId}
-              onChange={(event) => setUserId(event.target.value)}
-              placeholder="留空时使用当前管理员"
-            />
+            <span>以哪位成员的权限测试（可选）</span>
+            <select value={userId} onChange={(event) => setUserId(event.target.value)}>
+              <option value="">当前管理员</option>
+              {members.map((member) => (
+                <option key={member.id} value={member.id}>
+                  {member.displayName} · {member.email}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             <span>最多返回</span>

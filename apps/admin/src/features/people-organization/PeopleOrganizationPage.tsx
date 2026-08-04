@@ -1,8 +1,17 @@
-import type { CompetencyCategory, PeopleOrganizationOverview } from '@enterprise/contracts';
+import type {
+  CompetencyCategory,
+  MetricDefinition,
+  Objective,
+  PeopleOrganizationOverview,
+  RoleAssignment,
+} from '@enterprise/contracts';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
+import { listRoleAssignments } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
+import { EntityMultiPicker, EntitySelect, type EntityOption } from '@/components/EntityPicker';
 import { ErrorState, LoadingPanel, Notice } from '@/components/ui';
+import { listMetricDefinitions, listObjectives } from '@/features/business-semantics/api';
 
 import {
   createCompetencyDefinition,
@@ -25,9 +34,13 @@ export function PeopleOrganizationPage(): ReactNode {
   const [overview, setOverview] = useState<PeopleOrganizationOverview | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+  const [referencesLoading, setReferencesLoading] = useState(true);
+  const [objectives, setObjectives] = useState<readonly Objective[]>([]);
+  const [roleAssignments, setRoleAssignments] = useState<readonly RoleAssignment[]>([]);
+  const [metricDefinitions, setMetricDefinitions] = useState<readonly MetricDefinition[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
   const [competency, setCompetency] = useState({
-    code: '',
     name: '',
     category: 'SKILL' as CompetencyCategory,
     description: '',
@@ -35,12 +48,13 @@ export function PeopleOrganizationPage(): ReactNode {
   const [change, setChange] = useState({
     type: 'ROLE_REASSIGNMENT' as const,
     subjectId: '',
+    replacementAssignmentId: '',
+    retainOpenTasks: true,
+    handoverNote: '',
     effectiveAt: '',
     reason: '',
-    proposedChange: '{\n  "from": "",\n  "to": ""\n}',
   });
   const [team, setTeam] = useState({
-    code: '',
     name: '',
     objectiveId: '',
     objectiveVersion: '1',
@@ -48,7 +62,7 @@ export function PeopleOrganizationPage(): ReactNode {
     solutionRoleAssignmentId: '',
     deliveryRoleAssignmentId: '',
     arbiterRoleAssignmentId: '',
-    metricDefinitionIds: '',
+    metricDefinitionIds: [] as string[],
   });
 
   useEffect(() => {
@@ -62,15 +76,59 @@ export function PeopleOrganizationPage(): ReactNode {
     return () => controller.abort();
   }, [reloadKey]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setReferencesLoading(true);
+    setReferenceError(null);
+    void Promise.all([
+      listObjectives(controller.signal),
+      listRoleAssignments(controller.signal),
+      listMetricDefinitions(controller.signal),
+    ])
+      .then(([loadedObjectives, loadedAssignments, loadedMetrics]) => {
+        setObjectives(loadedObjectives);
+        setRoleAssignments(loadedAssignments.items);
+        setMetricDefinitions(loadedMetrics);
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) setReferenceError(messageFromError(caught));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReferencesLoading(false);
+      });
+    return () => controller.abort();
+  }, [reloadKey]);
+
+  const objectiveOptions = objectives.map<EntityOption>((objective) => ({
+    id: objective.id,
+    label: objective.name,
+    description: `${objective.code} · v${objective.version} · ${objective.status}`,
+    disabled: objective.status !== 'ACTIVE',
+  }));
+  const assignmentOptions = roleAssignments.map<EntityOption>((assignment) => ({
+    id: assignment.id,
+    label: `${assignment.assignee.displayName} · ${assignment.agent.template.name}`,
+    description: `${assignment.key} · ${assignment.status}`,
+    disabled: assignment.status !== 'ACTIVE',
+  }));
+  const metricOptions = metricDefinitions.map<EntityOption>((metric) => ({
+    id: metric.id,
+    label: metric.name,
+    description: `${metric.code} · ${metric.unit} · ${metric.status}`,
+    disabled: metric.status !== 'ACTIVE',
+  }));
+
   const submitCompetency = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setError(null);
     try {
       const created = await createCompetencyDefinition({
-        ...competency,
+        name: competency.name,
+        category: competency.category,
+        description: competency.description,
         idempotencyKey: crypto.randomUUID(),
       });
-      setCompetency({ code: '', name: '', category: 'SKILL', description: '' });
+      setCompetency({ name: '', category: 'SKILL', description: '' });
       setNotice(`能力项 ${created.code} 已创建。下一步请建立带行为锚点的版本并由独立审核人激活。`);
       setReloadKey((value) => value + 1);
     } catch (caught) {
@@ -87,7 +145,11 @@ export function PeopleOrganizationPage(): ReactNode {
         subjectId: change.subjectId,
         effectiveAt: new Date(change.effectiveAt).toISOString(),
         reason: change.reason,
-        proposedChange: JSON.parse(change.proposedChange) as Record<string, unknown>,
+        proposedChange: {
+          replacementRoleAssignmentId: change.replacementAssignmentId,
+          retainOpenTasks: change.retainOpenTasks,
+          handoverNote: change.handoverNote.trim() || null,
+        },
         idempotencyKey: crypto.randomUUID(),
       });
       setNotice(
@@ -104,7 +166,6 @@ export function PeopleOrganizationPage(): ReactNode {
     setError(null);
     try {
       const created = await createTriangleTeam({
-        code: team.code,
         name: team.name,
         objectiveId: team.objectiveId,
         objectiveVersion: Number(team.objectiveVersion),
@@ -112,10 +173,7 @@ export function PeopleOrganizationPage(): ReactNode {
         solutionRoleAssignmentId: team.solutionRoleAssignmentId,
         deliveryRoleAssignmentId: team.deliveryRoleAssignmentId,
         arbiterRoleAssignmentId: team.arbiterRoleAssignmentId,
-        metricDefinitionIds: team.metricDefinitionIds
-          .split(',')
-          .map((item) => item.trim())
-          .filter(Boolean),
+        metricDefinitionIds: [...team.metricDefinitionIds],
         healthPolicy: {
           thresholds: {
             TASK_RESPONSE_LATENCY: 24,
@@ -171,6 +229,9 @@ export function PeopleOrganizationPage(): ReactNode {
           {notice}
         </Notice>
       ) : null}
+      {referenceError ? (
+        <Notice tone="info">业务实体列表暂时无法读取，已阻止创建关联关系：{referenceError}</Notice>
+      ) : null}
       {error ? (
         <ErrorState message={error} onRetry={() => setReloadKey((value) => value + 1)} />
       ) : null}
@@ -204,18 +265,6 @@ export function PeopleOrganizationPage(): ReactNode {
             </div>
             <span className="governance-badge">人工激活</span>
           </header>
-          <label>
-            <span>能力编码</span>
-            <input
-              required
-              pattern="[A-Z0-9][A-Z0-9._-]+"
-              value={competency.code}
-              placeholder="例如 SOLUTION.DESIGN"
-              onChange={(event) =>
-                setCompetency({ ...competency, code: event.target.value.toUpperCase() })
-              }
-            />
-          </label>
           <label>
             <span>名称</span>
             <input
@@ -252,6 +301,10 @@ export function PeopleOrganizationPage(): ReactNode {
               }
             />
           </label>
+          <p className="people-form-hint">
+            系统将自动生成能力编码：
+            {peopleBusinessCode('COMPETENCY', competency.name || '新能力')}
+          </p>
           <button className="button primary" type="submit">
             创建能力定义
           </button>
@@ -268,31 +321,34 @@ export function PeopleOrganizationPage(): ReactNode {
             </div>
             <span className="governance-badge">三责互异</span>
           </header>
+          <label>
+            <span>团队名称</span>
+            <input
+              required
+              value={team.name}
+              onChange={(event) => setTeam({ ...team, name: event.target.value })}
+            />
+          </label>
+          <p className="people-form-hint">
+            系统将自动生成团队编码：{peopleBusinessCode('TEAM', team.name || '新团队')}
+          </p>
           <div className="people-form-row">
             <label>
-              <span>团队编码</span>
-              <input
-                required
-                value={team.code}
-                onChange={(event) => setTeam({ ...team, code: event.target.value.toUpperCase() })}
-              />
-            </label>
-            <label>
-              <span>团队名称</span>
-              <input
-                required
-                value={team.name}
-                onChange={(event) => setTeam({ ...team, name: event.target.value })}
-              />
-            </label>
-          </div>
-          <div className="people-form-row">
-            <label>
-              <span>共同客户目标 ID</span>
-              <input
+              <span>共同客户目标</span>
+              <EntitySelect
                 required
                 value={team.objectiveId}
-                onChange={(event) => setTeam({ ...team, objectiveId: event.target.value })}
+                options={objectiveOptions}
+                onChange={(objectiveId) => {
+                  const objective = objectives.find((item) => item.id === objectiveId);
+                  setTeam({
+                    ...team,
+                    objectiveId,
+                    objectiveVersion: String(objective?.version ?? 1),
+                  });
+                }}
+                placeholder={referencesLoading ? '正在读取目标…' : '选择已生效目标'}
+                disabled={referencesLoading}
               />
             </label>
             <label>
@@ -302,7 +358,8 @@ export function PeopleOrganizationPage(): ReactNode {
                 type="number"
                 min="1"
                 value={team.objectiveVersion}
-                onChange={(event) => setTeam({ ...team, objectiveVersion: event.target.value })}
+                readOnly
+                aria-readonly="true"
               />
             </label>
           </div>
@@ -316,22 +373,39 @@ export function PeopleOrganizationPage(): ReactNode {
           ).map(([field, label]) => (
             <label key={field}>
               <span>{label}</span>
-              <input
+              <EntitySelect
                 required
                 value={team[field]}
-                onChange={(event) => setTeam({ ...team, [field]: event.target.value })}
+                options={assignmentOptions}
+                onChange={(value) => setTeam({ ...team, [field]: value })}
+                placeholder="选择有效角色任命"
+                disabled={referencesLoading}
               />
             </label>
           ))}
           <label>
-            <span>共享指标 ID（逗号分隔）</span>
-            <input
-              required
+            <span>共享指标</span>
+            <EntityMultiPicker
               value={team.metricDefinitionIds}
-              onChange={(event) => setTeam({ ...team, metricDefinitionIds: event.target.value })}
+              options={metricOptions}
+              onChange={(metricDefinitionIds) => setTeam({ ...team, metricDefinitionIds })}
+              ariaLabel="共享指标"
+              disabled={referencesLoading}
             />
           </label>
-          <button className="button primary" type="submit">
+          <button
+            className="button primary"
+            type="submit"
+            disabled={
+              referencesLoading ||
+              !team.objectiveId ||
+              !team.customerRoleAssignmentId ||
+              !team.solutionRoleAssignmentId ||
+              !team.deliveryRoleAssignmentId ||
+              !team.arbiterRoleAssignmentId ||
+              team.metricDefinitionIds.length === 0
+            }
+          >
             校验并建立铁三角
           </button>
         </form>
@@ -345,13 +419,14 @@ export function PeopleOrganizationPage(): ReactNode {
             <span className="governance-badge danger">禁止自动高风险变更</span>
           </header>
           <label>
-            <span>目标对象 ID</span>
-            <input
+            <span>目标角色任命</span>
+            <EntitySelect
               required
-              type="text"
               value={change.subjectId}
-              placeholder="UUID"
-              onChange={(event) => setChange({ ...change, subjectId: event.target.value })}
+              options={assignmentOptions}
+              placeholder={referencesLoading ? '正在读取角色任命…' : '选择需要调整的角色任命'}
+              onChange={(subjectId) => setChange({ ...change, subjectId })}
+              disabled={referencesLoading}
             />
           </label>
           <label>
@@ -372,15 +447,38 @@ export function PeopleOrganizationPage(): ReactNode {
             />
           </label>
           <label>
-            <span>变更内容（JSON）</span>
-            <textarea
+            <span>调整后的角色任命</span>
+            <EntitySelect
               required
-              className="code-input"
-              value={change.proposedChange}
-              onChange={(event) => setChange({ ...change, proposedChange: event.target.value })}
+              value={change.replacementAssignmentId}
+              options={assignmentOptions.filter((option) => option.id !== change.subjectId)}
+              placeholder="选择承接该职责的角色任命"
+              onChange={(replacementAssignmentId) =>
+                setChange({ ...change, replacementAssignmentId })
+              }
+              disabled={referencesLoading}
             />
           </label>
-          <button className="button primary" type="submit">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={change.retainOpenTasks}
+              onChange={(event) => setChange({ ...change, retainOpenTasks: event.target.checked })}
+            />
+            <span>未完成任务保留并进入交接分析</span>
+          </label>
+          <label>
+            <span>交接说明（可选）</span>
+            <textarea
+              value={change.handoverNote}
+              onChange={(event) => setChange({ ...change, handoverNote: event.target.value })}
+            />
+          </label>
+          <button
+            className="button primary"
+            type="submit"
+            disabled={referencesLoading || !change.subjectId || !change.replacementAssignmentId}
+          >
             创建影响分析单
           </button>
         </form>
@@ -404,6 +502,20 @@ export function PeopleOrganizationPage(): ReactNode {
       </section>
     </section>
   );
+}
+
+export function peopleBusinessCode(prefix: string, name: string): string {
+  const readable = name
+    .normalize('NFKD')
+    .replace(/\p{Mark}+/gu, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, '.')
+    .replace(/^\.+|\.+$/gu, '');
+  const fallback = [...name.trim()]
+    .map((character) => character.codePointAt(0)?.toString(36).toUpperCase() ?? '')
+    .filter(Boolean)
+    .join('.');
+  return `${prefix}.${readable || fallback || 'UNTITLED'}`.slice(0, 100);
 }
 
 function Metric({

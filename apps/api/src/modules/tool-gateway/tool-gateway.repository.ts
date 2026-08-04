@@ -21,7 +21,8 @@ import type { TrustedRuntimePrincipal } from '../process-orchestration/applicati
 
 export interface CreateToolDefinitionInput {
   readonly principal: TrustedRuntimePrincipal;
-  readonly request: CreateToolDefinitionRequest;
+  readonly request: CreateToolDefinitionRequest & { readonly key: string };
+  readonly keyWasGenerated: boolean;
 }
 
 export interface CreateToolVersionInput {

@@ -276,6 +276,69 @@ select:focus-visible {
   gap: 18px;
 }
 
+.semantic-business-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.semantic-business-fields > label,
+.semantic-business-group {
+  min-width: 0;
+}
+
+.semantic-business-group {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 16px;
+  border: 1px solid var(--border-color, #d8e1df);
+  border-radius: 12px;
+}
+
+.semantic-business-group > legend {
+  padding: 0 6px;
+  font-weight: 700;
+}
+
+.semantic-repeatable-list {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.semantic-repeatable-item {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  background: #f7faf9;
+  border-radius: 10px;
+}
+
+.semantic-repeatable-item > .button {
+  justify-self: end;
+}
+
+.semantic-business-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.knowledge-source-more {
+  position: relative;
+}
+
+.knowledge-source-more > summary {
+  cursor: pointer;
+  color: var(--muted-text, #64726f);
+}
+
+@media (max-width: 760px) {
+  .semantic-business-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .form-grid {
   display: grid;
   gap: 16px;
@@ -301,6 +364,136 @@ select:focus-visible {
   color: #31433f;
   font-size: 13px;
   font-weight: 650;
+}
+
+.entity-multi-picker,
+.tag-input {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.entity-picker-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.entity-picker-search input,
+.tag-input > input {
+  min-height: 34px;
+  padding: 6px 9px;
+  border-color: transparent;
+  background: var(--surface-soft);
+}
+
+.entity-picker-search small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.entity-picker-options {
+  display: grid;
+  max-height: 180px;
+  gap: 4px;
+  overflow-y: auto;
+}
+
+.entity-picker-options > label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.entity-picker-options > label:hover {
+  background: var(--surface-soft);
+}
+
+.entity-picker-options input {
+  width: auto;
+  margin-top: 2px;
+}
+
+.entity-picker-options label > span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.entity-picker-options strong {
+  font-size: 12px;
+}
+
+.entity-picker-options small,
+.entity-picker-options > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.tag-input-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tag-input-values > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.tag-input-values button {
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: inherit;
+  background: rgb(8 127 115 / 10%);
+  cursor: pointer;
+}
+
+.form-advanced-disclosure {
+  min-width: 0;
+  padding: 11px 13px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+
+.form-advanced-disclosure > summary {
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.form-advanced-disclosure[open] > summary {
+  margin-bottom: 10px;
+  color: var(--ink);
+}
+
+.form-advanced-disclosure > p {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 input,
@@ -637,6 +830,66 @@ textarea::placeholder {
   border-top: 1px solid rgb(220 252 246 / 9%);
 }
 
+.sidebar-account-menu {
+  position: relative;
+}
+
+.sidebar-account-menu > summary {
+  cursor: pointer;
+  list-style: none;
+}
+
+.sidebar-account-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sidebar-account-menu > summary:hover {
+  background: rgb(177 244 233 / 7%);
+}
+
+.account-menu-indicator {
+  color: #87aaa5;
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 1px;
+}
+
+.sidebar-account-popover {
+  position: absolute;
+  z-index: 40;
+  right: 14px;
+  bottom: calc(100% - 4px);
+  left: 14px;
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgb(212 240 235 / 12%);
+  border-radius: 11px;
+  background: #123f40;
+  box-shadow: 0 18px 38px rgb(2 21 22 / 36%);
+}
+
+.sidebar-account-popover button {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  color: #c4ddd9;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sidebar-account-popover button:hover {
+  color: #f3fffc;
+  background: rgb(177 244 233 / 9%);
+}
+
 .avatar {
   display: grid;
   width: 34px;
@@ -706,7 +959,7 @@ textarea::placeholder {
   display: flex;
   height: 68px;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 0 clamp(22px, 3.5vw, 50px);
   border-bottom: 1px solid var(--line);
   background: rgb(255 255 255 / 90%);
@@ -767,6 +1020,52 @@ textarea::placeholder {
   width: min(100%, 1500px);
   margin: 0 auto;
   padding: 36px clamp(22px, 3.5vw, 50px) 60px;
+}
+
+.admin-secondary-nav {
+  display: flex;
+  gap: 8px;
+  margin: -8px 0 28px;
+  padding: 6px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: rgb(255 255 255 / 76%);
+  box-shadow: var(--shadow-sm);
+}
+
+.admin-secondary-nav button {
+  display: grid;
+  min-width: max-content;
+  gap: 2px;
+  padding: 9px 13px;
+  border: 0;
+  border-radius: 9px;
+  color: var(--muted);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.admin-secondary-nav button:hover {
+  color: var(--ink);
+  background: var(--surface-soft);
+}
+
+.admin-secondary-nav button.active {
+  color: var(--brand-dark);
+  background: var(--brand-soft);
+  box-shadow: inset 0 0 0 1px rgb(8 127 115 / 10%);
+}
+
+.admin-secondary-nav strong {
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.admin-secondary-nav small {
+  color: #80908c;
+  font-size: 9px;
 }
 
 .page-section {
@@ -3335,6 +3634,21 @@ tbody tr:hover {
 .agent-knowledge-options legend {
   padding: 0 6px;
   font-weight: 700;
+}
+
+.agent-governed-configuration {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color, #dfe7e5);
+  border-radius: 12px;
+  background: #f7fbfa;
+}
+
+.agent-governed-configuration p {
+  margin: 5px 0 0;
 }
 
 .agent-knowledge-option {

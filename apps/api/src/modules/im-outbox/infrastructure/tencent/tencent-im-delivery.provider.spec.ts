@@ -329,6 +329,7 @@ function messageEvent(overrides: Partial<MessageCreatedDelivery> = {}): MessageC
     eventId: '018f5fc1-34e8-7d72-bd0d-a134f956b9fe',
     tenantId: '00000000-0000-7000-8000-000000000001',
     eventType: 'message.created.v1',
+    conversationType: 'direct',
     messageId: '00000000-0000-7000-8000-000000000501',
     conversationId: '00000000-0000-7000-8000-000000000401',
     sender: { type: 'user', id: 'user-sender' },

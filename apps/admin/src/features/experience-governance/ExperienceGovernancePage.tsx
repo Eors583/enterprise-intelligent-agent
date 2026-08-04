@@ -1,19 +1,34 @@
 import type {
+  AdminOrganizationResponse,
   CreateExperienceCandidateRequest,
+  Deliverable,
+  Evidence,
   ExperienceCandidate,
   ExperienceKnowledgeProjection,
   ExperienceTransitionRequest,
+  KnowledgeBase,
   PrepareExperienceKnowledgeProjectionRequest,
+  RoleBlueprint,
+  Task,
 } from '@enterprise/contracts';
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
   createExperienceCandidate,
+  getOrganization,
   getExperienceKnowledgeProjection,
+  listKnowledgeBases,
+  listRoleBlueprints,
   listExperienceCandidates,
   prepareExperienceKnowledgeProjection,
   transitionExperienceCandidate,
 } from '@/api/admin-api';
+import {
+  EntityMultiPicker,
+  EntitySelect,
+  TagInput,
+  type EntityOption,
+} from '@/components/EntityPicker';
 import {
   EmptyState,
   ErrorState,
@@ -23,6 +38,7 @@ import {
   Spinner,
   StatusPill,
 } from '@/components/ui';
+import { listEvidence, listTaskDeliverables, listTasks } from '@/features/business-semantics/api';
 
 import {
   EXPERIENCE_STAGES,
@@ -32,8 +48,6 @@ import {
   experienceProgress,
   experienceStatusLabel,
   formatExperienceDate,
-  sha256Hex,
-  splitIdentifiers,
   transitionPayloadTemplate,
   type ExperienceAction,
 } from './experience-governance-view';
@@ -473,31 +487,88 @@ function CreateExperienceDialog({
 }): ReactNode {
   const [title, setTitle] = useState('');
   const [sourceTaskId, setSourceTaskId] = useState('');
-  const [deliverableIds, setDeliverableIds] = useState('');
-  const [evidenceIds, setEvidenceIds] = useState('');
+  const [deliverableIds, setDeliverableIds] = useState<string[]>([]);
+  const [evidenceIds, setEvidenceIds] = useState<string[]>([]);
   const [summary, setSummary] = useState('');
-  const [labels, setLabels] = useState('');
+  const [labels, setLabels] = useState<string[]>([]);
   const [sensitivity, setSensitivity] =
     useState<CreateExperienceCandidateRequest['sensitivity']>('INTERNAL');
+  const [tasks, setTasks] = useState<readonly Task[]>([]);
+  const [deliverables, setDeliverables] = useState<readonly Deliverable[]>([]);
+  const [evidence, setEvidence] = useState<readonly Evidence[]>([]);
+  const [referencesLoading, setReferencesLoading] = useState(true);
+  const [referencesError, setReferencesError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReferencesLoading(true);
+    setReferencesError(null);
+    void Promise.all([listTasks(controller.signal), listEvidence(controller.signal)])
+      .then(([loadedTasks, loadedEvidence]) => {
+        setTasks(loadedTasks);
+        setEvidence(loadedEvidence);
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) setReferencesError(experienceErrorMessage(caught));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReferencesLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (!sourceTaskId) {
+      setDeliverables([]);
+      setDeliverableIds([]);
+      return;
+    }
+    const controller = new AbortController();
+    void listTaskDeliverables(sourceTaskId, controller.signal)
+      .then((items) => {
+        setDeliverables(items);
+        setDeliverableIds((current) =>
+          current.filter((id) => items.some((item) => item.id === id)),
+        );
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) setReferencesError(experienceErrorMessage(caught));
+      });
+    return () => controller.abort();
+  }, [sourceTaskId]);
+
+  const taskOptions = tasks.map<EntityOption>((task) => ({
+    id: task.id,
+    label: task.title,
+    description: `${task.code} · ${task.status}`,
+  }));
+  const deliverableOptions = deliverables.map<EntityOption>((deliverable) => ({
+    id: deliverable.id,
+    label: deliverable.title,
+    description: `${deliverable.code} · ${deliverable.status}`,
+  }));
+  const evidenceOptions = evidence.map<EntityOption>((item) => ({
+    id: item.id,
+    label: item.summary,
+    description: `${item.code} · ${item.trustLevel} · ${item.status}`,
+    disabled: item.status !== 'ACTIVE',
+  }));
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setSaving(true);
     setError(null);
     try {
-      const sourceEvidenceIds = splitIdentifiers(evidenceIds);
+      const sourceEvidenceIds = [...evidenceIds];
       const input: CreateExperienceCandidateRequest = {
         title,
         sourceTaskId,
-        sourceDeliverableIds: splitIdentifiers(deliverableIds),
+        sourceDeliverableIds: [...deliverableIds],
         sourceEvidenceIds,
-        rawInputHash: await sha256Hex(
-          JSON.stringify({ title, sourceTaskId, deliverableIds, sourceEvidenceIds, summary }),
-        ),
         candidateSummary: summary,
-        permissionLabels: splitIdentifiers(labels),
+        permissionLabels: [...labels],
         sensitivity,
         idempotencyKey: crypto.randomUUID(),
       };
@@ -528,27 +599,36 @@ function CreateExperienceDialog({
           />
         </label>
         <label>
-          <span>来源任务 ID</span>
-          <input
+          <span>来源任务</span>
+          <EntitySelect
             required
             value={sourceTaskId}
-            onChange={(event) => setSourceTaskId(event.target.value)}
+            options={taskOptions}
+            onChange={setSourceTaskId}
+            placeholder={referencesLoading ? '正在读取任务…' : '选择来源任务'}
+            disabled={referencesLoading}
           />
         </label>
         <div className="experience-form-grid">
           <label>
-            <span>交付物 ID（逗号或换行分隔）</span>
-            <textarea
+            <span>来源交付物</span>
+            <EntityMultiPicker
               value={deliverableIds}
-              onChange={(event) => setDeliverableIds(event.target.value)}
+              options={deliverableOptions}
+              onChange={setDeliverableIds}
+              ariaLabel="来源交付物"
+              emptyText={sourceTaskId ? '该任务暂无交付物' : '请先选择来源任务'}
+              disabled={!sourceTaskId}
             />
           </label>
           <label>
-            <span>证据 ID（至少一条）</span>
-            <textarea
-              required
+            <span>可信证据（至少一条）</span>
+            <EntityMultiPicker
               value={evidenceIds}
-              onChange={(event) => setEvidenceIds(event.target.value)}
+              options={evidenceOptions}
+              onChange={setEvidenceIds}
+              ariaLabel="可信证据"
+              disabled={referencesLoading}
             />
           </label>
         </div>
@@ -565,9 +645,10 @@ function CreateExperienceDialog({
         <div className="experience-form-grid">
           <label>
             <span>权限标签</span>
-            <input
+            <TagInput
               value={labels}
-              onChange={(event) => setLabels(event.target.value)}
+              onChange={setLabels}
+              ariaLabel="权限标签"
               placeholder="delivery, internal"
             />
           </label>
@@ -584,12 +665,17 @@ function CreateExperienceDialog({
             </select>
           </label>
         </div>
+        {referencesError ? <FieldError message={referencesError} /> : null}
         <FieldError message={error} />
         <div className="modal-actions">
           <button className="button secondary" type="button" disabled={saving} onClick={onClose}>
             取消
           </button>
-          <button className="button primary" type="submit" disabled={saving}>
+          <button
+            className="button primary"
+            type="submit"
+            disabled={saving || !sourceTaskId || evidenceIds.length === 0}
+          >
             {saving ? <Spinner label="正在登记…" /> : '登记候选'}
           </button>
         </div>
@@ -608,11 +694,60 @@ function PrepareExperienceProjectionDialog({
   onSaved: (projection: ExperienceKnowledgeProjection) => void;
 }): ReactNode {
   const [knowledgeBaseId, setKnowledgeBaseId] = useState('');
-  const [roleTemplateIds, setRoleTemplateIds] = useState('');
-  const [organizationUnitIds, setOrganizationUnitIds] = useState('');
+  const [roleTemplateIds, setRoleTemplateIds] = useState<string[]>([]);
+  const [organizationUnitIds, setOrganizationUnitIds] = useState<string[]>([]);
   const [title, setTitle] = useState(`已验证经验 ${candidate.id.slice(0, 8)}`);
+  const [references, setReferences] = useState<{
+    knowledgeBases: readonly KnowledgeBase[];
+    roleBlueprints: readonly RoleBlueprint[];
+    organization: AdminOrganizationResponse | null;
+  }>({ knowledgeBases: [], roleBlueprints: [], organization: null });
+  const [referencesLoading, setReferencesLoading] = useState(true);
+  const [referencesError, setReferencesError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReferencesLoading(true);
+    void Promise.all([
+      listKnowledgeBases(controller.signal),
+      listRoleBlueprints(controller.signal),
+      getOrganization(controller.signal),
+    ])
+      .then(([knowledgeBases, roleBlueprints, organization]) => {
+        setReferences({
+          knowledgeBases: knowledgeBases.items,
+          roleBlueprints: roleBlueprints.items,
+          organization,
+        });
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) setReferencesError(experienceErrorMessage(caught));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setReferencesLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
+  const knowledgeBaseOptions = references.knowledgeBases.map<EntityOption>((item) => ({
+    id: item.id,
+    label: item.name,
+    description: `${item.key} · ${item.status}`,
+  }));
+  const roleOptions = references.roleBlueprints.map<EntityOption>((item) => ({
+    id: item.id,
+    label: item.name,
+    description: `${item.key} · r${item.revision}`,
+  }));
+  const organizationOptions =
+    references.organization?.orgUnits.map<EntityOption>((item) => ({
+      id: item.id,
+      label: item.name,
+      description: item.status === 'ACTIVE' ? '启用部门' : '已归档',
+      disabled: item.status !== 'ACTIVE',
+    })) ?? [];
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
@@ -622,8 +757,8 @@ function PrepareExperienceProjectionDialog({
       const input: PrepareExperienceKnowledgeProjectionRequest = {
         expectedRevision: candidate.revision,
         knowledgeBaseId: knowledgeBaseId.trim(),
-        targetRoleTemplateIds: splitIdentifiers(roleTemplateIds),
-        targetOrgUnitIds: splitIdentifiers(organizationUnitIds),
+        targetRoleTemplateIds: [...roleTemplateIds],
+        targetOrgUnitIds: [...organizationUnitIds],
         ...(title.trim() === '' ? {} : { title: title.trim() }),
         idempotencyKey: crypto.randomUUID(),
       };
@@ -654,12 +789,14 @@ function PrepareExperienceProjectionDialog({
           </span>
         </div>
         <label>
-          <span>目标知识库 ID</span>
-          <input
+          <span>目标知识库</span>
+          <EntitySelect
             required
             value={knowledgeBaseId}
-            onChange={(event) => setKnowledgeBaseId(event.target.value)}
-            placeholder="00000000-0000-0000-0000-000000000000"
+            options={knowledgeBaseOptions}
+            onChange={setKnowledgeBaseId}
+            placeholder={referencesLoading ? '正在读取知识库…' : '选择目标知识库'}
+            disabled={referencesLoading}
           />
         </label>
         <label>
@@ -673,28 +810,41 @@ function PrepareExperienceProjectionDialog({
         </label>
         <div className="experience-form-grid">
           <label>
-            <span>可访问角色模板 ID（逗号或换行分隔）</span>
-            <textarea
+            <span>可访问角色模板</span>
+            <EntityMultiPicker
               value={roleTemplateIds}
-              onChange={(event) => setRoleTemplateIds(event.target.value)}
-              placeholder="至少填写角色或组织范围之一"
+              options={roleOptions}
+              onChange={setRoleTemplateIds}
+              ariaLabel="可访问角色模板"
+              disabled={referencesLoading}
             />
           </label>
           <label>
-            <span>可访问组织单元 ID（逗号或换行分隔）</span>
-            <textarea
+            <span>可访问组织单元</span>
+            <EntityMultiPicker
               value={organizationUnitIds}
-              onChange={(event) => setOrganizationUnitIds(event.target.value)}
-              placeholder="至少填写角色或组织范围之一"
+              options={organizationOptions}
+              onChange={setOrganizationUnitIds}
+              ariaLabel="可访问组织单元"
+              disabled={referencesLoading}
             />
           </label>
         </div>
+        {referencesError ? <FieldError message={referencesError} /> : null}
         <FieldError message={error} />
         <div className="modal-actions">
           <button className="button secondary" type="button" disabled={saving} onClick={onClose}>
             取消
           </button>
-          <button className="button primary" type="submit" disabled={saving}>
+          <button
+            className="button primary"
+            type="submit"
+            disabled={
+              saving ||
+              !knowledgeBaseId ||
+              (roleTemplateIds.length === 0 && organizationUnitIds.length === 0)
+            }
+          >
             {saving ? <Spinner label="正在创建并索引…" /> : '创建知识版本'}
           </button>
         </div>
@@ -716,27 +866,22 @@ function ExperienceTransitionDialog({
   onClose: () => void;
   onSaved: (candidate: ExperienceCandidate) => void;
 }): ReactNode {
-  const template = useMemo(
+  const payload = useMemo(
     () =>
-      JSON.stringify(
-        action === 'PUBLISH' && projection?.status === 'PUBLISHED'
-          ? {
-              knowledgeBaseId: projection.knowledgeBaseId,
-              documentId: projection.documentId,
-              documentVersionId: projection.documentVersionId,
-              documentVersion: projection.documentVersion,
-              targetRoleTemplateIds: projection.targetRoleTemplateIds,
-              targetOrgUnitIds: projection.targetOrgUnitIds,
-              publicationHash: projection.publicationHash,
-            }
-          : transitionPayloadTemplate(action, candidate),
-        null,
-        2,
-      ),
+      action === 'PUBLISH' && projection?.status === 'PUBLISHED'
+        ? {
+            knowledgeBaseId: projection.knowledgeBaseId,
+            documentId: projection.documentId,
+            documentVersionId: projection.documentVersionId,
+            documentVersion: projection.documentVersion,
+            targetRoleTemplateIds: projection.targetRoleTemplateIds,
+            targetOrgUnitIds: projection.targetOrgUnitIds,
+            publicationHash: projection.publicationHash,
+          }
+        : transitionPayloadTemplate(action, candidate),
     [action, candidate, projection],
   );
   const [reason, setReason] = useState('');
-  const [payload, setPayload] = useState(template);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -749,7 +894,7 @@ function ExperienceTransitionDialog({
         expectedRevision: candidate.revision,
         action,
         reason,
-        payload: JSON.parse(payload) as Record<string, unknown>,
+        payload,
         idempotencyKey: crypto.randomUUID(),
       };
       onSaved(await transitionExperienceCandidate(candidate.id, input));
@@ -778,17 +923,9 @@ function ExperienceTransitionDialog({
             onChange={(event) => setReason(event.target.value)}
           />
         </label>
-        <label>
-          <span>结构化治理证据（JSON）</span>
-          <textarea
-            className="experience-json-input"
-            required
-            rows={16}
-            value={payload}
-            onChange={(event) => setPayload(event.target.value)}
-            spellCheck={false}
-          />
-        </label>
+        <Notice tone="info">
+          关联知识库、文档版本、角色和组织范围均从当前候选及已确认投影中带出，系统会自动生成治理记录。
+        </Notice>
         <FieldError message={error} />
         <div className="modal-actions">
           <button className="button secondary" type="button" disabled={saving} onClick={onClose}>

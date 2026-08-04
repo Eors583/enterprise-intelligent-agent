@@ -11,12 +11,14 @@ import {
 } from '@nestjs/common';
 import {
   createEvidenceLinkRequestSchema,
+  createEvidenceGuidedRequestSchema,
   createEvidenceRequestSchema,
   transitionEvidenceLinkRequestSchema,
   transitionEvidenceRequestSchema,
   updateEvidenceLinkRequestSchema,
   updateEvidenceRequestSchema,
   type CreateEvidenceLinkRequest,
+  type CreateEvidenceGuidedRequest,
   type CreateEvidenceRequest,
   type Evidence,
   type EvidenceLink,
@@ -94,6 +96,15 @@ export class EvidenceAdminController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<Evidence> {
     return this.semantics.createEvidence(request, idempotencyKey);
+  }
+
+  @Post('guided')
+  createGuided(
+    @Body(new SchemaValidationPipe(createEvidenceGuidedRequestSchema))
+    request: CreateEvidenceGuidedRequest,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<Evidence> {
+    return this.semantics.createGuidedEvidence(request, idempotencyKey);
   }
 
   @Patch(':id')

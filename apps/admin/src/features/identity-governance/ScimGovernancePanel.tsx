@@ -112,9 +112,7 @@ export function ScimGovernancePanel({ currentUserId }: { currentUserId: string }
         () =>
           createScimConnector({
             ...common,
-            key: String(form.get('key') ?? '')
-              .trim()
-              .toLowerCase(),
+            key: scimConnectorKey(common.displayName),
             expectedRevision: 0,
           }),
         'SCIM 连接器草稿已创建。完成最近 MFA 后提交复核。',
@@ -265,19 +263,14 @@ export function ScimGovernancePanel({ currentUserId }: { currentUserId: string }
             onSubmit={(event) => void saveConnector(event)}
           >
             <label>
-              <span>连接器标识（创建后不可修改）</span>
-              <input
-                name="key"
-                required
-                disabled={editing !== null}
-                defaultValue={editing?.key ?? ''}
-                placeholder="corporate-directory"
-              />
-            </label>
-            <label>
               <span>显示名称</span>
               <input name="displayName" required defaultValue={editing?.displayName ?? ''} />
             </label>
+            <p className="form-hint">
+              {editing === null
+                ? '连接器内部标识由系统根据名称安全生成并处理重复。'
+                : `系统标识：${editing.key}`}
+            </p>
             <label className="checkbox-row">
               <input
                 name="allowUserCreate"
@@ -490,6 +483,23 @@ export function ScimGovernancePanel({ currentUserId }: { currentUserId: string }
       ) : null}
     </article>
   );
+}
+
+export function scimConnectorKey(
+  displayName: string,
+  entropy: string = crypto.randomUUID(),
+): string {
+  const readable = displayName
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 72);
+  const suffix = entropy
+    .replace(/[^a-z0-9]/giu, '')
+    .toLowerCase()
+    .slice(0, 10);
+  return `scim-${readable || 'directory'}-${suffix || 'connector'}`;
 }
 
 function addDaysIso(days: number): string {

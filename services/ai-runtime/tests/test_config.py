@@ -107,6 +107,49 @@ def test_embedding_dimension_is_fixed_and_provider_configuration_is_complete() -
                 "AI_RUNTIME_EMBEDDING_MODEL": "embedding-model",
             }
         )
+
+
+def test_local_knowledge_drivers_use_safe_chinese_defaults_without_secrets() -> None:
+    settings = RuntimeSettings.from_env(
+        {
+            "AI_RUNTIME_EMBEDDING_DRIVER": "local_fastembed",
+            "AI_RUNTIME_RERANK_DRIVER": "local_fastembed",
+            "AI_RUNTIME_LOCAL_MODEL_CACHE_DIR": ".data/models",
+            "AI_RUNTIME_LOCAL_MODEL_THREADS": "3",
+        }
+    )
+
+    assert settings.embedding_driver == EmbeddingDriver.LOCAL_FASTEMBED
+    assert settings.embedding_model == "BAAI/bge-small-zh-v1.5"
+    assert settings.rerank_driver == RerankDriver.LOCAL_FASTEMBED
+    assert settings.rerank_model == "BAAI/bge-reranker-base"
+    assert settings.local_model_cache_dir == ".data/models"
+    assert settings.local_model_threads == 3
+    assert settings.local_model_allow_download is True
+
+
+def test_production_local_models_must_be_preprovisioned() -> None:
+    values = {
+        "AI_RUNTIME_ENVIRONMENT": "production",
+        "AI_RUNTIME_DRIVER": "openai_compatible",
+        "AI_RUNTIME_STORE_DRIVER": "postgres",
+        "AI_RUNTIME_POSTGRES_DSN": "postgresql://runtime:secret@db.example/runtime?sslmode=require",
+        "AI_RUNTIME_SERVICE_TOKEN": "runtime-service-token-at-least-32-characters",
+        "AI_RUNTIME_OPENAI_BASE_URL": "https://chat.example/v1",
+        "AI_RUNTIME_OPENAI_API_KEY": "chat-secret",
+        "AI_RUNTIME_OPENAI_MODEL": "chat-model",
+        "AI_RUNTIME_EMBEDDING_DRIVER": "local_fastembed",
+        "AI_RUNTIME_RERANK_DRIVER": "local_fastembed",
+        "AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD": "true",
+        "AI_RUNTIME_MODEL_ROUTE_CATALOG": (
+            '[{"route_key":"GENERAL.PRIMARY",'
+            '"catalog_version_id":"00000000-0000-7000-8000-000000000101",'
+            '"provider":"OPENAI_COMPATIBLE","model":"chat-model",'
+            '"credential_reference":"vault://ai/chat"}]'
+        ),
+    }
+    with pytest.raises(RuntimeConfigurationError, match="ALLOW_DOWNLOAD must be false"):
+        RuntimeSettings.from_env(values)
     with pytest.raises(RuntimeConfigurationError, match="AI_RUNTIME_RERANK_API_KEY"):
         RuntimeSettings.from_env(
             {

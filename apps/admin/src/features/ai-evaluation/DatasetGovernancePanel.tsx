@@ -1,15 +1,29 @@
 import type {
+  AdminAgent,
+  AiEvaluationBadCase,
   AiEvaluationCase,
   AiEvaluationCategory,
   AiEvaluationDataset,
   AiEvaluationDatasetVersion,
   AiEvaluationJudgeType,
   AiEvaluationMetric,
+  Evidence,
+  KnowledgeBase,
+  ProcessDefinition,
+  RoleAssignment,
+  ToolDefinition,
 } from '@enterprise/contracts';
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
+import {
+  listAgents,
+  listKnowledgeBases,
+  listRoleAssignments,
+  listToolDefinitions,
+} from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { Spinner, StatusPill } from '@/components/ui';
+import { listEvidence, listProcessDefinitions } from '@/features/business-semantics/api';
 
 import {
   annotateEvaluationCase,
@@ -17,9 +31,15 @@ import {
   createEvaluationDataset,
   createEvaluationDatasetVersion,
   listEvaluationCases,
+  listEvaluationBadCases,
   listEvaluationDatasetVersions,
   transitionEvaluationDatasetVersion,
 } from './api';
+import {
+  selectedFormValues,
+  stableEvaluationCaseKey,
+  stableEvaluationDatasetCode,
+} from './governance-form';
 import {
   datasetStatusLabel,
   EVALUATION_CATEGORIES,
@@ -44,12 +64,94 @@ export function DatasetGovernancePanel({
   const [selectedVersionId, setSelectedVersionId] = useState('');
   const [versions, setVersions] = useState<readonly AiEvaluationDatasetVersion[]>([]);
   const [cases, setCases] = useState<readonly AiEvaluationCase[]>([]);
+  const [agents, setAgents] = useState<readonly AdminAgent[]>([]);
+  const [knowledgeBases, setKnowledgeBases] = useState<readonly KnowledgeBase[]>([]);
+  const [toolDefinitions, setToolDefinitions] = useState<readonly ToolDefinition[]>([]);
+  const [roleAssignments, setRoleAssignments] = useState<readonly RoleAssignment[]>([]);
+  const [processDefinitions, setProcessDefinitions] = useState<readonly ProcessDefinition[]>([]);
+  const [evidence, setEvidence] = useState<readonly Evidence[]>([]);
+  const [badCases, setBadCases] = useState<readonly AiEvaluationBadCase[]>([]);
+  const [referencesReady, setReferencesReady] = useState(false);
+  const [caseCategory, setCaseCategory] = useState<AiEvaluationCategory>('FACTUALITY');
   const [reloadKey, setReloadKey] = useState(0);
   const [busy, setBusy] = useState(false);
 
   const selectedDataset = datasets.find(({ id }) => id === selectedDatasetId) ?? null;
   const selectedVersion = versions.find(({ id }) => id === selectedVersionId) ?? null;
+  const verifiedEvidence = evidence.filter(
+    (item) => item.status === 'ACTIVE' && item.trustLevel === 'VERIFIED',
+  );
+  const publishedAgents = agents.filter(({ versionStatus }) => versionStatus === 'PUBLISHED');
+  const publishedTools = toolDefinitions.filter(
+    (definition) => definition.status === 'PUBLISHED' && definition.currentVersionId !== null,
+  );
+  const activeAssignments = roleAssignments.filter(
+    (assignment) => assignment.status === 'ACTIVE' && assignment.roleVersionId !== undefined,
+  );
+  const publishedProcesses = processDefinitions.filter(
+    (process) => process.status === 'ACTIVE' && process.currentVersionId !== null,
+  );
+  const mappedBadCases = badCases.filter(
+    (badCase) =>
+      badCase.status === 'TRIAGED' && badCase.mappedDatasetVersionId === selectedVersionId,
+  );
+  const knowledgeVersions = knowledgeBases.flatMap((knowledgeBase) =>
+    knowledgeBase.documents.flatMap((document) => {
+      if (document.currentVersionId === null) return [];
+      const version = document.versions.find(
+        (candidate) => candidate.id === document.currentVersionId && candidate.status === 'READY',
+      );
+      return version
+        ? [
+            {
+              id: version.id,
+              label: `${knowledgeBase.name} / ${document.title} · v${version.versionNumber}`,
+            },
+          ]
+        : [];
+    }),
+  );
   const reload = (): void => setReloadKey((value) => value + 1);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReferencesReady(false);
+    void Promise.all([
+      listAgents(controller.signal),
+      listKnowledgeBases(controller.signal),
+      listToolDefinitions(controller.signal),
+      listRoleAssignments(controller.signal),
+      listProcessDefinitions(controller.signal),
+      listEvidence(controller.signal),
+      listEvaluationBadCases({ limit: 200 }, controller.signal),
+    ])
+      .then(
+        ([
+          agentResponse,
+          knowledgeResponse,
+          toolResponse,
+          assignmentResponse,
+          processResponse,
+          evidenceResponse,
+          badCaseResponse,
+        ]) => {
+          setAgents(agentResponse.items);
+          setKnowledgeBases(knowledgeResponse.items);
+          setToolDefinitions(toolResponse.items);
+          setRoleAssignments(assignmentResponse.items);
+          setProcessDefinitions(processResponse);
+          setEvidence(evidenceResponse);
+          setBadCases(badCaseResponse.items);
+          setReferencesReady(true);
+        },
+      )
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) {
+          onError(`评测引用目录加载失败：${messageFromError(caught)}`);
+        }
+      });
+    return () => controller.abort();
+  }, [onError]);
 
   useEffect(() => {
     if (preferredDatasetId && datasets.some(({ id }) => id === preferredDatasetId)) {
@@ -107,9 +209,10 @@ export function DatasetGovernancePanel({
     const data = new FormData(form);
     setBusy(true);
     try {
+      const name = text(data, 'name');
       const created = await createEvaluationDataset({
-        code: text(data, 'code').toUpperCase(),
-        name: text(data, 'name'),
+        code: stableEvaluationDatasetCode(name),
+        name,
         description: text(data, 'description'),
         idempotencyKey: crypto.randomUUID(),
       });
@@ -132,14 +235,37 @@ export function DatasetGovernancePanel({
     setBusy(true);
     try {
       const metric = text(data, 'metric') as AiEvaluationMetric;
+      const agentVersionIds = mergeUnique(
+        selectedFormValues(data, 'agentVersionIds'),
+        parseUuidList(text(data, 'agentVersionIdsOverride'), '兼容智能体版本'),
+      );
+      const knowledgeVersionIds = mergeUnique(
+        selectedFormValues(data, 'knowledgeVersionIds'),
+        parseUuidList(text(data, 'knowledgeVersionIdsOverride'), '兼容知识版本'),
+      );
+      const toolVersionIds = mergeUnique(
+        selectedFormValues(data, 'toolVersionIds'),
+        parseUuidList(text(data, 'toolVersionIdsOverride'), '兼容工具版本'),
+      );
+      const modelRoutes = parseTextList(text(data, 'modelRoutes'));
+      const promptHashes = parseTextList(text(data, 'promptHashes'));
+      if (
+        agentVersionIds.length === 0 &&
+        knowledgeVersionIds.length === 0 &&
+        toolVersionIds.length === 0 &&
+        modelRoutes.length === 0 &&
+        promptHashes.length === 0
+      ) {
+        throw new Error('请选择至少一个真实发布版本；目录缺失时只能使用高级兼容导入。');
+      }
       const created = await createEvaluationDatasetVersion(selectedDataset.id, {
         description: text(data, 'description'),
         targets: {
-          agentVersionIds: parseUuidList(text(data, 'agentVersionIds'), '智能体版本'),
-          knowledgeVersionIds: parseUuidList(text(data, 'knowledgeVersionIds'), '知识版本'),
-          toolVersionIds: parseUuidList(text(data, 'toolVersionIds'), '工具版本'),
-          modelRoutes: parseTextList(text(data, 'modelRoutes')),
-          promptHashes: parseTextList(text(data, 'promptHashes')),
+          agentVersionIds,
+          knowledgeVersionIds,
+          toolVersionIds,
+          modelRoutes,
+          promptHashes,
         },
         thresholds: [
           {
@@ -171,27 +297,47 @@ export function DatasetGovernancePanel({
     const data = new FormData(form);
     setBusy(true);
     try {
-      const sourceBadCaseId = text(data, 'sourceBadCaseId');
+      const input = text(data, 'input');
+      const expectedBehavior = text(data, 'expectedBehavior');
+      const category = text(data, 'category') as AiEvaluationCategory;
+      const selectedAssignment = activeAssignments.find(
+        ({ id }) => id === text(data, 'roleAssignmentSelection'),
+      );
+      const selectedProcessVersionId = text(data, 'processVersionSelection');
+      const sourceBadCaseId =
+        text(data, 'sourceBadCaseSelection') || text(data, 'sourceBadCaseIdOverride');
+      const requiredEvidenceIds = mergeUnique(
+        selectedFormValues(data, 'requiredEvidenceIds'),
+        parseUuidList(text(data, 'requiredEvidenceIdsOverride'), '兼容可信证据'),
+      );
       await createEvaluationCase(selectedVersion.id, {
-        caseKey: text(data, 'caseKey').toUpperCase(),
-        category: text(data, 'category') as AiEvaluationCategory,
-        input: text(data, 'input'),
+        caseKey:
+          text(data, 'caseKeyOverride').toUpperCase() ||
+          stableEvaluationCaseKey(category, input, expectedBehavior),
+        category,
+        input,
         context: {
-          roleAssignmentId: nullableUuid(data, 'roleAssignmentId'),
-          roleVersionId: nullableUuid(data, 'roleVersionId'),
+          roleAssignmentId:
+            selectedAssignment?.id ?? nullableUuid(data, 'roleAssignmentIdOverride'),
+          roleVersionId:
+            selectedAssignment?.roleVersionId ?? nullableUuid(data, 'roleVersionIdOverride'),
           objectiveId: null,
           objectiveVersion: null,
-          processVersionId: nullableUuid(data, 'processVersionId'),
+          processVersionId:
+            selectedProcessVersionId || nullableUuid(data, 'processVersionIdOverride'),
           permissionLabels: parseTextList(text(data, 'permissionLabels')),
-          knowledgeVersionIds: parseUuidList(
-            text(data, 'contextKnowledgeVersionIds'),
-            '上下文知识版本',
+          knowledgeVersionIds: mergeUnique(
+            selectedFormValues(data, 'contextKnowledgeVersionIds'),
+            parseUuidList(text(data, 'contextKnowledgeVersionIdsOverride'), '兼容上下文知识版本'),
           ),
-          toolVersionIds: parseUuidList(text(data, 'contextToolVersionIds'), '上下文工具版本'),
+          toolVersionIds: mergeUnique(
+            selectedFormValues(data, 'contextToolVersionIds'),
+            parseUuidList(text(data, 'contextToolVersionIdsOverride'), '兼容上下文工具版本'),
+          ),
           structuredContext: {},
         },
-        expectedBehavior: text(data, 'expectedBehavior'),
-        requiredEvidenceIds: parseUuidList(text(data, 'requiredEvidenceIds'), '可信证据'),
+        expectedBehavior,
+        requiredEvidenceIds,
         forbiddenBehaviors: parseTextList(text(data, 'forbiddenBehaviors')),
         scoring: {
           judgeTypes: [text(data, 'judgeType') as AiEvaluationJudgeType],
@@ -227,7 +373,10 @@ export function DatasetGovernancePanel({
         label,
         expectedScore: label === 'ABSTAIN' ? null : Number(text(data, 'expectedScore')),
         rationale: text(data, 'rationale'),
-        evidenceIds: parseUuidList(text(data, 'evidenceIds'), '标注证据'),
+        evidenceIds: mergeUnique(
+          selectedFormValues(data, 'evidenceIds'),
+          parseUuidList(text(data, 'evidenceIdsOverride'), '兼容标注证据'),
+        ),
         expectedRevision: 0,
         idempotencyKey: crypto.randomUUID(),
       });
@@ -256,7 +405,10 @@ export function DatasetGovernancePanel({
           expectedRevision,
           idempotencyKey,
           reason: text(form, 'reason'),
-          evidenceIds: parseUuidList(text(form, 'evidenceIds'), '审核证据'),
+          evidenceIds: mergeUnique(
+            selectedFormValues(form, 'evidenceIds'),
+            parseUuidList(text(form, 'evidenceIdsOverride'), '兼容审核证据'),
+          ),
         });
       } else if (action === 'RETIRE') {
         await transitionEvaluationDatasetVersion(selectedVersion.id, {
@@ -296,12 +448,9 @@ export function DatasetGovernancePanel({
         <form className="card evaluation-form" onSubmit={(event) => void createDataset(event)}>
           <h3>创建数据集</h3>
           <label>
-            数据集代码
-            <input name="code" required placeholder="ROLE.REGRESSION" />
-          </label>
-          <label>
             名称
             <input name="name" required />
+            <small>数据集代码会按名称稳定生成。</small>
           </label>
           <label>
             说明
@@ -382,28 +531,60 @@ export function DatasetGovernancePanel({
               版本说明
               <textarea name="description" required rows={2} />
             </label>
-            <div className="evaluation-two-column">
+            <div className="evaluation-three-column">
               <label>
-                智能体 / 角色版本 ID（逗号或换行）
-                <textarea name="agentVersionIds" rows={2} />
+                已发布智能体版本
+                <select
+                  name="agentVersionIds"
+                  multiple
+                  size={Math.min(5, publishedAgents.length + 1)}
+                >
+                  {publishedAgents.map((agent) => (
+                    <option key={agent.versionId} value={agent.versionId}>
+                      {agent.name} · v{agent.version}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
-                知识版本 ID（逗号或换行）
-                <textarea name="knowledgeVersionIds" rows={2} />
+                当前 READY 知识版本
+                <select
+                  name="knowledgeVersionIds"
+                  multiple
+                  size={Math.min(5, knowledgeVersions.length + 1)}
+                >
+                  {knowledgeVersions.map((version) => (
+                    <option key={version.id} value={version.id}>
+                      {version.label}
+                    </option>
+                  ))}
+                </select>
               </label>
               <label>
-                工具版本 ID
-                <textarea name="toolVersionIds" rows={2} />
-              </label>
-              <label>
-                模型路由
-                <textarea name="modelRoutes" rows={2} />
+                当前已发布工具版本
+                <select
+                  name="toolVersionIds"
+                  multiple
+                  size={Math.min(5, publishedTools.length + 1)}
+                >
+                  {publishedTools.map((tool) => (
+                    <option key={tool.currentVersionId!} value={tool.currentVersionId!}>
+                      {tool.name} · v{tool.currentVersion}
+                    </option>
+                  ))}
+                </select>
               </label>
             </div>
-            <label>
-              提示词 SHA-256（可选）
-              <textarea name="promptHashes" rows={2} />
-            </label>
+            {!referencesReady ? (
+              <p>真实发布目录尚未加载完成；创建操作将被阻断。</p>
+            ) : publishedAgents.length + knowledgeVersions.length + publishedTools.length === 0 ? (
+              <p>当前没有可选的已发布版本。请先发布业务对象，或使用高级兼容导入。</p>
+            ) : (
+              <small>按住 Ctrl/Cmd 可多选；这里只列出当前真实发布或 READY 版本。</small>
+            )}
+            <small>
+              模型、智能体、知识和工具版本只从当前已发布目录选择，旧对象兼容请通过迁移任务处理。
+            </small>
             <div className="evaluation-three-column">
               <label>
                 必需指标
@@ -460,22 +641,21 @@ export function DatasetGovernancePanel({
           <details className="card evaluation-disclosure" open>
             <summary>新增受控评测用例</summary>
             <form className="evaluation-form" onSubmit={(event) => void createCase(event)}>
-              <div className="evaluation-two-column">
-                <label>
-                  用例 Key
-                  <input name="caseKey" required />
-                </label>
-                <label>
-                  类别
-                  <select name="category" defaultValue="FACTUALITY">
-                    {EVALUATION_CATEGORIES.map((category) => (
-                      <option key={category.value} value={category.value}>
-                        {category.label}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+              <label>
+                类别
+                <select
+                  name="category"
+                  value={caseCategory}
+                  onChange={(event) => setCaseCategory(event.target.value as AiEvaluationCategory)}
+                >
+                  {EVALUATION_CATEGORIES.map((category) => (
+                    <option key={category.value} value={category.value}>
+                      {category.label}
+                    </option>
+                  ))}
+                </select>
+                <small>用例 Key 会根据类别、输入和预期行为稳定生成。</small>
+              </label>
               <label>
                 输入
                 <textarea name="input" required rows={3} />
@@ -485,12 +665,21 @@ export function DatasetGovernancePanel({
                 <textarea name="expectedBehavior" required rows={3} />
               </label>
               <label>
-                已验证证据 ID
-                <textarea
+                已验证证据
+                <select
                   name="requiredEvidenceIds"
-                  rows={2}
-                  placeholder="事实、引用、目标对齐用例必须填写"
-                />
+                  multiple
+                  size={Math.min(6, verifiedEvidence.length + 1)}
+                >
+                  {verifiedEvidence.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.code} · {item.summary}
+                    </option>
+                  ))}
+                </select>
+                {verifiedEvidence.length === 0 ? (
+                  <small>当前没有 ACTIVE + VERIFIED 证据；事实、引用和目标对齐用例将被阻断。</small>
+                ) : null}
               </label>
               <label>
                 禁止行为
@@ -525,33 +714,69 @@ export function DatasetGovernancePanel({
                 <summary>受控上下文（可选）</summary>
                 <div className="evaluation-form">
                   <label>
-                    角色任命 ID
-                    <input name="roleAssignmentId" />
+                    当前角色任命与版本
+                    <select name="roleAssignmentSelection" defaultValue="">
+                      <option value="">不绑定角色上下文</option>
+                      {activeAssignments.map((assignment) => (
+                        <option key={assignment.id} value={assignment.id}>
+                          {assignment.assignee.displayName} · {assignment.agent.name} · v
+                          {assignment.agent.version}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label>
-                    角色版本 ID
-                    <input name="roleVersionId" />
+                    当前流程版本
+                    <select name="processVersionSelection" defaultValue="">
+                      <option value="">不绑定流程上下文</option>
+                      {publishedProcesses.map((process) => (
+                        <option key={process.currentVersionId!} value={process.currentVersionId!}>
+                          {process.code} · {process.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <small>权限范围从所选角色、流程和知识版本继承，不能在评测用例中手工扩大。</small>
+                  <label>
+                    上下文知识版本
+                    <select
+                      name="contextKnowledgeVersionIds"
+                      multiple
+                      size={Math.min(5, knowledgeVersions.length + 1)}
+                    >
+                      {knowledgeVersions.map((version) => (
+                        <option key={version.id} value={version.id}>
+                          {version.label}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label>
-                    流程版本 ID
-                    <input name="processVersionId" />
+                    上下文工具版本
+                    <select
+                      name="contextToolVersionIds"
+                      multiple
+                      size={Math.min(5, publishedTools.length + 1)}
+                    >
+                      {publishedTools.map((tool) => (
+                        <option key={tool.currentVersionId!} value={tool.currentVersionId!}>
+                          {tool.name} · v{tool.currentVersion}
+                        </option>
+                      ))}
+                    </select>
                   </label>
                   <label>
-                    权限标签
-                    <input name="permissionLabels" />
+                    已分流到当前草稿的坏样本
+                    <select name="sourceBadCaseSelection" defaultValue="">
+                      <option value="">不关联坏样本</option>
+                      {mappedBadCases.map((badCase) => (
+                        <option key={badCase.id} value={badCase.id}>
+                          {badCase.category} · {badCase.sanitizedInput.slice(0, 48)}
+                        </option>
+                      ))}
+                    </select>
                   </label>
-                  <label>
-                    上下文知识版本 ID
-                    <textarea name="contextKnowledgeVersionIds" rows={2} />
-                  </label>
-                  <label>
-                    上下文工具版本 ID
-                    <textarea name="contextToolVersionIds" rows={2} />
-                  </label>
-                  <label>
-                    已分流坏样本 ID
-                    <input name="sourceBadCaseId" />
-                  </label>
+                  <small>上下文只绑定当前可选的角色、流程、知识、工具和坏样本记录。</small>
                 </div>
               </details>
               <button className="button primary" type="submit" disabled={busy}>
@@ -599,8 +824,14 @@ export function DatasetGovernancePanel({
                 <textarea name="rationale" required rows={2} />
               </label>
               <label>
-                已验证标注证据 ID
-                <textarea name="evidenceIds" required rows={2} />
+                已验证标注证据
+                <select name="evidenceIds" multiple size={Math.min(6, verifiedEvidence.length + 1)}>
+                  {verifiedEvidence.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.code} · {item.summary}
+                    </option>
+                  ))}
+                </select>
               </label>
               <button
                 className="button primary"
@@ -617,6 +848,7 @@ export function DatasetGovernancePanel({
       {selectedVersion ? (
         <VersionTransition
           version={selectedVersion}
+          evidence={verifiedEvidence}
           busy={busy}
           onTransition={(action, data) => void transition(action, data)}
         />
@@ -629,10 +861,12 @@ export function DatasetGovernancePanel({
 
 function VersionTransition({
   version,
+  evidence,
   busy,
   onTransition,
 }: {
   version: AiEvaluationDatasetVersion;
+  evidence: readonly Evidence[];
   busy: boolean;
   onTransition: (
     action: 'SUBMIT' | 'APPROVE' | 'REJECT' | 'PUBLISH' | 'RETIRE',
@@ -659,8 +893,14 @@ function VersionTransition({
           <textarea name="reason" required rows={2} />
         </label>
         <label>
-          已验证审核证据 ID
-          <textarea name="evidenceIds" required rows={2} />
+          已验证审核证据
+          <select name="evidenceIds" multiple size={Math.min(6, evidence.length + 1)}>
+            {evidence.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.code} · {item.summary}
+              </option>
+            ))}
+          </select>
         </label>
         <div className="evaluation-actions">
           <button
@@ -739,4 +979,8 @@ function nullableUuid(data: FormData, key: string): string | null {
 function requiredData(data: FormData | undefined): FormData {
   if (!data) throw new Error('缺少受控状态流转表单。');
   return data;
+}
+
+function mergeUnique(...groups: readonly string[][]): string[] {
+  return [...new Set(groups.flat())];
 }

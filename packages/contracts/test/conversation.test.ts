@@ -6,7 +6,10 @@ import {
   createMessageRequestSchema,
   knowledgeCitationDetailSchema,
   knowledgeCitationOriginalQuerySchema,
+  messageListQuerySchema,
   textMessageContentSchema,
+  updateConversationStateRequestSchema,
+  updateGroupMembersRequestSchema,
   upsertAnswerFeedbackRequestSchema,
 } from '../src/conversation.js';
 
@@ -62,6 +65,7 @@ describe('conversation write contracts', () => {
       type: 'direct',
       target: { type: 'agent_pair', agentIds: [AGENT_ID, SECOND_AGENT_ID] },
     });
+    if (parsed.type !== 'direct') throw new Error('Expected a direct conversation.');
     expect(parsed.target).toMatchObject({ type: 'agent_pair', turnLimit: 4 });
 
     for (const turnLimit of [2, 8]) {
@@ -84,6 +88,55 @@ describe('conversation write contracts', () => {
       createConversationRequestSchema.safeParse({
         type: 'direct',
         target: { type: 'agent_pair', agentIds: [AGENT_ID, AGENT_ID] },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('accepts a named group with unique members and optional Agents', () => {
+    expect(
+      createConversationRequestSchema.parse({
+        type: 'group',
+        title: '产品交付群',
+        memberUserIds: [USER_ID],
+        agentIds: [AGENT_ID],
+      }),
+    ).toEqual({
+      type: 'group',
+      title: '产品交付群',
+      memberUserIds: [USER_ID],
+      agentIds: [AGENT_ID],
+    });
+    expect(
+      createConversationRequestSchema.safeParse({
+        type: 'group',
+        title: '重复成员',
+        memberUserIds: [USER_ID, USER_ID],
+      }).success,
+    ).toBe(false);
+    expect(
+      createConversationRequestSchema.parse({
+        type: 'group',
+        title: '智能体头脑风暴',
+        memberUserIds: [],
+        agentIds: [AGENT_ID, SECOND_AGENT_ID],
+      }),
+    ).toEqual({
+      type: 'group',
+      title: '智能体头脑风暴',
+      memberUserIds: [],
+      agentIds: [AGENT_ID, SECOND_AGENT_ID],
+    });
+  });
+
+  it('validates user-facing conversation state, pagination, and group member changes', () => {
+    expect(updateConversationStateRequestSchema.safeParse({ pinned: true }).success).toBe(true);
+    expect(updateConversationStateRequestSchema.safeParse({}).success).toBe(false);
+    expect(messageListQuerySchema.parse({ limit: '25' })).toEqual({ limit: 25 });
+    expect(messageListQuerySchema.safeParse({ limit: 101 }).success).toBe(false);
+    expect(
+      updateGroupMembersRequestSchema.safeParse({
+        addUserIds: [USER_ID],
+        removeUserIds: [USER_ID],
       }).success,
     ).toBe(false);
   });
@@ -111,12 +164,29 @@ describe('conversation write contracts', () => {
   });
 
   it('accepts text messages and trims the text', () => {
+    const parsed = createMessageRequestSchema.parse({
+      clientMessageId: 'desktop-0001',
+      content: { type: 'text', text: '  hello  ' },
+      responseTarget: { type: 'agent', agentId: AGENT_ID },
+    });
+    expect(parsed.content.text).toBe('hello');
+    expect(parsed.responseTarget).toEqual({ type: 'agent', agentId: AGENT_ID });
+  });
+
+  it('keeps the response target optional for older clients and validates participant ids', () => {
     expect(
       createMessageRequestSchema.parse({
-        clientMessageId: 'desktop-0001',
-        content: { type: 'text', text: '  hello  ' },
-      }).content.text,
-    ).toBe('hello');
+        clientMessageId: 'desktop-legacy',
+        content: { type: 'text', text: 'legacy client' },
+      }).responseTarget,
+    ).toBeUndefined();
+    expect(
+      createMessageRequestSchema.safeParse({
+        clientMessageId: 'desktop-invalid',
+        content: { type: 'text', text: 'hello' },
+        responseTarget: { type: 'human', userId: 'copied-name-not-id' },
+      }).success,
+    ).toBe(false);
   });
 
   it.each(['', '   ', 'x'.repeat(20_001)])('rejects invalid message text', (text) => {

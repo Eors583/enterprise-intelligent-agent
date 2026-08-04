@@ -11,6 +11,9 @@ from enterprise_ai_runtime.domain.knowledge_models import (
 
 class EmbeddingProviderPort(Protocol):
     @property
+    def provider(self) -> str: ...
+
+    @property
     def model(self) -> str: ...
 
     @property
@@ -24,6 +27,9 @@ class EmbeddingProviderPort(Protocol):
 
 
 class RerankProviderPort(Protocol):
+    @property
+    def provider(self) -> str: ...
+
     @property
     def model(self) -> str: ...
 

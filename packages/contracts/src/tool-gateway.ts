@@ -487,7 +487,8 @@ export const createToolDefinitionRequestSchema = z
     key: z
       .string()
       .trim()
-      .regex(/^[a-z][a-z0-9_.-]{2,99}$/u),
+      .regex(/^[a-z][a-z0-9_.-]{2,99}$/u)
+      .optional(),
     name: z.string().trim().min(1).max(160),
     description: LONG_TEXT,
     ownerUserId: UUID.optional(),

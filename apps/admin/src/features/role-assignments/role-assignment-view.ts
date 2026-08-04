@@ -10,6 +10,9 @@ export type EligibleAssignmentMember = AdminMember & {
   employment: NonNullable<AdminMember['employment']> & { status: 'ACTIVE' };
 };
 
+export type OrganizationScopeMode = 'MEMBER_UNIT' | 'SELECTED_UNIT' | 'UNRESTRICTED';
+export type MemoryPolicyPreset = 'BLUEPRINT_DEFAULT' | 'ROLE_ONLY_30' | 'SHARED_90';
+
 export function eligibleAssignmentMembers(
   members: ReadonlyArray<AdminMember>,
 ): ReadonlyArray<EligibleAssignmentMember> {
@@ -59,6 +62,35 @@ export function parseScopeJson(value: string, label: string): Record<string, unk
     throw new Error(`${label}必须是 JSON 对象，不能是数组或基础值。`);
   }
   return parsed as Record<string, unknown>;
+}
+
+export function controlledOrganizationScope(
+  mode: OrganizationScopeMode,
+  memberOrgUnitId: string,
+  selectedOrgUnitId: string,
+  includeDescendants: boolean,
+): Record<string, unknown> {
+  if (mode === 'UNRESTRICTED') return {};
+  const orgUnitId = mode === 'MEMBER_UNIT' ? memberOrgUnitId : selectedOrgUnitId;
+  if (!orgUnitId) throw new Error('请选择有效的组织范围。');
+  return {
+    organizationIds: [orgUnitId],
+    includeDescendants: mode === 'SELECTED_UNIT' && includeDescendants,
+  };
+}
+
+export function controlledMemoryPolicy(preset: MemoryPolicyPreset): Record<string, unknown> {
+  if (preset === 'ROLE_ONLY_30') return { roleOnly: true, retentionDays: 30 };
+  if (preset === 'SHARED_90') return { roleOnly: false, retentionDays: 90 };
+  return {};
+}
+
+export function assignmentEffectiveFrom(
+  startsImmediately: boolean,
+  scheduledValue: string,
+  now = new Date(),
+): string {
+  return startsImmediately ? now.toISOString() : localDateTimeToIso(scheduledValue, '生效时间');
 }
 
 export function localDateTimeToIso(value: string, label: string): string {

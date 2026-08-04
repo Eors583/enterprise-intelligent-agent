@@ -41,11 +41,13 @@ class StoreDriver(StrEnum):
 class EmbeddingDriver(StrEnum):
     DISABLED = "disabled"
     OPENAI_COMPATIBLE = "openai_compatible"
+    LOCAL_FASTEMBED = "local_fastembed"
 
 
 class RerankDriver(StrEnum):
     DISABLED = "disabled"
     COHERE_COMPATIBLE = "cohere_compatible"
+    LOCAL_FASTEMBED = "local_fastembed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +90,9 @@ class RuntimeSettings:
     rerank_api_key: str | None = field(default=None, repr=False)
     rerank_model: str | None = None
     rerank_timeout_seconds: float = 30.0
+    local_model_cache_dir: str = ".data/ai-models"
+    local_model_allow_download: bool = False
+    local_model_threads: int = 2
     model_route_catalog: tuple[ModelRouteCatalogEntry, ...] = ()
     require_trusted_model_route: bool = False
     evaluation_attestation_secret: str | None = field(default=None, repr=False)
@@ -111,6 +116,10 @@ class RuntimeSettings:
         elif self.driver == RuntimeDriver.MANUS:
             self._validate_manus()
         self._validate_knowledge_providers()
+        if self.environment == RuntimeEnvironment.PRODUCTION and self.local_model_allow_download:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD must be false in production"
+            )
         if self.environment == RuntimeEnvironment.PRODUCTION and (
             self.service_token is None or len(self.service_token) < 32
         ):
@@ -307,6 +316,21 @@ class RuntimeSettings:
             )
             self._validate_provider_url("AI_RUNTIME_RERANK_BASE_URL", self.rerank_base_url or "")
 
+        if self.embedding_driver == EmbeddingDriver.LOCAL_FASTEMBED and not self.embedding_model:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_EMBEDDING_MODEL is required for local_fastembed"
+            )
+        if self.rerank_driver == RerankDriver.LOCAL_FASTEMBED and not self.rerank_model:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_RERANK_MODEL is required for local_fastembed"
+            )
+        if not self.local_model_cache_dir.strip():
+            raise RuntimeConfigurationError("AI_RUNTIME_LOCAL_MODEL_CACHE_DIR must not be empty")
+        if not 1 <= self.local_model_threads <= 64:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_LOCAL_MODEL_THREADS must be between 1 and 64"
+            )
+
     def _require_knowledge_configuration(
         self,
         *,
@@ -362,7 +386,8 @@ class RuntimeSettings:
             )
         except ValueError as error:
             raise RuntimeConfigurationError(
-                "AI_RUNTIME_EMBEDDING_DRIVER must be disabled or openai_compatible"
+                "AI_RUNTIME_EMBEDDING_DRIVER must be disabled, openai_compatible, "
+                "or local_fastembed"
             ) from error
 
         try:
@@ -371,7 +396,7 @@ class RuntimeSettings:
             )
         except ValueError as error:
             raise RuntimeConfigurationError(
-                "AI_RUNTIME_RERANK_DRIVER must be disabled or cohere_compatible"
+                "AI_RUNTIME_RERANK_DRIVER must be disabled, cohere_compatible, or local_fastembed"
             ) from error
 
         return cls(
@@ -417,7 +442,12 @@ class RuntimeSettings:
             embedding_driver=embedding_driver,
             embedding_base_url=_optional(values.get("AI_RUNTIME_EMBEDDING_BASE_URL")),
             embedding_api_key=_optional(values.get("AI_RUNTIME_EMBEDDING_API_KEY")),
-            embedding_model=_optional(values.get("AI_RUNTIME_EMBEDDING_MODEL")),
+            embedding_model=_optional(values.get("AI_RUNTIME_EMBEDDING_MODEL"))
+            or (
+                "BAAI/bge-small-zh-v1.5"
+                if embedding_driver == EmbeddingDriver.LOCAL_FASTEMBED
+                else None
+            ),
             embedding_dimensions=_positive_int(
                 values.get("AI_RUNTIME_EMBEDDING_DIMENSIONS"),
                 default=1536,
@@ -431,11 +461,28 @@ class RuntimeSettings:
             rerank_driver=rerank_driver,
             rerank_base_url=_optional(values.get("AI_RUNTIME_RERANK_BASE_URL")),
             rerank_api_key=_optional(values.get("AI_RUNTIME_RERANK_API_KEY")),
-            rerank_model=_optional(values.get("AI_RUNTIME_RERANK_MODEL")),
+            rerank_model=_optional(values.get("AI_RUNTIME_RERANK_MODEL"))
+            or (
+                "BAAI/bge-reranker-base"
+                if rerank_driver == RerankDriver.LOCAL_FASTEMBED
+                else None
+            ),
             rerank_timeout_seconds=_positive_float(
                 values.get("AI_RUNTIME_RERANK_TIMEOUT_SECONDS"),
                 default=30.0,
                 name="AI_RUNTIME_RERANK_TIMEOUT_SECONDS",
+            ),
+            local_model_cache_dir=_optional(values.get("AI_RUNTIME_LOCAL_MODEL_CACHE_DIR"))
+            or ".data/ai-models",
+            local_model_allow_download=(
+                _truthy(values.get("AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD"))
+                if values.get("AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD") is not None
+                else environment != RuntimeEnvironment.PRODUCTION
+            ),
+            local_model_threads=_positive_int(
+                values.get("AI_RUNTIME_LOCAL_MODEL_THREADS"),
+                default=2,
+                name="AI_RUNTIME_LOCAL_MODEL_THREADS",
             ),
             model_route_catalog=_model_route_catalog(values.get("AI_RUNTIME_MODEL_ROUTE_CATALOG")),
             require_trusted_model_route=_truthy(

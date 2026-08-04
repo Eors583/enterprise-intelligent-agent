@@ -6,11 +6,14 @@ import { ApiError } from '@/api/client';
 import {
   currentPublishedVersionId,
   diffRoleVersions,
+  generatedRoleIdentifier,
+  identifierForRenamedRoleField,
   parseJsonObject,
   roleBlueprintErrorMessage,
   roleVersionActions,
   roleVersionReviewLabel,
   roleVersionStatusLabel,
+  withGeneratedRoleKeys,
 } from './role-blueprint-view';
 
 const CURRENT_USER_ID = '00000000-0000-7000-8000-000000000001';
@@ -105,6 +108,29 @@ describe('role blueprint view model', () => {
     expect(message).toContain('双人审批要求');
     expect(message).toContain('另一位企业所有者或管理员');
     expect(message).toContain('req-1');
+  });
+
+  it('generates hidden blueprint and field identifiers from business names', () => {
+    expect(generatedRoleIdentifier('Sales Lead')).toBe('role-sales-lead');
+    expect(generatedRoleIdentifier('销售负责人')).toMatch(/^role-[a-z0-9-]+$/u);
+    expect(identifierForRenamedRoleField('', '', '客户成功', 'responsibility')).toMatch(
+      /^responsibility-[a-z0-9-]+$/u,
+    );
+    expect(
+      identifierForRenamedRoleField('custom.owner', '旧名称', '新名称', 'responsibility'),
+    ).toBe('custom.owner');
+  });
+
+  it('fills missing collection keys and resolves generated duplicates deterministically', () => {
+    const keys = withGeneratedRoleKeys(
+      [
+        { key: '', name: '审批', description: '第一次审批' },
+        { key: '', name: '审批', description: '第二次审批' },
+      ],
+      'responsibility',
+    ).map((item) => item.key);
+    expect(keys[0]).toMatch(/^responsibility-[a-z0-9-]+$/u);
+    expect(keys[1]).toBe(`${keys[0]}-2`);
   });
 
   it('reports field-level additions, removals, and changes across versioned definitions', () => {

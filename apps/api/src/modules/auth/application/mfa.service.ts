@@ -77,6 +77,7 @@ export interface VerifiedMfaLogin {
   readonly method: 'TOTP' | 'RECOVERY_CODE';
   readonly verifiedAt: Date;
   readonly credentialBinding: string;
+  readonly loginIdentifierBinding: string;
   readonly device?: IdentityDeviceRegistration;
   readonly sessionLabel?: string;
 }
@@ -135,6 +136,7 @@ export class MfaService {
     tenantId: string,
     userId: string,
     credentialBinding: string,
+    loginIdentifierBinding: string,
   ): Promise<MfaLoginChallengeResponse> {
     const token = issueMfaToken();
     const now = new Date();
@@ -160,7 +162,7 @@ export class MfaService {
           "max_attempts", "issued_at", "expires_at", "idempotency_key"
         ) VALUES (
           ${tenantId}::uuid, ${userId}::uuid, ${factor.id}::uuid,
-          ${this.hash('challenge', token)}, ${`LOGIN:${credentialBinding}`},
+          ${this.hash('challenge', token)}, ${`LOGIN:${credentialBinding}:${loginIdentifierBinding}`},
           ${policy.totp_max_attempts}, ${now}, ${expiresAt}, ${`login:${randomUUID()}`}
         )
       `;
@@ -489,6 +491,10 @@ export class MfaService {
     return this.hash('login-credential-binding', passwordHash);
   }
 
+  loginIdentifierBinding(email: string): string {
+    return this.hash('login-identifier-binding', email.trim().toLowerCase());
+  }
+
   private async verifyChallenge(
     transaction: Prisma.TransactionClient,
     request: Pick<MfaLoginVerifyRequest, 'challenge' | 'code' | 'method'>,
@@ -502,6 +508,7 @@ export class MfaService {
     method: 'TOTP' | 'RECOVERY_CODE';
     verifiedAt: Date;
     credentialBinding: string;
+    loginIdentifierBinding: string;
   }> {
     const challengeHash = this.hash('challenge', request.challenge);
     const [challenge] = await transaction.$queryRaw<ChallengeRow[]>`
@@ -616,6 +623,10 @@ export class MfaService {
         AND "status" = 'PENDING'
     `;
     if (challengeUpdated !== 1) throw invalidMfa();
+    const loginBindings =
+      requiredPurpose === 'LOGIN' && challenge.purpose.startsWith('LOGIN:')
+        ? challenge.purpose.slice('LOGIN:'.length).split(':')
+        : [];
     return {
       tenantId: challenge.tenant_id,
       userId: challenge.user_id,
@@ -623,10 +634,8 @@ export class MfaService {
       challengeId: challenge.id,
       method: request.method,
       verifiedAt: now,
-      credentialBinding:
-        requiredPurpose === 'LOGIN' && challenge.purpose.startsWith('LOGIN:')
-          ? challenge.purpose.slice('LOGIN:'.length)
-          : '',
+      credentialBinding: loginBindings[0] ?? '',
+      loginIdentifierBinding: loginBindings[1] ?? '',
     };
   }
 

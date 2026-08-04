@@ -1,14 +1,16 @@
 import type {
+  KnowledgeBase,
   ReviewRoleVersionRequest,
   RoleBlueprint,
   RoleVersion,
   RollbackRoleVersionResponse,
 } from '@enterprise/contracts';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { ZodError } from 'zod';
 
 import {
   createRoleVersionDraft,
+  listKnowledgeBases,
   publishRoleVersion,
   retireRoleVersion,
   reviewRoleVersion,
@@ -19,33 +21,54 @@ import {
 import { FieldError, Modal, Spinner } from '@/components/ui';
 import { PassingEvaluationRunSelect } from '@/features/ai-evaluation/PassingEvaluationRunSelect';
 
-import {
-  formatJsonObject,
-  parseJsonObject,
-  roleBlueprintErrorMessage,
-} from './role-blueprint-view';
+import { roleBlueprintErrorMessage } from './role-blueprint-view';
 
 export function RoleVersionEditor({
   blueprint,
   version,
+  sourceVersion,
   onClose,
   onSaved,
 }: {
   blueprint: RoleBlueprint;
   version: RoleVersion | null;
+  sourceVersion: RoleVersion | null;
   onClose: () => void;
   onSaved: (version: RoleVersion, created: boolean) => void;
 }): ReactNode {
   const editing = version !== null;
-  const [systemPrompt, setSystemPrompt] = useState(version?.systemPrompt ?? '');
-  const [modelPolicy, setModelPolicy] = useState(formatJsonObject(version?.modelPolicy ?? {}));
-  const [toolPolicy, setToolPolicy] = useState(formatJsonObject(version?.toolPolicy ?? {}));
-  const [knowledgeScope, setKnowledgeScope] = useState(
-    formatJsonObject(version?.knowledgeScope ?? {}),
+  const inheritedVersion = version ?? sourceVersion;
+  const [systemPrompt, setSystemPrompt] = useState(inheritedVersion?.systemPrompt ?? '');
+  const modelPolicy = inheritedVersion?.modelPolicy ?? {};
+  const toolPolicy = inheritedVersion?.toolPolicy ?? {};
+  const knowledgeScope = inheritedVersion?.knowledgeScope ?? { knowledgeBaseIds: [] };
+  const [knowledgeBaseIds, setKnowledgeBaseIds] = useState(() =>
+    readKnowledgeBaseIds(knowledgeScope),
   );
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [knowledgeLoading, setKnowledgeLoading] = useState(true);
+  const [knowledgeError, setKnowledgeError] = useState<string | null>(null);
   const [changeSummary, setChangeSummary] = useState(version?.changeSummary ?? '');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void listKnowledgeBases(controller.signal)
+      .then((response) => {
+        setKnowledgeBases(response.items);
+        setKnowledgeError(null);
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) {
+          setKnowledgeError('知识库列表读取失败，请刷新后重试。');
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setKnowledgeLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
@@ -54,9 +77,9 @@ export function RoleVersionEditor({
     try {
       const configuration = {
         systemPrompt,
-        modelPolicy: parseJsonObject(modelPolicy, '模型策略'),
-        toolPolicy: parseJsonObject(toolPolicy, '工具策略'),
-        knowledgeScope: parseJsonObject(knowledgeScope, '知识范围'),
+        modelPolicy,
+        toolPolicy,
+        knowledgeScope: { ...knowledgeScope, knowledgeBaseIds },
         changeSummary,
       };
       const saved =
@@ -103,6 +126,39 @@ export function RoleVersionEditor({
             placeholder="至少 20 个字符，明确角色目标、边界、升级与安全要求"
           />
         </label>
+        <fieldset className="agent-knowledge-options">
+          <legend>企业知识库</legend>
+          <p className="form-hint">
+            选择该角色的智能体回答时可以检索的知识库。员工仍只能看到自身权限范围内的文档。
+          </p>
+          {knowledgeLoading ? <Spinner label="正在读取知识库…" /> : null}
+          {knowledgeBases
+            .filter((item) => item.status === 'ACTIVE' || knowledgeBaseIds.includes(item.id))
+            .map((item) => (
+              <label key={item.id} className="agent-knowledge-option">
+                <input
+                  type="checkbox"
+                  checked={knowledgeBaseIds.includes(item.id)}
+                  disabled={item.status !== 'ACTIVE'}
+                  onChange={(event) =>
+                    setKnowledgeBaseIds((current) =>
+                      event.target.checked
+                        ? [...new Set([...current, item.id])]
+                        : current.filter((id) => id !== item.id),
+                    )
+                  }
+                />
+                <span>{item.name}</span>
+                <small>
+                  {item.documentCount} 篇文档{item.status === 'ACTIVE' ? '' : ' · 已停用'}
+                </small>
+              </label>
+            ))}
+          {!knowledgeLoading && knowledgeBases.every((item) => item.status !== 'ACTIVE') ? (
+            <p className="form-hint">请先在知识中心启用至少一个已完成语义索引的知识库。</p>
+          ) : null}
+          <FieldError message={knowledgeError} />
+        </fieldset>
         <label>
           <span>变更摘要</span>
           <input
@@ -113,28 +169,8 @@ export function RoleVersionEditor({
             placeholder="说明本版本相较此前版本的变化"
           />
         </label>
-        <div className="role-policy-grid">
-          <JsonPolicyField
-            label="模型策略"
-            value={modelPolicy}
-            onChange={setModelPolicy}
-            hint="模型路由、温度、预算等服务端支持的策略。"
-          />
-          <JsonPolicyField
-            label="工具策略"
-            value={toolPolicy}
-            onChange={setToolPolicy}
-            hint="允许工具、审批门槛与操作约束。"
-          />
-          <JsonPolicyField
-            label="知识范围"
-            value={knowledgeScope}
-            onChange={setKnowledgeScope}
-            hint="知识库、组织范围与数据标签边界。"
-          />
-        </div>
         <p className="role-policy-note">
-          JSON 配置会由后端契约校验并在运行时重新鉴权；管理端不会把草稿显示为已发布。
+          模型、工具和知识范围请在智能体中心使用选择器绑定；创建新草稿时使用安全默认策略，编辑草稿时保留已绑定策略。
         </p>
         <FieldError message={error} />
         <div className="modal-actions">
@@ -157,6 +193,16 @@ export function RoleVersionEditor({
       </form>
     </Modal>
   );
+}
+
+function readKnowledgeBaseIds(scope: Record<string, unknown>): string[] {
+  return Array.isArray(scope.knowledgeBaseIds)
+    ? [
+        ...new Set(
+          scope.knowledgeBaseIds.filter((value): value is string => typeof value === 'string'),
+        ),
+      ].slice(0, 50)
+    : [];
 }
 
 export function RoleVersionReviewModal({
@@ -440,31 +486,6 @@ export function RoleVersionRollbackModal({
         </div>
       </form>
     </Modal>
-  );
-}
-
-function JsonPolicyField({
-  label,
-  value,
-  onChange,
-  hint,
-}: {
-  label: string;
-  value: string;
-  onChange: (value: string) => void;
-  hint: string;
-}): ReactNode {
-  return (
-    <label>
-      <span>{label}（JSON 对象）</span>
-      <textarea
-        required
-        spellCheck={false}
-        value={value}
-        onChange={(event) => onChange(event.target.value)}
-      />
-      <small>{hint}</small>
-    </label>
   );
 }
 

@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   ForbiddenException,
   Inject,
@@ -162,11 +164,15 @@ export class MemoryExperienceService {
       action: 'CONTRIBUTE',
       now,
     });
+    const governedRequest = {
+      ...request,
+      rawInputHash: experienceInputHash(request),
+    };
     return unwrapRuntimeMutation(
       await this.repository.createExperience({
         principal,
         actor,
-        request,
+        request: governedRequest,
         enforceContributorTaskScope: false,
         now,
       }),
@@ -372,6 +378,24 @@ function memoryCandidateResource(
     effectiveTo: null,
     expiresAt: request.expiresAt ?? null,
   };
+}
+
+export function experienceInputHash(request: CreateExperienceCandidateRequest): string {
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        schema: 'experience-candidate-input.v1',
+        title: request.title,
+        sourceTaskId: request.sourceTaskId,
+        sourceDeliverableIds: [...request.sourceDeliverableIds].sort(),
+        sourceEvidenceIds: [...request.sourceEvidenceIds].sort(),
+        candidateSummary: request.candidateSummary,
+        permissionLabels: [...request.permissionLabels].sort(),
+        sensitivity: request.sensitivity,
+      }),
+      'utf8',
+    )
+    .digest('hex');
 }
 
 function experienceProof(

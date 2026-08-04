@@ -12,6 +12,7 @@ import {
   agentRunFailureMessage,
   citationDisplayMetadata,
   conversationHasAgentPair,
+  conversationHasSharedMemberAgent,
   conversationTitle,
   MessageCitationCard,
 } from './MessagingWorkspace';
@@ -54,6 +55,26 @@ describe('conversationTitle', () => {
 
     expect(conversationHasAgentPair(conversation)).toBe(true);
     expect(conversationTitle(conversation, currentUserId)).toBe('产品智能体、研发智能体');
+  });
+
+  it('识别成员与其智能体共用的会话，并保持成员作为会话标题', () => {
+    const conversation: Conversation = {
+      id: '00000000-0000-7000-8000-000000000403',
+      type: 'direct',
+      title: '周睿',
+      participants: [
+        { type: 'user', id: currentUserId, name: '我' },
+        { type: 'user', id: otherUserId, name: '周睿' },
+        { type: 'agent', id: '00000000-0000-7000-8000-000000000203', name: '周睿的智能体' },
+      ],
+      lastMessageAt: null,
+      createdAt: '2026-08-04T01:00:00.000Z',
+      updatedAt: '2026-08-04T01:00:00.000Z',
+    };
+
+    expect(conversationHasSharedMemberAgent(conversation, currentUserId)).toBe(true);
+    expect(conversationHasAgentPair(conversation)).toBe(false);
+    expect(conversationTitle(conversation, currentUserId)).toBe('周睿');
   });
 });
 

@@ -81,6 +81,7 @@ describe('listAgentCollaborationCandidates', () => {
       {
         id: onlineAgent.id,
         name: onlineAgent.name,
+        kind: 'member',
         ownerUserId: 'user-1',
         ownerName: '林晓',
         summary: onlineAgent.summary,

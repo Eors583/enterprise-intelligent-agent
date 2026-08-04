@@ -9,6 +9,7 @@ import {
   Param,
   ParseIntPipe,
   ParseUUIDPipe,
+  Patch,
   Post,
   Query,
   Req,
@@ -18,14 +19,29 @@ import {
   AGENT_RUN_STREAM_MAX_CURSOR,
   type AgentRunStreamPage,
   type AgentRunResponse,
+  conversationListQuerySchema,
   createConversationRequestSchema,
   createMessageRequestSchema,
+  markConversationReadRequestSchema,
+  messageListQuerySchema,
+  messageSearchQuerySchema,
   type Conversation,
+  type ConversationListQuery,
   type ConversationListResponse,
   type CreateConversationRequest,
   type CreateMessageRequest,
   type Message,
+  type MessageListQuery,
   type MessageListResponse,
+  type MessageSearchQuery,
+  type MessageSearchResponse,
+  type MarkConversationReadRequest,
+  type UpdateConversationStateRequest,
+  type UpdateGroupMembersRequest,
+  type UpdateGroupRequest,
+  updateConversationStateRequestSchema,
+  updateGroupMembersRequestSchema,
+  updateGroupRequestSchema,
 } from '@enterprise/contracts';
 import type { Request, Response } from 'express';
 
@@ -43,8 +59,10 @@ export class ConversationController {
   ) {}
 
   @Get()
-  list(): Promise<ConversationListResponse> {
-    return this.conversations.list();
+  list(
+    @Query(new SchemaValidationPipe(conversationListQuerySchema)) query: ConversationListQuery,
+  ): Promise<ConversationListResponse> {
+    return this.conversations.list(query);
   }
 
   @Post()
@@ -58,8 +76,17 @@ export class ConversationController {
   @Get(':id/messages')
   listMessages(
     @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Query(new SchemaValidationPipe(messageListQuerySchema)) query: MessageListQuery,
   ): Promise<MessageListResponse> {
-    return this.conversations.listMessages(conversationId);
+    return this.conversations.listMessages(conversationId, query);
+  }
+
+  @Get(':id/messages/search')
+  searchMessages(
+    @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Query(new SchemaValidationPipe(messageSearchQuerySchema)) query: MessageSearchQuery,
+  ): Promise<MessageSearchResponse> {
+    return this.conversations.searchMessages(conversationId, query);
   }
 
   @Post(':id/messages')
@@ -68,6 +95,41 @@ export class ConversationController {
     @Body(new SchemaValidationPipe(createMessageRequestSchema)) request: CreateMessageRequest,
   ): Promise<Message> {
     return this.conversations.createMessage(conversationId, request);
+  }
+
+  @Post(':id/read')
+  markRead(
+    @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Body(new SchemaValidationPipe(markConversationReadRequestSchema))
+    request: MarkConversationReadRequest,
+  ): Promise<Conversation> {
+    return this.conversations.markRead(conversationId, request);
+  }
+
+  @Patch(':id/state')
+  updateState(
+    @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Body(new SchemaValidationPipe(updateConversationStateRequestSchema))
+    request: UpdateConversationStateRequest,
+  ): Promise<Conversation> {
+    return this.conversations.updateState(conversationId, request);
+  }
+
+  @Patch(':id/group')
+  renameGroup(
+    @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Body(new SchemaValidationPipe(updateGroupRequestSchema)) request: UpdateGroupRequest,
+  ): Promise<Conversation> {
+    return this.conversations.renameGroup(conversationId, request);
+  }
+
+  @Patch(':id/group/members')
+  updateGroupMembers(
+    @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Body(new SchemaValidationPipe(updateGroupMembersRequestSchema))
+    request: UpdateGroupMembersRequest,
+  ): Promise<Conversation> {
+    return this.conversations.updateGroupMembers(conversationId, request);
   }
 
   @Post(':id/runs/:runId/cancel')

@@ -245,6 +245,11 @@ export function RoleBlueprintsPage({ currentUserId }: { currentUserId: string })
         <RoleVersionEditor
           blueprint={selected}
           version={editingVersion}
+          sourceVersion={
+            selected.versions.find(
+              (version) => version.id === currentPublishedVersionId(selected),
+            ) ?? null
+          }
           onClose={() => setEditingVersion(undefined)}
           onSaved={(version, created) =>
             completedVersionAction(

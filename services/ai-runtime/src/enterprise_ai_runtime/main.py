@@ -15,6 +15,10 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from enterprise_ai_runtime.adapters.cohere_rerank_provider import CohereRerankProvider
+from enterprise_ai_runtime.adapters.local_fastembed_provider import (
+    LocalFastembedEmbeddingProvider,
+    LocalFastembedRerankProvider,
+)
 from enterprise_ai_runtime.adapters.manus_provider import ManusProvider
 from enterprise_ai_runtime.adapters.memory_run_store import InMemoryRunStore
 from enterprise_ai_runtime.adapters.noop_runtime import NoopRuntime
@@ -187,6 +191,14 @@ def build_knowledge_service(settings: RuntimeSettings) -> KnowledgeService:
             dimensions=settings.embedding_dimensions,
             timeout_seconds=settings.embedding_timeout_seconds,
         )
+    elif settings.embedding_driver == EmbeddingDriver.LOCAL_FASTEMBED:
+        embedding_provider = LocalFastembedEmbeddingProvider(
+            model=settings.embedding_model or "",
+            dimensions=settings.embedding_dimensions,
+            cache_dir=settings.local_model_cache_dir,
+            threads=settings.local_model_threads,
+            allow_download=settings.local_model_allow_download,
+        )
 
     rerank_provider = None
     if settings.rerank_driver == RerankDriver.COHERE_COMPATIBLE:
@@ -195,6 +207,13 @@ def build_knowledge_service(settings: RuntimeSettings) -> KnowledgeService:
             api_key=settings.rerank_api_key or "",
             model=settings.rerank_model or "",
             timeout_seconds=settings.rerank_timeout_seconds,
+        )
+    elif settings.rerank_driver == RerankDriver.LOCAL_FASTEMBED:
+        rerank_provider = LocalFastembedRerankProvider(
+            model=settings.rerank_model or "",
+            cache_dir=settings.local_model_cache_dir,
+            threads=settings.local_model_threads,
+            allow_download=settings.local_model_allow_download,
         )
 
     return KnowledgeService(

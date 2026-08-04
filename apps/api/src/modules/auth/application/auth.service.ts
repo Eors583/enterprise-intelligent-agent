@@ -204,21 +204,24 @@ export class AuthService {
           select: { passwordHash: true, mustChangePassword: true },
         },
       } satisfies Prisma.UserSelect;
-      const localUser = await transaction.user.findFirst({
-        where: { tenantId: tenant.id, emailNormalized: request.email },
-        select: selectUser,
-      });
+      const reservedInternalEmail = isReservedInternalEmail(request.email);
+      const localUser = reservedInternalEmail
+        ? null
+        : await transaction.user.findFirst({
+            where: { tenantId: tenant.id, emailNormalized: request.email },
+            select: selectUser,
+          });
       if (localUser !== null) return { ...tenant, user: localUser };
+      if (reservedInternalEmail) return { ...tenant, user: undefined };
 
-      // Feishu-managed users retain a collision-proof synthetic User.email.
-      // Their real work email can be used to log in only when no local identity
-      // owns it and exactly one non-terminated employment matches it.
+      // A work-email alias is valid only when exactly one active employment
+      // owns it. Invitation-pending and suspended memberships cannot log in.
       const candidates = await transaction.employment.groupBy({
         by: ['userId'],
         where: {
           tenantId: tenant.id,
           workEmail: { equals: request.email, mode: 'insensitive' },
-          status: { not: 'TERMINATED' },
+          status: 'ACTIVE',
         },
         orderBy: { userId: 'asc' },
         take: 2,
@@ -258,6 +261,7 @@ export class AuthService {
         identity.id,
         user.id,
         this.mfa.credentialBinding(credential.passwordHash),
+        this.mfa.loginIdentifierBinding(request.email),
       );
     }
 
@@ -279,6 +283,40 @@ export class AuthService {
       });
       if (lockedCredential === null || lockedCredential.passwordHash !== credential.passwordHash) {
         throw invalidCredentials();
+      }
+      const lockedAccount = await transaction.user.findFirst({
+        where: {
+          id: user.id,
+          tenantId: identity.id,
+          status: 'ACTIVE',
+          tenant: { status: 'ACTIVE' },
+        },
+        select: { id: true },
+      });
+      if (lockedAccount === null) throw invalidCredentials();
+      // The email may have changed after the initial password verification.
+      // Re-resolve it while holding the same lock used by profile edits and
+      // invitation/reset flows so a stale alias cannot create a new session.
+      const canonicalOwner = await transaction.user.findFirst({
+        where: { tenantId: identity.id, emailNormalized: request.email },
+        select: { id: true },
+      });
+      if (canonicalOwner !== null) {
+        if (canonicalOwner.id !== user.id) throw invalidCredentials();
+      } else {
+        const activeAliasOwners = await transaction.employment.groupBy({
+          by: ['userId'],
+          where: {
+            tenantId: identity.id,
+            workEmail: { equals: request.email, mode: 'insensitive' },
+            status: 'ACTIVE',
+          },
+          orderBy: { userId: 'asc' },
+          take: 2,
+        });
+        if (activeAliasOwners.length !== 1 || activeAliasOwners[0]?.userId !== user.id) {
+          throw invalidCredentials();
+        }
       }
 
       const deviceId = await this.mfa?.upsertDevice(
@@ -327,6 +365,12 @@ export class AuthService {
       await transaction.$queryRaw`
         SELECT set_config('app.tenant_id', ${verified.tenantId}, true)
       `;
+      await transaction.$queryRaw`
+        WITH password_flow_lock AS (
+          SELECT pg_advisory_xact_lock(hashtextextended(${passwordFlowLockKey(verified.tenantId, verified.userId)}, 0))
+        )
+        SELECT 1::integer AS locked FROM password_flow_lock
+      `;
       const tenant = await transaction.tenant.findUnique({
         where: { id: verified.tenantId },
         select: { id: true, slug: true, name: true, status: true },
@@ -356,6 +400,46 @@ export class AuthService {
           this.mfa!.credentialBinding(user.passwordCredential.passwordHash)
       ) {
         throw invalidCredentials();
+      }
+      const activeAliases = await transaction.employment.findMany({
+        where: {
+          tenantId: tenant.id,
+          userId: user.id,
+          status: 'ACTIVE',
+          workEmail: { not: null },
+        },
+        select: { workEmail: true },
+      });
+      const candidateEmails = new Set<string>();
+      if (!isReservedInternalEmail(user.email)) candidateEmails.add(user.email.toLowerCase());
+      for (const { workEmail } of activeAliases) {
+        if (workEmail !== null && !isReservedInternalEmail(workEmail)) {
+          candidateEmails.add(workEmail.trim().toLowerCase());
+        }
+      }
+      const matchedEmail = [...candidateEmails].find(
+        (email) => this.mfa!.loginIdentifierBinding(email) === verified.loginIdentifierBinding,
+      );
+      if (matchedEmail === undefined) throw invalidCredentials();
+      const canonicalOwner = await transaction.user.findFirst({
+        where: { tenantId: tenant.id, emailNormalized: matchedEmail },
+        select: { id: true },
+      });
+      if (canonicalOwner !== null && canonicalOwner.id !== user.id) throw invalidCredentials();
+      if (canonicalOwner === null) {
+        const aliasOwners = await transaction.employment.groupBy({
+          by: ['userId'],
+          where: {
+            tenantId: tenant.id,
+            workEmail: { equals: matchedEmail, mode: 'insensitive' },
+            status: 'ACTIVE',
+          },
+          orderBy: { userId: 'asc' },
+          take: 2,
+        });
+        if (aliasOwners.length !== 1 || aliasOwners[0]?.userId !== user.id) {
+          throw invalidCredentials();
+        }
       }
       const pair = this.tokens.issuePair();
       const now = verified.verifiedAt;
@@ -688,6 +772,10 @@ export class AuthService {
 
 function passwordFlowLockKey(tenantId: string, userId: string): string {
   return `password-flow:${tenantId}:${userId}`;
+}
+
+function isReservedInternalEmail(email: string): boolean {
+  return email.trim().toLowerCase().endsWith('@external.invalid');
 }
 
 function response(pair: SessionTokenPair, source: AccountSource): AuthSessionResponse {

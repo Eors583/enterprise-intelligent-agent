@@ -9,17 +9,12 @@ import { AuthorizationService } from '../modules/authorization/authorization.ser
 import { DirectoryService } from '../modules/directory/application/directory.service.js';
 import { IdentityService } from '../modules/identity/application/identity.service.js';
 
-const NAVIGATION: BootstrapResponse['navigation'] = [
-  { id: 'growth', label: '我的成长' },
-  { id: 'home', label: '首页' },
+const NAVIGATION = [
+  { id: 'workbench', label: '工作台' },
   { id: 'messages', label: '消息' },
   { id: 'contacts', label: '通讯录' },
-  { id: 'agents', label: '智能体' },
-  { id: 'roles', label: '我的角色' },
-  { id: 'workbench', label: '目标与任务' },
-  { id: 'memories', label: '我的记忆' },
-  { id: 'experience-usage', label: '经验与用量' },
-];
+  { id: 'profile', label: '我的' },
+] as const satisfies BootstrapResponse['navigation'];
 
 @Injectable()
 export class BootstrapService {
@@ -38,16 +33,18 @@ export class BootstrapService {
     // Resolve and validate the request-scoped principal before starting parallel work.
     // Otherwise several services can reject concurrently for the same malformed header.
     const principal = this.context.current;
-    const [{ tenant, user }, { departments, members }, agents] = await Promise.all([
-      this.identity.getCurrentIdentity(),
-      this.directory.getDirectory(),
-      this.agents.listMemberAgents(),
-    ]);
+    const [{ tenant, user }, { departments, members }, agents, departmentAgents] =
+      await Promise.all([
+        this.identity.getCurrentIdentity(),
+        this.directory.getDirectory(),
+        this.agents.listMemberAgents(),
+        this.agents.listDepartmentAgents(),
+      ]);
     this.authorization.assertTenantAccess(principal.tenantId);
     this.authorization.assertTenantAccess(tenant.id);
     const operationalAvailabilityByAgentId = await this.operationalReadiness.inspectAgents(
       tenant.id,
-      agents.map(({ id }) => id),
+      [...agents, ...departmentAgents].map(({ id }) => id),
     );
 
     const agentsByOwner = new Map<string, MemberAgent>(
@@ -62,7 +59,7 @@ export class BootstrapService {
         ...(user.title === undefined ? {} : { title: user.title }),
         ...(user.avatarUrl === undefined ? {} : { avatarUrl: user.avatarUrl }),
       },
-      navigation: NAVIGATION,
+      navigation: [...NAVIGATION],
       departments: departments.map((department) => ({
         id: department.id,
         name: department.name,
@@ -98,6 +95,16 @@ export class BootstrapService {
           },
         };
       }),
+      departmentAgents: departmentAgents.map((agent) => ({
+        id: agent.id,
+        name: agent.name,
+        ...(agent.summary === undefined ? {} : { summary: agent.summary }),
+        departmentId: agent.orgUnitId,
+        departmentName: agent.departmentName,
+        status: agent.status,
+        operationalAvailability:
+          operationalAvailabilityByAgentId.get(agent.id) ?? unknownAvailability(),
+      })),
     };
   }
 }

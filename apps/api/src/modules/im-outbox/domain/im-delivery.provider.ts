@@ -6,6 +6,7 @@ export interface MessageCreatedDelivery {
   readonly eventType: typeof MESSAGE_CREATED_EVENT_TYPE;
   readonly messageId: string;
   readonly conversationId: string;
+  readonly conversationType: 'direct' | 'group';
   readonly sender: {
     readonly type: 'user' | 'agent';
     readonly id: string;
@@ -87,6 +88,9 @@ export function parseMessageCreatedDelivery(source: {
   if (
     !isNonEmptyString(source.payload.messageId) ||
     !isNonEmptyString(source.payload.conversationId) ||
+    (source.payload.conversationType !== undefined &&
+      source.payload.conversationType !== 'direct' &&
+      source.payload.conversationType !== 'group') ||
     !isRecord(sender) ||
     (sender.type !== 'user' && sender.type !== 'agent') ||
     !isNonEmptyString(sender.id) ||
@@ -106,6 +110,7 @@ export function parseMessageCreatedDelivery(source: {
     eventType: MESSAGE_CREATED_EVENT_TYPE,
     messageId: source.payload.messageId,
     conversationId: source.payload.conversationId,
+    conversationType: source.payload.conversationType === 'group' ? 'group' : 'direct',
     sender: { type: sender.type, id: sender.id },
     recipients: recipients.map((recipient) => ({
       type: recipient.type,

@@ -55,6 +55,22 @@ export const employeeDeliverableSubmissionRequestSchema = z
   })
   .strict();
 
+const employeeBusinessSourceShape = {
+  roleAssignmentId: UUID,
+  businessDescription: LONG_TEXT,
+  sourceType: z.enum(['DOCUMENT', 'HUMAN_ATTESTATION']),
+  sourceUri: z.url().nullable().default(null),
+} as const;
+
+export const employeeDeliverableSubmissionCommandSchema = z
+  .object({
+    ...employeeBusinessSourceShape,
+    evidenceIds: z.array(UUID).min(1).max(100).refine(uniqueStrings, {
+      message: 'Submission evidence IDs must be unique.',
+    }),
+  })
+  .strict();
+
 export const employeeEvidenceContributionRequestSchema = z
   .object({
     roleAssignmentId: UUID,
@@ -92,6 +108,10 @@ export const employeeEvidenceContributionRequestSchema = z
       path: ['observedAt'],
     },
   );
+
+export const employeeEvidenceContributionCommandSchema = z
+  .object(employeeBusinessSourceShape)
+  .strict();
 
 export const employeeAcceptanceRequestInputSchema = z
   .object({
@@ -179,8 +199,14 @@ export type EmployeeTaskTransitionRequest = z.infer<typeof employeeTaskTransitio
 export type EmployeeDeliverableSubmissionRequest = z.infer<
   typeof employeeDeliverableSubmissionRequestSchema
 >;
+export type EmployeeDeliverableSubmissionCommand = z.infer<
+  typeof employeeDeliverableSubmissionCommandSchema
+>;
 export type EmployeeEvidenceContributionRequest = z.infer<
   typeof employeeEvidenceContributionRequestSchema
+>;
+export type EmployeeEvidenceContributionCommand = z.infer<
+  typeof employeeEvidenceContributionCommandSchema
 >;
 export type EmployeeAcceptanceRequestInput = z.infer<typeof employeeAcceptanceRequestInputSchema>;
 export type EmployeeAcceptanceRequest = z.infer<typeof employeeAcceptanceRequestSchema>;

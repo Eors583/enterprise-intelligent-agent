@@ -21,6 +21,7 @@ export const bootstrapPayloadSchema = bootstrapResponseSchema.superRefine((paylo
   checkUniqueIds(payload.navigation, 'navigation', context);
   checkUniqueIds(payload.departments, 'departments', context);
   checkUniqueIds(payload.members, 'members', context);
+  checkUniqueIds(payload.departmentAgents, 'departmentAgents', context);
 
   const departmentIds = new Set(payload.departments.map((department) => department.id));
   const parentByDepartment = new Map(
@@ -63,11 +64,20 @@ export const bootstrapPayloadSchema = bootstrapResponseSchema.superRefine((paylo
       }
     }
   }
+  for (const [agentIndex, agent] of payload.departmentAgents.entries()) {
+    if (!departmentIds.has(agent.departmentId)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['departmentAgents', agentIndex, 'departmentId'],
+        message: `部门智能体引用的部门 ${agent.departmentId} 不存在`,
+      });
+    }
+  }
 });
 
 function checkUniqueIds(
   items: ReadonlyArray<{ id: string }>,
-  path: 'navigation' | 'departments' | 'members',
+  path: 'navigation' | 'departments' | 'members' | 'departmentAgents',
   context: z.RefinementCtx,
 ): void {
   const seen = new Set<string>();

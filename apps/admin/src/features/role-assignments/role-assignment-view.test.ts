@@ -2,6 +2,9 @@ import type { AdminMember } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
 
 import {
+  assignmentEffectiveFrom,
+  controlledMemoryPolicy,
+  controlledOrganizationScope,
   eligibleAssignmentMembers,
   parseScopeJson,
   roleAssignmentSourceLabel,
@@ -60,5 +63,42 @@ describe('role assignment view model', () => {
       '组织范围必须是 JSON 对象，不能是数组或基础值。',
     );
     expect(() => parseScopeJson('{', '权限范围')).toThrow('权限范围必须是有效的 JSON 对象。');
+  });
+
+  it('converts controlled organization and memory choices into compatible policy objects', () => {
+    expect(
+      controlledOrganizationScope('MEMBER_UNIT', baseMember.employment!.orgUnitId, '', true),
+    ).toEqual({
+      organizationIds: [baseMember.employment!.orgUnitId],
+      includeDescendants: false,
+    });
+    expect(
+      controlledOrganizationScope(
+        'SELECTED_UNIT',
+        baseMember.employment!.orgUnitId,
+        '00000000-0000-7000-8000-000000000299',
+        true,
+      ),
+    ).toEqual({
+      organizationIds: ['00000000-0000-7000-8000-000000000299'],
+      includeDescendants: true,
+    });
+    expect(controlledMemoryPolicy('BLUEPRINT_DEFAULT')).toEqual({});
+    expect(controlledMemoryPolicy('ROLE_ONLY_30')).toEqual({
+      roleOnly: true,
+      retentionDays: 30,
+    });
+    expect(controlledMemoryPolicy('SHARED_90')).toEqual({
+      roleOnly: false,
+      retentionDays: 90,
+    });
+  });
+
+  it('defaults a new assignment to the current instant without requiring a datetime field', () => {
+    const now = new Date('2026-07-29T10:30:00.000Z');
+    expect(assignmentEffectiveFrom(true, '', now)).toBe(now.toISOString());
+    expect(assignmentEffectiveFrom(false, '2026-07-30T09:15', now)).toBe(
+      new Date('2026-07-30T09:15').toISOString(),
+    );
   });
 });

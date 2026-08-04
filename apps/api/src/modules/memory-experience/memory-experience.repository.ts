@@ -38,7 +38,7 @@ export interface TransitionMemoryInput {
 export interface CreateExperienceInput {
   readonly principal: TrustedRuntimePrincipal;
   readonly actor: TrustedExperienceActor;
-  readonly request: CreateExperienceCandidateRequest;
+  readonly request: CreateExperienceCandidateRequest & { readonly rawInputHash: string };
   readonly enforceContributorTaskScope: boolean;
   readonly now: Date;
 }

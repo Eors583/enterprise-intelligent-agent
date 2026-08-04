@@ -197,7 +197,13 @@ export const feishuDirectorySyncRunListSchema = z.object({
 export const updateOrganizationRequestSchema = z.object({
   name: z.string().trim().min(2).max(200).optional(),
   legalName: z.string().trim().max(300).nullable().optional(),
-  timezone: z.string().trim().min(1).max(80).optional(),
+  timezone: z
+    .string()
+    .trim()
+    .min(1)
+    .max(80)
+    .refine(isIanaTimeZone, 'timezone must be a valid IANA time zone.')
+    .optional(),
   expectedVersion: z.number().int().positive(),
 });
 
@@ -220,6 +226,10 @@ export const updateOrgUnitRequestSchema = z
     'At least one org unit field must change.',
   );
 
+/**
+ * @deprecated Prefer inviteMemberRequestSchema for the default member onboarding flow.
+ * This legacy contract remains available for controlled break-glass provisioning.
+ */
 export const createMemberRequestSchema = z.object({
   email: z
     .email()
@@ -242,6 +252,7 @@ export const memberInvitationSchema = z.object({
   displayName: z.string().min(1),
   status: z.enum(['PENDING', 'SENT', 'DELIVERY_FAILED', 'ACCEPTED', 'EXPIRED', 'REVOKED']),
   deliveryStatus: z.enum(['NOT_CONFIGURED', 'PENDING', 'SENT', 'FAILED']),
+  deliveryTargetEvidence: z.enum(['ISSUED', 'LEGACY_INFERRED']),
   issuedAt: z.iso.datetime(),
   expiresAt: z.iso.datetime(),
   consumedAt: z.iso.datetime().nullable(),
@@ -271,6 +282,7 @@ export const issueMemberInvitationResponseSchema = z.discriminatedUnion('deliver
 ]);
 
 export const updateMemberRequestSchema = z.object({
+  email: z.string().trim().toLowerCase().pipe(z.email().max(320)).optional(),
   displayName: z.string().trim().min(1).max(120).optional(),
   role: tenantRoleSchema.optional(),
   status: z.enum(['ACTIVE', 'INACTIVE', 'LOCKED']).optional(),
@@ -532,7 +544,7 @@ export const knowledgeReadinessReasonSchema = z.enum([
 
 export const knowledgeCapabilityReadinessSchema = z.object({
   status: knowledgeCapabilityStatusSchema,
-  provider: z.enum(['disabled', 'openai_compatible', 'cohere_compatible']),
+  provider: z.enum(['disabled', 'openai_compatible', 'cohere_compatible', 'local_fastembed']),
   model: z.string().min(1).max(200).nullable(),
   dimensions: z.number().int().positive().nullable(),
 });
@@ -723,7 +735,8 @@ export const createKnowledgeBaseRequestSchema = z.object({
     .trim()
     .min(2)
     .max(100)
-    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/)
+    .optional(),
   name: z.string().trim().min(1).max(200),
   description: z.string().trim().max(4_000).nullable().optional(),
   status: knowledgeBaseStatusSchema.default('DRAFT'),
@@ -1024,3 +1037,12 @@ export type KnowledgeRelationshipPathEdge = z.infer<typeof knowledgeRelationship
 export type KnowledgeRelationshipEvidence = z.infer<typeof knowledgeRelationshipEvidenceSchema>;
 export type KnowledgeRetrievalDiagnostic = z.infer<typeof knowledgeRetrievalDiagnosticSchema>;
 export type KnowledgeRetrievalTestResponse = z.infer<typeof knowledgeRetrievalTestResponseSchema>;
+
+function isIanaTimeZone(value: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}

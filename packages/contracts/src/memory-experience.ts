@@ -469,7 +469,12 @@ export const createExperienceCandidateRequestSchema = z
     sourceTaskId: UUID,
     sourceDeliverableIds: UNIQUE_UUIDS,
     sourceEvidenceIds: UNIQUE_UUIDS.min(1),
-    rawInputHash: SHA256,
+    /**
+     * @deprecated The API recomputes this value from the governed request.
+     * It remains optional on the wire so older clients can upgrade without a
+     * breaking request-shape migration.
+     */
+    rawInputHash: SHA256.optional(),
     candidateSummary: LONG_TEXT,
     permissionLabels: UNIQUE_LABELS,
     sensitivity: memorySensitivitySchema,

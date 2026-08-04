@@ -24,7 +24,7 @@ beforeEach(() => {
   for (const mock of Object.values(apiMocks)) mock.mockReset();
   apiMocks.listEmployeeExperiences.mockResolvedValue({ items: [], nextCursor: null });
   apiMocks.getEmployeeExperienceSources.mockResolvedValue({
-    task: { id: TASK, title: '客户交付复盘' },
+    task: { id: TASK, title: '客户交付复盘', permissionLabels: [] },
     deliverables: [],
     evidence: [
       {

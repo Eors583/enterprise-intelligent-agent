@@ -740,9 +740,60 @@ foreach ($required in @(
   "'::text[]'",
   "'CHECK (delivery_attempts >= 0)'",
   "'CHECK (expires_at > created_at)'",
-  "'CHECK (consumed_at IS NULL OR revoked_at IS NULL)'"
+  "'CHECK (consumed_at IS NULL OR revoked_at IS NULL)'",
+  'auth_action_tokens_delivery_target_evidence_check',
+  "''ISSUED''::character varying",
+  "''LEGACY_INFERRED''::character varying",
+  '(SELECT count(*) FROM expected) = 8',
+  "constraint_definition.contype = 'c'",
+  ') = 8'
 )) {
   Assert-True ($checks.Contains($required)) "Exact action-token CHECK gate is missing $required."
+  $tests++
+}
+
+$deliveryTarget = Get-EnterpriseAuthActionTokenDeliveryTargetIntegritySql
+foreach ($required in @(
+  'enforce_auth_action_token_delivery_target_immutable',
+  'auth_action_tokens_delivery_target_immutable',
+  "actual.tgenabled = 'O'",
+  'actual.trigger_type = 19',
+  'actual.update_columns = ARRAY[',
+  "attribute_definition.attname = 'delivery_target_email'",
+  "attribute_definition.attname = 'delivery_target_evidence'",
+  "ARRAY['search_path=pg_catalog, public']::text[]",
+  'NOT definition.prosecdef',
+  'NOT definition.proleakproof',
+  "definition.provolatile = 'v'",
+  "definition.proparallel = 'u'",
+  "definition.result_type = 'trigger'",
+  "definition.language_name = 'plpgsql'",
+  'definition.proacl IS NOT NULL',
+  'aclexplode(',
+  "COALESCE(grantee_role.rolname, 'PUBLIC')",
+  'function_acl.grantee <> definition.proowner',
+  'NOT EXISTS (SELECT 1 FROM non_owner_function_acl)',
+  'new.delivery_target_emailisdistinctfromold.delivery_target_email',
+  'new.delivery_target_evidenceisdistinctfromold.delivery_target_evidence',
+  "errcode=''23514''",
+  "regexp_count(definition.definition, '\mRAISE\s+EXCEPTION\M'",
+  "position('execute' IN definition.compact_definition) = 0",
+  'pg_get_triggerdef',
+  'BEFORE UPDATE OF delivery_target_email, delivery_target_evidence'
+)) {
+  Assert-True ($deliveryTarget.Contains($required)) "Action-token delivery-target integrity gate is missing $required."
+  $tests++
+}
+foreach ($required in @(
+  'Get-EnterpriseAuthActionTokenDeliveryTargetIntegritySql',
+  'authActionTokenDeliveryTargetIntegrity = $authActionTokenDeliveryTargetIntegrity',
+  'authActionTokenDeliveryTargetNegativeControls',
+  'DROP CONSTRAINT auth_action_tokens_delivery_target_evidence_check',
+  'DISABLE TRIGGER auth_action_tokens_delivery_target_immutable',
+  'enforce_auth_action_token_delivery_target_immutable() TO PUBLIC',
+  'authActionTokenDeliveryTargetRestoredAfterControl'
+)) {
+  Assert-True ($restoreScript.Contains($required)) "Restore script is missing action-token delivery-target gate wiring: $required."
   $tests++
 }
 

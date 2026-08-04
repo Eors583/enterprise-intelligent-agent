@@ -60,7 +60,7 @@ export interface EnvironmentVariables {
   readonly DEV_USER_ID: string;
   readonly TRUST_PROXY_IDENTITY_HEADERS: boolean;
   readonly IM_OUTBOX_ENABLED: boolean;
-  readonly IM_PROVIDER: 'local' | 'tencent';
+  readonly IM_PROVIDER: 'local' | 'tencent' | 'wukong';
   readonly IM_OUTBOX_POLL_INTERVAL_MS: number;
   readonly IM_OUTBOX_BATCH_SIZE: number;
   readonly IM_OUTBOX_MAX_ATTEMPTS: number;
@@ -74,6 +74,12 @@ export interface EnvironmentVariables {
   readonly TENCENT_IM_API_BASE_URL: string;
   readonly TENCENT_IM_USER_SIG_TTL_SECONDS: number;
   readonly TENCENT_IM_HTTP_TIMEOUT_MS: number;
+  readonly WUKONG_IM_API_BASE_URL: string;
+  readonly WUKONG_IM_PUBLIC_WS_URL: string;
+  readonly WUKONG_IM_API_TOKEN?: string;
+  readonly WUKONG_IM_TOKEN_SIGNING_SECRET?: string;
+  readonly WUKONG_IM_HTTP_TIMEOUT_MS: number;
+  readonly WUKONG_IM_VERIFIED_AUTH_ENABLED: boolean;
   readonly AGENT_RUN_WORKER_ENABLED: boolean;
   readonly AGENT_RUN_WORKER_CONCURRENCY: number;
   readonly AGENT_RUN_POLL_INTERVAL_MS: number;
@@ -174,6 +180,8 @@ const DEFAULT_TENANT_ID = '00000000-0000-7000-8000-000000000001';
 const DEFAULT_USER_ID = '00000000-0000-7000-8000-000000000101';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TENCENT_IM_DEFAULT_API_BASE_URL = 'https://console.tim.qq.com';
+const WUKONG_IM_DEFAULT_API_BASE_URL = 'http://127.0.0.1:5501';
+const WUKONG_IM_DEFAULT_PUBLIC_WS_URL = 'ws://127.0.0.1:5520';
 const TENCENT_IM_ACCOUNT_PATTERN = /^[A-Za-z0-9_-]+$/;
 const TENANT_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const FEISHU_DEFAULT_API_BASE_URL = 'https://open.feishu.cn';
@@ -442,6 +450,27 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     500,
     60_000,
   );
+  const wukongApiBaseUrl = parseWukongApiBaseUrl(
+    source.WUKONG_IM_API_BASE_URL ?? WUKONG_IM_DEFAULT_API_BASE_URL,
+    imProvider === 'wukong' ? nodeEnvironment : 'development',
+  );
+  const wukongPublicWsUrl = parseWukongPublicWsUrl(
+    source.WUKONG_IM_PUBLIC_WS_URL ?? WUKONG_IM_DEFAULT_PUBLIC_WS_URL,
+    imProvider === 'wukong' ? nodeEnvironment : 'development',
+  );
+  const wukongApiToken = parseOptionalSecret(source.WUKONG_IM_API_TOKEN, 'WUKONG_IM_API_TOKEN');
+  const wukongTokenSigningSecret = parseOptionalSecret(
+    source.WUKONG_IM_TOKEN_SIGNING_SECRET,
+    'WUKONG_IM_TOKEN_SIGNING_SECRET',
+  );
+  const wukongHttpTimeoutMs = parseInteger(
+    source.WUKONG_IM_HTTP_TIMEOUT_MS,
+    'WUKONG_IM_HTTP_TIMEOUT_MS',
+    5_000,
+    500,
+    60_000,
+  );
+  const wukongVerifiedAuthEnabled = parseBoolean(source.WUKONG_IM_VERIFIED_AUTH_ENABLED, false);
   const agentRunWorkerEnabled = parseBoolean(
     source.AGENT_RUN_WORKER_ENABLED,
     nodeEnvironment === 'development' && repositoryDriver === 'prisma',
@@ -1032,6 +1061,27 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
       throw new Error('TENCENT_IM_HTTP_TIMEOUT_MS must be less than IM_PROVIDER_TIMEOUT_MS.');
     }
   }
+  if (imProvider === 'wukong') {
+    if (wukongTokenSigningSecret === undefined) {
+      throw new Error('WUKONG_IM_TOKEN_SIGNING_SECRET is required when IM_PROVIDER=wukong.');
+    }
+    if (nodeEnvironment === 'production' && wukongTokenSigningSecret.length < 32) {
+      throw new Error(
+        'WUKONG_IM_TOKEN_SIGNING_SECRET must contain at least 32 characters in production.',
+      );
+    }
+    if (nodeEnvironment === 'production' && wukongApiToken === undefined) {
+      throw new Error('WUKONG_IM_API_TOKEN is required when production uses WuKongIM.');
+    }
+    if (nodeEnvironment === 'production' && !wukongVerifiedAuthEnabled) {
+      throw new Error(
+        'WUKONG_IM_VERIFIED_AUTH_ENABLED=true is required after REST proxy and gateway token verification have been independently tested.',
+      );
+    }
+    if (imOutboxEnabled && wukongHttpTimeoutMs >= imProviderTimeoutMs) {
+      throw new Error('WUKONG_IM_HTTP_TIMEOUT_MS must be less than IM_PROVIDER_TIMEOUT_MS.');
+    }
+  }
   if (imOutboxRetryBaseMs > imOutboxRetryMaxMs) {
     throw new Error('IM_OUTBOX_RETRY_BASE_MS must not exceed IM_OUTBOX_RETRY_MAX_MS.');
   }
@@ -1251,6 +1301,14 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     TENCENT_IM_API_BASE_URL: tencentApiBaseUrl,
     TENCENT_IM_USER_SIG_TTL_SECONDS: tencentUserSigTtlSeconds,
     TENCENT_IM_HTTP_TIMEOUT_MS: tencentHttpTimeoutMs,
+    WUKONG_IM_API_BASE_URL: wukongApiBaseUrl,
+    WUKONG_IM_PUBLIC_WS_URL: wukongPublicWsUrl,
+    ...(wukongApiToken === undefined ? {} : { WUKONG_IM_API_TOKEN: wukongApiToken }),
+    ...(wukongTokenSigningSecret === undefined
+      ? {}
+      : { WUKONG_IM_TOKEN_SIGNING_SECRET: wukongTokenSigningSecret }),
+    WUKONG_IM_HTTP_TIMEOUT_MS: wukongHttpTimeoutMs,
+    WUKONG_IM_VERIFIED_AUTH_ENABLED: wukongVerifiedAuthEnabled,
     AGENT_RUN_WORKER_ENABLED: agentRunWorkerEnabled,
     AGENT_RUN_WORKER_CONCURRENCY: agentRunWorkerConcurrency,
     AGENT_RUN_POLL_INTERVAL_MS: agentRunPollIntervalMs,
@@ -1707,12 +1765,69 @@ function parseAuthPublicAppUrl(value: unknown, environment: NodeEnvironment): st
   return parsed.origin;
 }
 
-function parseImProvider(value: unknown): 'local' | 'tencent' {
+function parseImProvider(value: unknown): 'local' | 'tencent' | 'wukong' {
   const parsed = value ?? 'local';
-  if (parsed !== 'local' && parsed !== 'tencent') {
-    throw new Error('IM_PROVIDER must be local or tencent.');
+  if (parsed !== 'local' && parsed !== 'tencent' && parsed !== 'wukong') {
+    throw new Error('IM_PROVIDER must be local, tencent, or wukong.');
   }
   return parsed;
+}
+
+function parseWukongApiBaseUrl(value: unknown, environment: NodeEnvironment): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error('WUKONG_IM_API_BASE_URL must be a valid HTTP(S) origin.');
+  }
+  const localHttp =
+    environment !== 'production' &&
+    parsed.protocol === 'http:' &&
+    isLoopbackHostname(parsed.hostname);
+  if (
+    (parsed.protocol !== 'https:' && !localHttp) ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    (parsed.pathname !== '/' && parsed.pathname !== '')
+  ) {
+    throw new Error(
+      'WUKONG_IM_API_BASE_URL must be an HTTPS origin (loopback HTTP is allowed outside production).',
+    );
+  }
+  return parsed.origin;
+}
+
+function parseWukongPublicWsUrl(value: unknown, environment: NodeEnvironment): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error('WUKONG_IM_PUBLIC_WS_URL must be a valid WebSocket origin.');
+  }
+  const localWs =
+    environment !== 'production' &&
+    parsed.protocol === 'ws:' &&
+    isLoopbackHostname(parsed.hostname);
+  if (
+    (parsed.protocol !== 'wss:' && !localWs) ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    (parsed.pathname !== '/' && parsed.pathname !== '')
+  ) {
+    throw new Error(
+      'WUKONG_IM_PUBLIC_WS_URL must be a WSS origin (loopback WS is allowed outside production).',
+    );
+  }
+  return parsed.origin;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '[::1]';
 }
 
 function parseToolEndpointBindings(

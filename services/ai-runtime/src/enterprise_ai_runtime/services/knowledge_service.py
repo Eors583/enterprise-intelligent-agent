@@ -89,7 +89,9 @@ class KnowledgeService:
             embeddings=EmbeddingCapability(
                 status=embedding_status,
                 provider=(
-                    "openai_compatible" if self._embedding_provider is not None else "disabled"
+                    getattr(self._embedding_provider, "provider", "openai_compatible")
+                    if self._embedding_provider is not None
+                    else "disabled"
                 ),
                 model=(
                     self._embedding_provider.model if self._embedding_provider is not None else None
@@ -98,7 +100,11 @@ class KnowledgeService:
             ),
             rerank=RerankCapability(
                 status=rerank_status,
-                provider="cohere_compatible" if self._rerank_provider is not None else "disabled",
+                provider=(
+                    getattr(self._rerank_provider, "provider", "cohere_compatible")
+                    if self._rerank_provider is not None
+                    else "disabled"
+                ),
                 model=self._rerank_provider.model if self._rerank_provider is not None else None,
             ),
         )

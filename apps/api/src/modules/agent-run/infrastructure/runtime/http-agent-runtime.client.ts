@@ -639,7 +639,10 @@ function parseModelAttempts(
 function parseSafetyDecision(
   value: unknown,
 ): NonNullable<RuntimeRunResult['outputSafetyDecision']> | undefined {
-  if (value === undefined) return undefined;
+  // Pydantic serializes an absent optional safety decision as JSON null. Treat
+  // both wire representations as "not supplied"; otherwise a legitimate
+  // provider failure is misclassified as an unknown/invalid Runtime response.
+  if (value === undefined || value === null) return undefined;
   if (!isRecord(value)) throw invalidResponse();
   const reasonCodes = value.reason_codes;
   if (

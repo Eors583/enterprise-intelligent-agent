@@ -89,4 +89,5 @@ Desktop.ini
 # Codex/local review artifacts
 .codex_tmp/
 .tmp/
+design-qa.md
 apps/api/.generated/

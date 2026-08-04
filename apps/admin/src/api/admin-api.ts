@@ -14,6 +14,7 @@ import {
   completePasswordResetRequestSchema,
   completePasswordResetResponseSchema,
   createExperienceCandidateRequestSchema,
+  createDepartmentAgentRequestSchema,
   createToolDefinitionRequestSchema,
   createToolVersionRequestSchema,
   createKnowledgeBaseRequestSchema,
@@ -123,6 +124,7 @@ import {
   type CompletePasswordResetRequest,
   type CompletePasswordResetResponse,
   type CreateExperienceCandidateRequest,
+  type CreateDepartmentAgentRequest,
   type CreateToolDefinitionRequest,
   type CreateToolVersionRequest,
   type CreateKnowledgeBaseRequest,
@@ -501,6 +503,14 @@ export function listAgents(signal?: AbortSignal): Promise<AdminAgentListResponse
   return request('/admin/agents', {
     schema: adminAgentListResponseSchema,
     ...(signal ? { signal } : {}),
+  });
+}
+
+export function createDepartmentAgent(input: CreateDepartmentAgentRequest): Promise<AdminAgent> {
+  return request('/admin/agents/departments', {
+    method: 'POST',
+    body: createDepartmentAgentRequestSchema.parse(input),
+    schema: adminAgentSchema,
   });
 }
 

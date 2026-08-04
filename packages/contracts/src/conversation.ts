@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const conversationTypeSchema = z.literal('direct');
+export const conversationTypeSchema = z.enum(['direct', 'group']);
 
 export const conversationTargetSchema = z
   .discriminatedUnion('type', [
@@ -38,6 +38,7 @@ export const conversationParticipantSchema = z.object({
   type: z.enum(['user', 'agent']),
   id: z.string().uuid(),
   name: z.string().min(1),
+  role: z.enum(['owner', 'admin', 'member']).optional(),
 });
 
 export const conversationSchema = z.object({
@@ -46,16 +47,112 @@ export const conversationSchema = z.object({
   title: z.string().min(1).nullable(),
   participants: z.array(conversationParticipantSchema).min(2),
   lastMessageAt: z.iso.datetime().nullable(),
+  unreadCount: z.number().int().nonnegative().optional(),
+  pinnedAt: z.iso.datetime().nullable().optional(),
+  archivedAt: z.iso.datetime().nullable().optional(),
+  mutedUntil: z.iso.datetime().nullable().optional(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 });
 
-export const createConversationRequestSchema = z
+export const createConversationRequestSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('direct'), target: conversationTargetSchema }).strict(),
+  z
+    .object({
+      type: z.literal('group'),
+      title: z.string().trim().min(1).max(200),
+      memberUserIds: z.array(z.string().uuid()).max(199).default([]),
+      agentIds: z.array(z.string().uuid()).max(2).default([]),
+    })
+    .strict()
+    .superRefine((request, context) => {
+      if (request.memberUserIds.length + request.agentIds.length === 0) {
+        context.addIssue({
+          code: 'custom',
+          path: ['memberUserIds'],
+          message: 'A group requires at least one employee or Agent participant.',
+        });
+      }
+      for (const [field, values] of [
+        ['memberUserIds', request.memberUserIds],
+        ['agentIds', request.agentIds],
+      ] as const) {
+        if (new Set(values).size !== values.length) {
+          context.addIssue({
+            code: 'custom',
+            path: [field],
+            message: `${field} must not contain duplicates.`,
+          });
+        }
+      }
+    }),
+]);
+
+export const conversationListQuerySchema = z
   .object({
-    type: conversationTypeSchema,
-    target: conversationTargetSchema,
+    query: z.string().trim().max(100).optional(),
+    includeArchived: z.coerce.boolean().default(false),
   })
   .strict();
+
+export const updateConversationStateRequestSchema = z
+  .object({
+    pinned: z.boolean().optional(),
+    archived: z.boolean().optional(),
+    mutedUntil: z.iso.datetime().nullable().optional(),
+  })
+  .strict()
+  .refine((request) => Object.keys(request).length > 0, 'At least one state field is required.');
+
+export const markConversationReadRequestSchema = z
+  .object({ lastMessageId: z.string().uuid().optional() })
+  .strict();
+
+export const updateGroupRequestSchema = z
+  .object({ title: z.string().trim().min(1).max(200) })
+  .strict();
+
+export const updateGroupMembersRequestSchema = z
+  .object({
+    addUserIds: z.array(z.string().uuid()).max(100).default([]),
+    removeUserIds: z.array(z.string().uuid()).max(100).default([]),
+    addAgentIds: z.array(z.string().uuid()).max(20).default([]),
+    removeAgentIds: z.array(z.string().uuid()).max(20).default([]),
+  })
+  .strict()
+  .superRefine((request, context) => {
+    const groups = [
+      ['addUserIds', request.addUserIds],
+      ['removeUserIds', request.removeUserIds],
+      ['addAgentIds', request.addAgentIds],
+      ['removeAgentIds', request.removeAgentIds],
+    ] as const;
+    if (groups.every(([, values]) => values.length === 0)) {
+      context.addIssue({
+        code: 'custom',
+        path: [],
+        message: 'At least one member change is required.',
+      });
+    }
+    for (const [field, values] of groups) {
+      if (new Set(values).size !== values.length) {
+        context.addIssue({ code: 'custom', path: [field], message: `${field} has duplicates.` });
+      }
+    }
+    for (const [addField, removeField] of [
+      ['addUserIds', 'removeUserIds'],
+      ['addAgentIds', 'removeAgentIds'],
+    ] as const) {
+      const removed = new Set(request[removeField]);
+      if (request[addField].some((id) => removed.has(id))) {
+        context.addIssue({
+          code: 'custom',
+          path: [addField],
+          message: 'The same member cannot be added and removed in one request.',
+        });
+      }
+    }
+  });
 
 export const conversationListResponseSchema = z.object({
   items: z.array(conversationSchema),
@@ -226,12 +323,24 @@ export const createTextMessageContentSchema = z
   })
   .strict();
 
+/**
+ * Selects who should actively respond inside a shared member conversation.
+ * Every active human participant can still read the message; this only
+ * controls whether an Agent Run is created for the message.
+ */
+export const messageResponseTargetSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('human'), userId: z.string().uuid() }).strict(),
+  z.object({ type: z.literal('agent'), agentId: z.string().uuid() }).strict(),
+]);
+
 export const messageSchema = z.object({
   id: z.string().uuid(),
   conversationId: z.string().uuid(),
   sender: messageSenderSchema,
   clientMessageId: z.string().min(8).max(200),
   content: textMessageContentSchema,
+  // Older persisted messages predate explicit response routing.
+  responseTarget: messageResponseTargetSchema.nullable().optional(),
   createdAt: z.iso.datetime(),
 });
 
@@ -239,6 +348,8 @@ export const createMessageRequestSchema = z
   .object({
     clientMessageId: z.string().min(8).max(200),
     content: createTextMessageContentSchema,
+    // Optional keeps older clients and legacy two-party conversations valid.
+    responseTarget: messageResponseTargetSchema.optional(),
   })
   .strict();
 
@@ -269,13 +380,36 @@ export const conversationAgentRunSchema = z.object({
 export const messageListResponseSchema = z.object({
   items: z.array(messageSchema),
   runs: z.array(conversationAgentRunSchema).default([]),
+  nextCursor: z.string().uuid().nullable().optional(),
+  hasMore: z.boolean().optional(),
 });
+
+export const messageListQuerySchema = z
+  .object({
+    before: z.string().uuid().optional(),
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+  })
+  .strict();
+
+export const messageSearchQuerySchema = z
+  .object({
+    query: z.string().trim().min(1).max(200),
+    limit: z.coerce.number().int().min(1).max(100).default(30),
+  })
+  .strict();
+
+export const messageSearchResponseSchema = z.object({ items: z.array(messageSchema) });
 
 export type ConversationType = z.infer<typeof conversationTypeSchema>;
 export type ConversationTarget = z.infer<typeof conversationTargetSchema>;
 export type ConversationParticipant = z.infer<typeof conversationParticipantSchema>;
 export type Conversation = z.infer<typeof conversationSchema>;
 export type CreateConversationRequest = z.infer<typeof createConversationRequestSchema>;
+export type ConversationListQuery = z.infer<typeof conversationListQuerySchema>;
+export type UpdateConversationStateRequest = z.infer<typeof updateConversationStateRequestSchema>;
+export type MarkConversationReadRequest = z.infer<typeof markConversationReadRequestSchema>;
+export type UpdateGroupRequest = z.infer<typeof updateGroupRequestSchema>;
+export type UpdateGroupMembersRequest = z.infer<typeof updateGroupMembersRequestSchema>;
 export type ConversationListResponse = z.infer<typeof conversationListResponseSchema>;
 export type MessageSender = z.infer<typeof messageSenderSchema>;
 export type KnowledgeCitation = z.infer<typeof knowledgeCitationSchema>;
@@ -288,7 +422,11 @@ export type AnswerFeedback = z.infer<typeof answerFeedbackSchema>;
 export type CurrentAnswerFeedbackResponse = z.infer<typeof currentAnswerFeedbackResponseSchema>;
 export type TextMessageContent = z.infer<typeof textMessageContentSchema>;
 export type CreateTextMessageContent = z.infer<typeof createTextMessageContentSchema>;
+export type MessageResponseTarget = z.infer<typeof messageResponseTargetSchema>;
 export type Message = z.infer<typeof messageSchema>;
 export type ConversationAgentRun = z.infer<typeof conversationAgentRunSchema>;
 export type CreateMessageRequest = z.infer<typeof createMessageRequestSchema>;
 export type MessageListResponse = z.infer<typeof messageListResponseSchema>;
+export type MessageListQuery = z.infer<typeof messageListQuerySchema>;
+export type MessageSearchQuery = z.infer<typeof messageSearchQuerySchema>;
+export type MessageSearchResponse = z.infer<typeof messageSearchResponseSchema>;

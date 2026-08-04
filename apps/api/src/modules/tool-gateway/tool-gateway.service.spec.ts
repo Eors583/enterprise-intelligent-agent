@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { RuntimeIdentityPort } from '../process-orchestration/application/runtime-identity.port.js';
 import { ToolGatewayRepository } from './tool-gateway.repository.js';
-import { ToolGatewayService } from './tool-gateway.service.js';
+import { stableToolDefinitionKey, ToolGatewayService } from './tool-gateway.service.js';
 
 const PRINCIPAL = {
   tenantId: '00000000-0000-7000-8000-000000000301',
@@ -17,6 +17,63 @@ const PRINCIPAL = {
 };
 
 describe('ToolGatewayService', () => {
+  it('derives a stable server key when the client omits one', async () => {
+    const repository = repositoryMock();
+    repository.createDefinition.mockResolvedValueOnce({
+      kind: 'APPLIED',
+      value: { id: 'tool-1', key: 'customer-profile' },
+    });
+    const service = new ToolGatewayService(
+      repository as unknown as ToolGatewayRepository,
+      { current: () => PRINCIPAL } as RuntimeIdentityPort,
+      config(),
+    );
+    const request = {
+      name: 'Customer Profile',
+      description: 'Read customer profile.',
+      permissionLabels: ['crm.read'],
+      idempotencyKey: 'create-tool-1',
+    };
+
+    await expect(service.createDefinition(request)).resolves.toMatchObject({
+      key: 'customer-profile',
+    });
+    expect(repository.createDefinition).toHaveBeenCalledWith({
+      principal: PRINCIPAL,
+      keyWasGenerated: true,
+      request: { ...request, key: 'customer-profile' },
+    });
+    expect(stableToolDefinitionKey('客户资料')).toMatch(/^tool-[a-f0-9]{12}$/u);
+  });
+
+  it('preserves a legacy explicit Tool Definition key', async () => {
+    const repository = repositoryMock();
+    repository.createDefinition.mockResolvedValueOnce({
+      kind: 'APPLIED',
+      value: { id: 'tool-1', key: 'crm.customer.read' },
+    });
+    const service = new ToolGatewayService(
+      repository as unknown as ToolGatewayRepository,
+      { current: () => PRINCIPAL } as RuntimeIdentityPort,
+      config(),
+    );
+    const request = {
+      key: 'crm.customer.read',
+      name: '客户资料',
+      description: '读取客户资料。',
+      permissionLabels: [],
+      idempotencyKey: 'create-tool-explicit',
+    };
+
+    await service.createDefinition(request);
+
+    expect(repository.createDefinition).toHaveBeenCalledWith({
+      principal: PRINCIPAL,
+      keyWasGenerated: false,
+      request,
+    });
+  });
+
   it('discovers only tools authorized by the repository for the trusted task principal', async () => {
     const repository = repositoryMock();
     repository.listAvailableTools.mockResolvedValueOnce([

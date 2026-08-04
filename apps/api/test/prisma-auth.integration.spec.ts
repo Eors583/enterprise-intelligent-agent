@@ -184,6 +184,8 @@ describe.runIf(enabled)('PostgreSQL authentication integration', () => {
         userId: owner.id,
         purpose: 'PASSWORD_RESET',
         tokenHash,
+        deliveryTargetEmail: owner.email,
+        deliveryTargetEvidence: 'ISSUED',
         expiresAt: new Date(Date.now() + 60_000),
       },
     });
@@ -242,6 +244,8 @@ describe.runIf(enabled)('PostgreSQL authentication integration', () => {
         userId: owner.id,
         purpose: 'PASSWORD_RESET',
         tokenHash,
+        deliveryTargetEmail: owner.email,
+        deliveryTargetEvidence: 'ISSUED',
         expiresAt: new Date(Date.now() + 60_000),
       },
     });

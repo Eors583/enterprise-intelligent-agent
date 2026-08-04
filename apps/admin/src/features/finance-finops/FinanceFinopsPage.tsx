@@ -1,4 +1,5 @@
 import type {
+  Evidence,
   FinopsBudget,
   FinopsCostEntry,
   FinopsDashboard,
@@ -24,6 +25,7 @@ import {
 } from './api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
+import { listEvidence } from '@/features/business-semantics/api';
 
 import './finance-finops.css';
 
@@ -48,6 +50,7 @@ export function FinanceFinopsPage({
   const [tab, setTab] = useState<FinopsTab>('COST');
   const [currency, setCurrency] = useState('CNY');
   const [dashboard, setDashboard] = useState<FinopsDashboard | null>(null);
+  const [evidenceCatalog, setEvidenceCatalog] = useState<Evidence[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +76,22 @@ export function FinanceFinopsPage({
     void reload(controller.signal);
     return () => controller.abort();
   }, [reload]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void listEvidence(controller.signal)
+      .then((items) =>
+        setEvidenceCatalog(
+          items.filter((item) => item.status === 'ACTIVE' && item.trustLevel === 'VERIFIED'),
+        ),
+      )
+      .catch((caught: unknown) => {
+        if (!(caught instanceof DOMException && caught.name === 'AbortError')) {
+          setEvidenceCatalog([]);
+        }
+      });
+    return () => controller.abort();
+  }, []);
 
   const mutate = async (operation: () => Promise<unknown>): Promise<void> => {
     setError(null);
@@ -151,7 +170,12 @@ export function FinanceFinopsPage({
       ) : null}
 
       {!loading && data && tab === 'COST' ? (
-        <CostPanel dashboard={data} currentUserId={currentUserId} onMutate={mutate} />
+        <CostPanel
+          dashboard={data}
+          currentUserId={currentUserId}
+          evidenceCatalog={evidenceCatalog}
+          onMutate={mutate}
+        />
       ) : null}
       {!loading && data && tab === 'BUDGET' ? (
         <BudgetPanel
@@ -180,10 +204,12 @@ export function FinanceFinopsPage({
 function CostPanel({
   dashboard,
   currentUserId,
+  evidenceCatalog,
   onMutate,
 }: {
   dashboard: FinopsDashboard;
   currentUserId: string;
+  evidenceCatalog: Evidence[];
   onMutate: Mutate;
 }): ReactNode {
   return (
@@ -327,6 +353,7 @@ function CostPanel({
                     <CostReviewForm
                       entry={entry}
                       disabled={entry.recordedByUserId === currentUserId}
+                      evidenceCatalog={evidenceCatalog}
                       onReview={(input) => onMutate(() => reviewFinopsCost(entry.id, input))}
                     />
                   </td>
@@ -361,6 +388,7 @@ function BudgetPanel({
         <BudgetForm
           tenantId={tenantId}
           currency={dashboard.currency}
+          dimensionMembers={dashboard.dimensionMembers}
           onCreate={(input) => onMutate(() => createFinopsBudget(input))}
         />
       </section>
@@ -368,6 +396,7 @@ function BudgetPanel({
         <CardTitle title="预留 / 结算" copy="预留受硬限额约束，结算必须绑定已验证成本。" />
         <BudgetEventForm
           budgets={dashboard.budgets}
+          costEntries={dashboard.costEntries}
           onCreate={(budgetId, input) => onMutate(() => createFinopsBudgetEvent(budgetId, input))}
         />
       </section>
@@ -875,72 +904,68 @@ function CostForm({
 }): ReactNode {
   const [formError, setFormError] = useState<string | null>(null);
   const approvedPrices = priceSnapshots.filter((price) => price.status === 'APPROVED');
-  const submit = (event: FormEvent<HTMLFormElement>): void => {
+  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
     const subjectType = required(data, 'subjectType') as FinopsCostEntry['subjectType'];
-    const subjectId = required(data, 'subjectId');
-    const evidenceId = optional(data, 'evidenceId');
-    let rawUsage: Record<string, unknown>;
-    try {
-      const parsed: unknown = JSON.parse(required(data, 'rawUsage'));
-      if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
-        throw new Error('原始用量必须是 JSON 对象。');
-      }
-      rawUsage = parsed as Record<string, unknown>;
-    } catch (caught) {
-      setFormError(caught instanceof Error ? caught.message : '原始用量 JSON 无效。');
+    const priceSnapshotId = required(data, 'priceSnapshotId');
+    const price = approvedPrices.find((candidate) => candidate.id === priceSnapshotId);
+    if (!price) {
+      setFormError('请选择当前已批准的计价方案。');
       return;
     }
-    setFormError(null);
-    void onCreate({
+    const quantity = required(data, 'quantity');
+    const incurredAt = new Date(required(data, 'incurredAt')).toISOString();
+    const subjectId = `manual-${crypto.randomUUID()}`;
+    const sourceContent = JSON.stringify({
       subjectType,
       subjectId,
-      agentRunId: subjectType === 'AGENT_RUN' ? subjectId : null,
-      toolInvocationId: subjectType === 'TOOL_INVOCATION' ? subjectId : null,
-      knowledgeDocumentVersionId: subjectType === 'KNOWLEDGE_OPERATION' ? subjectId : null,
-      humanUserId: subjectType === 'HUMAN_TIME' ? subjectId : null,
-      priceSnapshotId: required(data, 'priceSnapshotId'),
-      quantity: required(data, 'quantity'),
-      rawUsage,
-      formulaCode: 'LINEAR_UNIT_RATE',
-      formulaVersion: 1,
-      formulaExpression: '(quantity / unitSize) * unitPrice',
-      verificationStatus: 'PENDING',
-      source: {
-        authority: 'HUMAN_ATTESTED',
-        system: required(data, 'sourceSystem'),
-        recordId: required(data, 'sourceRecordId'),
-        recordVersion: required(data, 'sourceRecordVersion'),
-        contentHash: required(data, 'sourceContentHash'),
-        evidenceId,
-        evidenceVersion: evidenceId === null ? null : Number(required(data, 'evidenceVersion')),
-      },
-      incurredAt: new Date(required(data, 'incurredAt')).toISOString(),
-      idempotencyKey: key('cost-record'),
-    }).then(() => form.reset());
+      priceSnapshotId,
+      quantity,
+      incurredAt,
+    });
+    setFormError(null);
+    try {
+      await onCreate({
+        subjectType,
+        subjectId,
+        agentRunId: null,
+        toolInvocationId: null,
+        knowledgeDocumentVersionId: null,
+        humanUserId: null,
+        priceSnapshotId,
+        quantity,
+        rawUsage: { billingUnit: price.billingUnit, quantity },
+        formulaCode: 'LINEAR_UNIT_RATE',
+        formulaVersion: 1,
+        formulaExpression: '(quantity / unitSize) * unitPrice',
+        verificationStatus: 'PENDING',
+        source: {
+          authority: 'HUMAN_ATTESTED',
+          system: 'ADMIN_MANUAL_ENTRY',
+          recordId: subjectId,
+          recordVersion: '1',
+          contentHash: await sha256Hex(sourceContent),
+          evidenceId: null,
+          evidenceVersion: null,
+        },
+        incurredAt,
+        idempotencyKey: key('cost-record'),
+      });
+      form.reset();
+    } catch (caught) {
+      setFormError(messageFromError(caught));
+    }
   };
   return (
     <form className="finops-inline-form" onSubmit={submit}>
       <label>
         成本对象
         <select name="subjectType" defaultValue="API">
-          {[
-            'AGENT_RUN',
-            'TOOL_INVOCATION',
-            'KNOWLEDGE_OPERATION',
-            'HUMAN_TIME',
-            'API',
-            'STORAGE',
-          ].map((value) => (
-            <option key={value}>{value}</option>
-          ))}
+          <option value="API">接口调用</option>
+          <option value="STORAGE">文件存储</option>
         </select>
-      </label>
-      <label>
-        对象 ID
-        <input name="subjectId" required placeholder="受治理对象 UUID 或外部对象键" />
       </label>
       <label>
         已批准价格
@@ -961,34 +986,9 @@ function CostForm({
         发生时间
         <input name="incurredAt" type="datetime-local" required />
       </label>
-      <label>
-        原始用量 JSON
-        <textarea name="rawUsage" required defaultValue={'{"unit":"request","count":1}'} />
-      </label>
-      <label>
-        来源系统
-        <input name="sourceSystem" required />
-      </label>
-      <label>
-        来源记录
-        <input name="sourceRecordId" required />
-      </label>
-      <label>
-        来源版本
-        <input name="sourceRecordVersion" required />
-      </label>
-      <label>
-        来源 SHA-256
-        <input name="sourceContentHash" required minLength={64} maxLength={64} />
-      </label>
-      <label>
-        来源 Evidence ID（可选）
-        <input name="evidenceId" />
-      </label>
-      <label>
-        Evidence 版本
-        <input name="evidenceVersion" type="number" min="1" />
-      </label>
+      <small>
+        记录标识、来源版本、校验值和计价公式由系统生成；智能体、工具和知识处理成本只从真实运行记录自动归集。
+      </small>
       <button type="submit" className="primary-button" disabled={approvedPrices.length === 0}>
         <Icon name="plus" size={16} /> 登记待复核成本
       </button>
@@ -1001,22 +1001,26 @@ function CostForm({
 function CostReviewForm({
   entry,
   disabled,
+  evidenceCatalog,
   onReview,
 }: {
   entry: FinopsCostEntry;
   disabled: boolean;
+  evidenceCatalog: Evidence[];
   onReview: (input: Parameters<typeof reviewFinopsCost>[1]) => Promise<void>;
 }): ReactNode {
+  const [basis, setBasis] =
+    useState<Parameters<typeof reviewFinopsCost>[1]['basis']>('TRUSTED_EVIDENCE');
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const evidenceId = optional(data, 'reviewEvidenceId');
+    const evidence = evidenceCatalog.find((item) => item.id === optional(data, 'evidence'));
     void onReview({
       decision: required(data, 'decision') as Parameters<typeof reviewFinopsCost>[1]['decision'],
-      basis: required(data, 'basis') as Parameters<typeof reviewFinopsCost>[1]['basis'],
-      evidenceId,
-      evidenceVersion: evidenceId === null ? null : Number(required(data, 'reviewEvidenceVersion')),
+      basis,
+      evidenceId: evidence?.id ?? null,
+      evidenceVersion: evidence?.version ?? null,
       comment: required(data, 'comment'),
       idempotencyKey: key('cost-review'),
     }).then(() => form.reset());
@@ -1036,20 +1040,34 @@ function CostReviewForm({
         </label>
         <label>
           依据
-          <select name="basis" defaultValue="TRUSTED_EVIDENCE">
+          <select
+            name="basis"
+            value={basis}
+            onChange={(event) =>
+              setBasis(event.target.value as Parameters<typeof reviewFinopsCost>[1]['basis'])
+            }
+          >
             <option value="TRUSTED_EVIDENCE">有效可信 Evidence</option>
             <option value="TRUSTED_SOURCE">受信来源</option>
             <option value="REVIEWER_JUDGMENT">复核判断（不可验证通过）</option>
           </select>
         </label>
-        <label>
-          Evidence ID
-          <input name="reviewEvidenceId" />
-        </label>
-        <label>
-          Evidence 版本
-          <input name="reviewEvidenceVersion" type="number" min="1" />
-        </label>
+        {basis === 'TRUSTED_EVIDENCE' ? (
+          <label>
+            可信证据
+            <select name="evidence" required disabled={evidenceCatalog.length === 0}>
+              <option value="">请选择已验证证据</option>
+              {evidenceCatalog.map((evidence) => (
+                <option key={evidence.id} value={evidence.id}>
+                  {evidence.summary}（版本 {evidence.version}）
+                </option>
+              ))}
+            </select>
+            {evidenceCatalog.length === 0 ? (
+              <small>当前没有可用于成本复核的已验证证据，请先在经营主链完成证据验证。</small>
+            ) : null}
+          </label>
+        ) : null}
         <label>
           复核意见
           <textarea name="comment" required />
@@ -1069,43 +1087,65 @@ function PriceForm({
   currency: string;
   onCreate: (input: Parameters<typeof createFinopsPriceSnapshot>[0]) => Promise<void>;
 }): ReactNode {
-  const submit = (event: FormEvent<HTMLFormElement>): void => {
+  const [resourceKind, setResourceKind] = useState<FinopsPriceSnapshot['resourceKind']>('MODEL');
+  const [provider, setProvider] = useState('');
+  const [sku, setSku] = useState('');
+  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const evidenceId = optional(data, 'evidenceId');
-    void onCreate({
-      code: required(data, 'code'),
-      resourceKind: required(data, 'resourceKind') as FinopsPriceSnapshot['resourceKind'],
-      provider: required(data, 'provider'),
-      sku: required(data, 'sku'),
+    const code = finopsCode('PRICE', resourceKind, provider || 'PROVIDER', sku || 'SKU');
+    const billingUnit = required(data, 'billingUnit') as FinopsPriceSnapshot['billingUnit'];
+    const unitSize = required(data, 'unitSize');
+    const unitPrice = required(data, 'unitPrice');
+    const effectiveFrom = day(required(data, 'effectiveFrom'));
+    const recordId = `manual-price-${crypto.randomUUID()}`;
+    const sourceContent = JSON.stringify({
+      code,
+      resourceKind,
+      provider,
+      sku,
       currency,
-      billingUnit: required(data, 'billingUnit') as FinopsPriceSnapshot['billingUnit'],
-      unitSize: required(data, 'unitSize'),
-      unitPrice: required(data, 'unitPrice'),
-      effectiveFrom: day(required(data, 'effectiveFrom')),
+      billingUnit,
+      unitSize,
+      unitPrice,
+      effectiveFrom,
+    });
+    await onCreate({
+      code,
+      resourceKind,
+      provider,
+      sku,
+      currency,
+      billingUnit,
+      unitSize,
+      unitPrice,
+      effectiveFrom,
       effectiveTo: null,
       source: {
-        authority: 'TRUSTED_SYSTEM',
-        system: required(data, 'sourceSystem'),
-        recordId: required(data, 'sourceRecordId'),
-        recordVersion: required(data, 'sourceRecordVersion'),
-        contentHash: required(data, 'sourceContentHash'),
-        evidenceId,
-        evidenceVersion: evidenceId === null ? null : Number(required(data, 'evidenceVersion')),
+        authority: 'HUMAN_ATTESTED',
+        system: 'ADMIN_MANUAL_PRICE',
+        recordId,
+        recordVersion: '1',
+        contentHash: await sha256Hex(sourceContent),
+        evidenceId: null,
+        evidenceVersion: null,
       },
       idempotencyKey: key('price-create'),
-    }).then(() => form.reset());
+    });
+    form.reset();
   };
   return (
     <form className="finops-inline-form" onSubmit={submit}>
       <label>
-        价格代码
-        <input name="code" required placeholder="PRICE.MODEL.GPT" />
-      </label>
-      <label>
         资源
-        <select name="resourceKind" defaultValue="MODEL">
+        <select
+          name="resourceKind"
+          value={resourceKind}
+          onChange={(event) =>
+            setResourceKind(event.target.value as FinopsPriceSnapshot['resourceKind'])
+          }
+        >
           {['MODEL', 'EMBEDDING', 'RERANK', 'TOOL', 'API', 'STORAGE', 'HUMAN_REVIEW'].map(
             (value) => (
               <option key={value}>{value}</option>
@@ -1115,11 +1155,16 @@ function PriceForm({
       </label>
       <label>
         供应商
-        <input name="provider" required />
+        <input
+          name="provider"
+          required
+          value={provider}
+          onChange={(event) => setProvider(event.target.value)}
+        />
       </label>
       <label>
         SKU
-        <input name="sku" required />
+        <input name="sku" required value={sku} onChange={(event) => setSku(event.target.value)} />
       </label>
       <label>
         计价单位
@@ -1143,30 +1188,13 @@ function PriceForm({
         生效日
         <input name="effectiveFrom" required type="date" />
       </label>
-      <label>
-        来源系统
-        <input name="sourceSystem" required />
-      </label>
-      <label>
-        来源记录
-        <input name="sourceRecordId" required />
-      </label>
-      <label>
-        来源版本
-        <input name="sourceRecordVersion" required />
-      </label>
-      <label>
-        来源 SHA-256
-        <input name="sourceContentHash" required minLength={64} maxLength={64} />
-      </label>
-      <label>
-        Evidence ID（可选）
-        <input name="evidenceId" />
-      </label>
-      <label>
-        Evidence 版本
-        <input name="evidenceVersion" type="number" min="1" />
-      </label>
+      <p className="finops-form-note">
+        系统将自动生成价格代码：
+        {finopsCode('PRICE', resourceKind, provider || 'PROVIDER', sku || 'SKU')}
+      </p>
+      <p className="finops-form-note">
+        内部代码、来源记录、版本和校验值由系统生成；供应商账单价格应通过账单连接器导入后再复核。
+      </p>
       <button type="submit" className="primary-button">
         <Icon name="plus" size={16} /> 新建草稿
       </button>
@@ -1177,26 +1205,30 @@ function PriceForm({
 function BudgetForm({
   tenantId,
   currency,
+  dimensionMembers,
   onCreate,
 }: {
   tenantId: string;
   currency: string;
+  dimensionMembers: FinopsDashboard['dimensionMembers'];
   onCreate: (input: Parameters<typeof createFinopsBudget>[0]) => Promise<void>;
 }): ReactNode {
+  const [scopeType, setScopeType] = useState<'TENANT' | 'CUSTOMER' | 'PROJECT'>('TENANT');
+  const visibleScopes = dimensionMembers.filter((member) => member.dimension === scopeType);
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const scopeType = required(data, 'scopeType') as FinopsBudget['scopeType'];
+    const periodStart = required(data, 'periodStart');
     void onCreate({
-      code: required(data, 'code'),
+      code: finopsCode('BUDGET', scopeType, currency, periodStart.slice(0, 7)),
       scopeType,
-      scopeId: required(data, 'scopeId'),
-      scopeVersion: scopeType === 'TASK' ? Number(required(data, 'scopeVersion')) : null,
+      scopeId: scopeType === 'TENANT' ? tenantId : required(data, 'scopeId'),
+      scopeVersion: null,
       currency,
       limitAmount: required(data, 'limitAmount'),
       alertThresholdRatio: required(data, 'alertThresholdRatio'),
-      periodStart: day(required(data, 'periodStart')),
+      periodStart: day(periodStart),
       periodEnd: day(required(data, 'periodEnd')),
       idempotencyKey: key('budget-create'),
     }).then(() => form.reset());
@@ -1204,34 +1236,44 @@ function BudgetForm({
   return (
     <form className="finops-form" onSubmit={submit}>
       <label>
-        预算代码
-        <input name="code" required placeholder="BUDGET.TENANT.MONTHLY" />
-      </label>
-      <label>
         作用域
-        <select name="scopeType" defaultValue="TENANT">
-          {[
-            'TENANT',
-            'EMPLOYEE',
-            'ROLE_ASSIGNMENT',
-            'TASK',
-            'PROCESS',
-            'CUSTOMER',
-            'PROJECT',
-            'DEPARTMENT',
-          ].map((value) => (
-            <option key={value}>{value}</option>
-          ))}
+        <select
+          name="scopeType"
+          value={scopeType}
+          onChange={(event) =>
+            setScopeType(event.target.value as 'TENANT' | 'CUSTOMER' | 'PROJECT')
+          }
+        >
+          <option value="TENANT">当前企业</option>
+          <option
+            value="CUSTOMER"
+            disabled={!dimensionMembers.some((item) => item.dimension === 'CUSTOMER')}
+          >
+            客户
+          </option>
+          <option
+            value="PROJECT"
+            disabled={!dimensionMembers.some((item) => item.dimension === 'PROJECT')}
+          >
+            项目
+          </option>
         </select>
       </label>
-      <label>
-        作用域 ID
-        <input name="scopeId" required defaultValue={tenantId} />
-      </label>
-      <label>
-        Task 版本（仅任务）
-        <input name="scopeVersion" type="number" min="1" />
-      </label>
+      {scopeType === 'TENANT' ? (
+        <p className="finops-form-note">预算范围自动继承当前企业，无需填写内部 ID。</p>
+      ) : (
+        <label>
+          {scopeType === 'CUSTOMER' ? '客户' : '项目'}
+          <select name="scopeId" required>
+            <option value="">请选择</option>
+            {visibleScopes.map((member) => (
+              <option key={member.id} value={member.id}>
+                {member.name}（{member.code}）
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
       <label>
         硬限额
         <input name="limitAmount" required inputMode="decimal" />
@@ -1248,6 +1290,9 @@ function BudgetForm({
         结束
         <input name="periodEnd" required type="date" />
       </label>
+      <p className="finops-form-note">
+        预算代码由范围、币种和开始月份自动生成；其他业务范围需先接入受治理对象目录。
+      </p>
       <button type="submit" className="primary-button">
         新建预算草稿
       </button>
@@ -1257,20 +1302,26 @@ function BudgetForm({
 
 function BudgetEventForm({
   budgets,
+  costEntries,
   onCreate,
 }: {
   budgets: FinopsBudget[];
+  costEntries: FinopsCostEntry[];
   onCreate: (
     budgetId: string,
     input: Parameters<typeof createFinopsBudgetEvent>[1],
   ) => Promise<void>;
 }): ReactNode {
   const active = budgets.filter((budget) => budget.status === 'ACTIVE');
+  const [type, setType] = useState<'RESERVATION' | 'SETTLEMENT' | 'RELEASE'>('RESERVATION');
+  const verifiedCosts = costEntries.filter(
+    (entry) => entry.effectiveVerificationStatus === 'VERIFIED',
+  );
+  const reservationDirectoryAvailable = false;
   const submit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = new FormData(form);
-    const type = required(data, 'type') as 'RESERVATION' | 'SETTLEMENT' | 'RELEASE';
     void onCreate(required(data, 'budgetId'), {
       type,
       amount: required(data, 'amount'),
@@ -1295,29 +1346,59 @@ function BudgetEventForm({
       </label>
       <label>
         事件
-        <select name="type" defaultValue="RESERVATION">
-          <option>RESERVATION</option>
-          <option>SETTLEMENT</option>
-          <option>RELEASE</option>
+        <select
+          name="type"
+          value={type}
+          onChange={(event) =>
+            setType(event.target.value as 'RESERVATION' | 'SETTLEMENT' | 'RELEASE')
+          }
+        >
+          <option value="RESERVATION">预留预算</option>
+          <option value="SETTLEMENT">结算已验证成本</option>
+          <option value="RELEASE">释放预留</option>
         </select>
       </label>
       <label>
         金额
         <input name="amount" required inputMode="decimal" />
       </label>
-      <label>
-        Reservation ID（结算/释放）
-        <input name="reservationEventId" />
-      </label>
-      <label>
-        Cost Entry ID（结算）
-        <input name="costEntryId" />
-      </label>
+      {type !== 'RESERVATION' ? (
+        <label>
+          关联预留
+          <select name="reservationEventId" required disabled={!reservationDirectoryAvailable}>
+            <option value="">当前 dashboard 未返回可识别的预留事件</option>
+          </select>
+          <small>当前预算尚无可选择的未结预留记录；目录就绪后才可执行释放操作。</small>
+        </label>
+      ) : null}
+      {type === 'SETTLEMENT' ? (
+        <label>
+          关联已验证成本
+          <select name="costEntryId" required disabled={verifiedCosts.length === 0}>
+            <option value="">请选择成本记录</option>
+            {verifiedCosts.map((entry) => (
+              <option key={entry.id} value={entry.id}>
+                {date(entry.incurredAt)} · {entry.subjectType} ·{' '}
+                {money(entry.calculatedAmount, entry.currency)}
+              </option>
+            ))}
+          </select>
+          {verifiedCosts.length === 0 ? <small>当前没有可结算的已验证成本。</small> : null}
+        </label>
+      ) : null}
       <label>
         原因
         <input name="reason" required />
       </label>
-      <button type="submit" className="primary-button" disabled={active.length === 0}>
+      <button
+        type="submit"
+        className="primary-button"
+        disabled={
+          active.length === 0 ||
+          (type !== 'RESERVATION' && !reservationDirectoryAvailable) ||
+          (type === 'SETTLEMENT' && verifiedCosts.length === 0)
+        }
+      >
         写入不可变事件
       </button>
     </form>
@@ -1434,6 +1515,20 @@ function optional(data: FormData, name: string): string | null {
   return value === '' ? null : value;
 }
 
+export function finopsCode(prefix: string, ...parts: string[]): string {
+  return [prefix, ...parts]
+    .map((part) =>
+      part
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/gu, '.')
+        .replace(/^\.+|\.+$/gu, ''),
+    )
+    .filter(Boolean)
+    .join('.')
+    .slice(0, 100);
+}
+
 function day(value: string): string {
   return new Date(`${value}T00:00:00.000Z`).toISOString();
 }
@@ -1458,6 +1553,12 @@ function randomUuid(source: Crypto): string {
     value.slice(16, 20),
     value.slice(20),
   ].join('-');
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function money(value: string, currency: string): string {

@@ -31,13 +31,13 @@ export type KnowledgeRuntimeCapabilityStatus = 'disabled' | 'ready' | 'not_ready
 export interface KnowledgeRuntimeCapabilities {
   readonly embeddings: {
     readonly status: KnowledgeRuntimeCapabilityStatus;
-    readonly provider: 'disabled' | 'openai_compatible';
+    readonly provider: 'disabled' | 'openai_compatible' | 'local_fastembed';
     readonly model: string | null;
     readonly dimensions: number;
   };
   readonly rerank: {
     readonly status: KnowledgeRuntimeCapabilityStatus;
-    readonly provider: 'disabled' | 'cohere_compatible';
+    readonly provider: 'disabled' | 'cohere_compatible' | 'local_fastembed';
     readonly model: string | null;
   };
 }
@@ -285,7 +285,9 @@ function parseEmbeddingCapability(value: unknown): KnowledgeRuntimeCapabilities[
   if (
     !isRecord(value) ||
     (value.status !== 'disabled' && value.status !== 'ready' && value.status !== 'not_ready') ||
-    (value.provider !== 'disabled' && value.provider !== 'openai_compatible') ||
+    (value.provider !== 'disabled' &&
+      value.provider !== 'openai_compatible' &&
+      value.provider !== 'local_fastembed') ||
     !Number.isSafeInteger(value.dimensions) ||
     (value.dimensions as number) < 1 ||
     (value.model !== null &&
@@ -305,7 +307,9 @@ function parseRerankCapability(value: unknown): KnowledgeRuntimeCapabilities['re
   if (
     !isRecord(value) ||
     (value.status !== 'disabled' && value.status !== 'ready' && value.status !== 'not_ready') ||
-    (value.provider !== 'disabled' && value.provider !== 'cohere_compatible') ||
+    (value.provider !== 'disabled' &&
+      value.provider !== 'cohere_compatible' &&
+      value.provider !== 'local_fastembed') ||
     (value.model !== null &&
       (typeof value.model !== 'string' || value.model.length < 1 || value.model.length > 200))
   ) {

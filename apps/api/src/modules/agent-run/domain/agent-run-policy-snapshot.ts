@@ -37,6 +37,7 @@ export function buildAgentRunPolicySnapshot(input: {
   readonly agentVersion: SnapshotAgentVersion;
   readonly roleAssignment?: SnapshotRoleAssignment | null;
   readonly baseSnapshot?: Prisma.JsonValue;
+  readonly knowledgeScopeOverride?: Prisma.JsonValue;
   readonly extra?: Prisma.InputJsonObject;
 }): Prisma.InputJsonObject {
   const version = input.agentVersion;
@@ -60,7 +61,7 @@ export function buildAgentRunPolicySnapshot(input: {
     },
     modelPolicy: cloneJson(version.modelPolicy),
     toolPolicy: cloneJson(version.toolPolicy),
-    knowledgeScope: cloneJson(version.knowledgeScope),
+    knowledgeScope: cloneJson(input.knowledgeScopeOverride ?? version.knowledgeScope),
     agentTemplate: {
       id: version.templateId,
       ...(version.template === undefined

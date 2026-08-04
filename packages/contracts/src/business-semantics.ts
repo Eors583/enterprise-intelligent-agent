@@ -1866,6 +1866,25 @@ export const createEvidenceRequestSchema = z
     },
   );
 
+/**
+ * Business-facing Evidence registration command.
+ *
+ * Technical identity, source version, content hash, owner and permission scope
+ * are derived by the trusted API. The legacy CreateEvidenceRequest contract is
+ * intentionally retained for system integrations and compatibility.
+ */
+export const createEvidenceGuidedRequestSchema = z
+  .object({
+    sourceType: evidenceSourceTypeSchema,
+    sourceName: SHORT_TEXT,
+    sourceUri: z.url().nullable().default(null),
+    observedAt: TIMESTAMP,
+    summary: LONG_TEXT,
+    trustLevel: z.enum(['HIGH', 'MEDIUM', 'LOW', 'UNVERIFIED']).default('UNVERIFIED'),
+    retentionDays: z.number().int().min(1).max(3_650).nullable().default(null),
+  })
+  .strict();
+
 export const updateEvidenceRequestSchema = z
   .object({
     expectedRevision: REVISION,
@@ -2961,6 +2980,7 @@ export type CreateAcceptanceRequest = z.infer<typeof createAcceptanceRequestSche
 export type UpdateAcceptanceRequest = z.infer<typeof updateAcceptanceRequestSchema>;
 export type TransitionAcceptanceRequest = z.infer<typeof transitionAcceptanceRequestSchema>;
 export type CreateEvidenceRequest = z.infer<typeof createEvidenceRequestSchema>;
+export type CreateEvidenceGuidedRequest = z.infer<typeof createEvidenceGuidedRequestSchema>;
 export type UpdateEvidenceRequest = z.infer<typeof updateEvidenceRequestSchema>;
 export type TransitionEvidenceRequest = z.infer<typeof transitionEvidenceRequestSchema>;
 export type CreateEvidenceLinkRequest = z.infer<typeof createEvidenceLinkRequestSchema>;

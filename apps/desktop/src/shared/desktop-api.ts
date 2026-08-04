@@ -14,6 +14,9 @@ export const DESKTOP_IPC_CHANNELS = {
   startAgentRunStream: 'desktop:start-agent-run-stream',
   stopAgentRunStream: 'desktop:stop-agent-run-stream',
   agentRunStreamUpdate: 'desktop:agent-run-stream-update',
+  startImRealtime: 'desktop:start-im-realtime',
+  stopImRealtime: 'desktop:stop-im-realtime',
+  imRealtimeUpdate: 'desktop:im-realtime-update',
   authStateChanged: 'desktop:auth-state-changed',
 } as const;
 
@@ -86,6 +89,32 @@ export type DesktopAgentRunStreamUpdate = DesktopAgentRunStreamPayload & {
   readonly subscriptionId: string;
 };
 
+export interface DesktopImRealtimeRequest {
+  readonly expectedSessionId: string;
+}
+
+export interface DesktopImRealtimeStartRequest extends DesktopImRealtimeRequest {
+  readonly subscriptionId: string;
+}
+
+export type DesktopImRealtimePayload =
+  | {
+      readonly kind: 'state';
+      readonly state: 'connecting' | 'connected' | 'reconnecting' | 'unavailable' | 'closed';
+      readonly error?: string;
+    }
+  | {
+      readonly kind: 'message';
+      readonly conversationId: string | null;
+      readonly messageId: string | null;
+      readonly eventId: string | null;
+      readonly receivedAt: string;
+    };
+
+export type DesktopImRealtimeUpdate = DesktopImRealtimePayload & {
+  readonly subscriptionId: string;
+};
+
 export interface DesktopPasswordChangeResult {
   readonly state: DesktopAuthState;
   readonly revokedSessionCount: number;
@@ -107,6 +136,10 @@ export interface DesktopBridge {
   subscribeAgentRunStream(
     request: DesktopAgentRunStreamRequest,
     listener: (update: DesktopAgentRunStreamUpdate) => void,
+  ): () => void;
+  subscribeImRealtime(
+    request: DesktopImRealtimeRequest,
+    listener: (update: DesktopImRealtimeUpdate) => void,
   ): () => void;
   onAuthStateChanged(listener: (state: DesktopAuthState) => void): () => void;
 }

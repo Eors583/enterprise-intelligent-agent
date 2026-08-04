@@ -655,7 +655,9 @@ export async function submitDeliverableWithinTransaction(
   tenantId: string,
   taskId: string,
   current: DbDeliverable,
-  request: Extract<TransitionDeliverableRequest, { readonly action: 'SUBMIT' }>,
+  request: Extract<TransitionDeliverableRequest, { readonly action: 'SUBMIT' }> & {
+    readonly effectivePermissionLabels?: readonly string[];
+  },
 ): Promise<void> {
   if (current.status !== 'DRAFT') {
     throw illegalSemanticTransition('Deliverable');
@@ -690,6 +692,9 @@ export async function submitDeliverableWithinTransaction(
       artifactUri: request.artifactUri,
       contentHash: request.contentHash,
       evidenceSealedAt: new Date(),
+      ...(request.effectivePermissionLabels === undefined
+        ? {}
+        : { permissionLabels: [...request.effectivePermissionLabels] }),
       revision: { increment: 1 },
     },
   });

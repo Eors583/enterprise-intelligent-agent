@@ -392,6 +392,23 @@ describe('validateGroundedOutput', () => {
     expect(result.content).not.toContain('来源99');
   });
 
+  it('接受模型把中文句号放在 SOURCE 标记之后的自然书写形式', () => {
+    const source = knowledgeSource();
+
+    const result = validateGroundedOutput(
+      `知识库验收口令为青杉-0727 [SOURCE:${source.chunkId}]。`,
+      preparedRun({
+        knowledgeGroundingRequired: true,
+        knowledgeSources: [source],
+      }),
+    );
+
+    expect(result).toEqual({
+      content: '知识库验收口令为青杉-0727 [来源1]',
+      citations: [source],
+    });
+  });
+
   it.each([
     { name: '本次检索无来源', sources: [], content: '似是而非的回答' },
     {

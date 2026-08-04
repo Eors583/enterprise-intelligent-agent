@@ -225,6 +225,11 @@ enum AgentInstanceStatus {
   DISABLED
 }
 
+enum AgentInstanceKind {
+  MEMBER
+  DEPARTMENT
+}
+
 enum RoleAssignmentStatus {
   PENDING
   ACTIVE
@@ -272,11 +277,18 @@ enum AgentRunStreamEventType {
 
 enum ConversationType {
   DIRECT
+  GROUP
 }
 
 enum ConversationParticipantType {
   USER
   AGENT
+}
+
+enum ConversationParticipantRole {
+  OWNER
+  ADMIN
+  MEMBER
 }
 
 enum MessageContentType {
@@ -798,6 +810,7 @@ model Tenant {
   aiRuntimeRuns               AiRuntimeRun[]
   conversations               Conversation[]
   conversationParticipants    ConversationParticipant[]
+  conversationUserStates      ConversationUserState[]
   messages                    Message[]
   answerFeedbacks             AnswerFeedback[]
   outboxEvents                OutboxEvent[]
@@ -861,6 +874,7 @@ model User {
   createdAgents                     AgentInstance[]            @relation("AgentCreator")
   createdConversations              Conversation[]             @relation("ConversationCreator")
   conversationParticipants          ConversationParticipant[]
+  conversationUserStates            ConversationUserState[]
   sentMessages                      Message[]                  @relation("UserSentMessages")
   passwordCredential                PasswordCredential?
   authSessions                      AuthSession[]
@@ -939,6 +953,7 @@ model OrgUnit {
   employments         Employment[]
   positions           Position[]
   knowledgeBaseScopes KnowledgeBaseOrgUnit[]
+  departmentAgents    AgentInstance[]             @relation("DepartmentAgents")
   directoryBindings   DirectoryOrgUnitBinding[]
 
   @@unique([tenantId, id])
@@ -1004,20 +1019,26 @@ model AuthSession {
 /// never persisted in this row; tokenHash is an HMAC using the auth pepper.
 /// Reset delivery keeps a separately leased, authenticated-encryption envelope.
 model AuthActionToken {
-  id               String    @id @default(uuid()) @db.Uuid
-  tenantId         String    @map("tenant_id") @db.Uuid
-  userId           String    @map("user_id") @db.Uuid
-  purpose          String    @db.VarChar(32)
-  tokenHash        String    @unique @map("token_hash") @db.Char(64)
-  deliveryStatus   String    @default("PENDING") @map("delivery_status") @db.VarChar(24)
-  deliveryAttempts Int       @default(0) @map("delivery_attempts")
-  lastDeliveryAt   DateTime? @map("last_delivery_at") @db.Timestamptz(6)
-  expiresAt        DateTime  @map("expires_at") @db.Timestamptz(6)
-  consumedAt       DateTime? @map("consumed_at") @db.Timestamptz(6)
-  revokedAt        DateTime? @map("revoked_at") @db.Timestamptz(6)
-  createdById      String?   @map("created_by_id") @db.Uuid
-  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt        DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                     String    @id @default(uuid()) @db.Uuid
+  tenantId               String    @map("tenant_id") @db.Uuid
+  userId                 String    @map("user_id") @db.Uuid
+  purpose                String    @db.VarChar(32)
+  tokenHash              String    @unique @map("token_hash") @db.Char(64)
+  /// Immutable snapshot of the address selected when this action was issued.
+  /// It prevents later profile edits from rewriting invitation history.
+  deliveryTargetEmail    String    @map("delivery_target_email") @db.VarChar(320)
+  /// ISSUED is exact application evidence; LEGACY_INFERRED marks migration-time
+  /// reconstruction that must not be represented as exact historical proof.
+  deliveryTargetEvidence String    @default("ISSUED") @map("delivery_target_evidence") @db.VarChar(24)
+  deliveryStatus         String    @default("PENDING") @map("delivery_status") @db.VarChar(24)
+  deliveryAttempts       Int       @default(0) @map("delivery_attempts")
+  lastDeliveryAt         DateTime? @map("last_delivery_at") @db.Timestamptz(6)
+  expiresAt              DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt             DateTime? @map("consumed_at") @db.Timestamptz(6)
+  revokedAt              DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdById            String?   @map("created_by_id") @db.Uuid
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant    Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   user      User   @relation("AuthActionTokenUser", fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
@@ -1455,21 +1476,25 @@ model Position {
 }
 
 model Employment {
-  id             String           @id @default(uuid()) @db.Uuid
-  tenantId       String           @map("tenant_id") @db.Uuid
-  userId         String           @map("user_id") @db.Uuid
-  organizationId String           @map("organization_id") @db.Uuid
-  orgUnitId      String           @map("org_unit_id") @db.Uuid
-  positionId     String?          @map("position_id") @db.Uuid
-  employeeNumber String?          @map("employee_number") @db.VarChar(255)
-  workEmail      String?          @map("work_email") @db.VarChar(320)
-  employmentType String?          @map("employment_type") @db.VarChar(80)
-  hireDate       DateTime?        @map("hire_date") @db.Date
-  city           String?          @db.VarChar(120)
-  status         EmploymentStatus @default(PENDING)
-  isPrimary      Boolean          @default(false) @map("is_primary")
-  createdAt      DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt      DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                  String           @id @default(uuid()) @db.Uuid
+  tenantId            String           @map("tenant_id") @db.Uuid
+  userId              String           @map("user_id") @db.Uuid
+  organizationId      String           @map("organization_id") @db.Uuid
+  orgUnitId           String           @map("org_unit_id") @db.Uuid
+  positionId          String?          @map("position_id") @db.Uuid
+  employeeNumber      String?          @map("employee_number") @db.VarChar(255)
+  workEmail           String?          @map("work_email") @db.VarChar(320)
+  /// True when an administrator has explicitly replaced a directory-managed
+  /// email with a tenant-local login/delivery address. Directory sync must
+  /// preserve this value until an administrator changes it again.
+  workEmailOverridden Boolean          @default(false) @map("work_email_overridden")
+  employmentType      String?          @map("employment_type") @db.VarChar(80)
+  hireDate            DateTime?        @map("hire_date") @db.Date
+  city                String?          @db.VarChar(120)
+  status              EmploymentStatus @default(PENDING)
+  isPrimary           Boolean          @default(false) @map("is_primary")
+  createdAt           DateTime         @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime         @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant            Tenant                       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   user              User                         @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
@@ -1797,7 +1822,9 @@ model AgentInstance {
   tenantId    String              @map("tenant_id") @db.Uuid
   key         String              @db.VarChar(120)
   versionId   String              @map("version_id") @db.Uuid
+  kind        AgentInstanceKind   @default(MEMBER)
   ownerUserId String?             @map("owner_user_id") @db.Uuid
+  orgUnitId   String?             @map("org_unit_id") @db.Uuid
   createdById String              @map("created_by_id") @db.Uuid
   name        String              @db.VarChar(200)
   summary     String?             @db.Text
@@ -1809,6 +1836,7 @@ model AgentInstance {
   tenant                   Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   version                  AgentVersion              @relation(fields: [tenantId, versionId], references: [tenantId, id], onDelete: Restrict)
   owner                    User?                     @relation("AgentOwner", fields: [tenantId, ownerUserId], references: [tenantId, id], onDelete: Restrict)
+  orgUnit                  OrgUnit?                  @relation("DepartmentAgents", fields: [tenantId, orgUnitId], references: [tenantId, id], onDelete: Restrict)
   createdBy                User                      @relation("AgentCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
   conversationParticipants ConversationParticipant[]
   sentMessages             Message[]                 @relation("AgentSentMessages")
@@ -1821,6 +1849,7 @@ model AgentInstance {
   @@unique([tenantId, id, versionId])
   @@unique([tenantId, key])
   @@index([tenantId, ownerUserId, status])
+  @@index([tenantId, orgUnitId, status])
   @@map("agent_instances")
 }
 
@@ -1907,6 +1936,7 @@ model Conversation {
   relayAgentA  AgentInstance?            @relation("ConversationRelayAgentA", fields: [tenantId, relayAgentAId], references: [tenantId, id], onDelete: Restrict)
   relayAgentB  AgentInstance?            @relation("ConversationRelayAgentB", fields: [tenantId, relayAgentBId], references: [tenantId, id], onDelete: Restrict)
   participants ConversationParticipant[]
+  userStates   ConversationUserState[]
   messages     Message[]
   agentRuns    AgentRun[]
 
@@ -1925,6 +1955,7 @@ model ConversationParticipant {
   userId         String?                     @map("user_id") @db.Uuid
   agentId        String?                     @map("agent_id") @db.Uuid
   displayName    String                      @map("display_name") @db.VarChar(200)
+  role           ConversationParticipantRole @default(MEMBER)
   joinedAt       DateTime                    @default(now()) @map("joined_at") @db.Timestamptz(6)
   leftAt         DateTime?                   @map("left_at") @db.Timestamptz(6)
 
@@ -1939,19 +1970,46 @@ model ConversationParticipant {
   @@map("conversation_participants")
 }
 
+model ConversationUserState {
+  id                String    @id @default(uuid()) @db.Uuid
+  tenantId          String    @map("tenant_id") @db.Uuid
+  conversationId    String    @map("conversation_id") @db.Uuid
+  userId            String    @map("user_id") @db.Uuid
+  unreadCount       Int       @default(0) @map("unread_count")
+  lastReadMessageId String?   @map("last_read_message_id") @db.Uuid
+  lastReadAt        DateTime? @map("last_read_at") @db.Timestamptz(6)
+  pinnedAt          DateTime? @map("pinned_at") @db.Timestamptz(6)
+  archivedAt        DateTime? @map("archived_at") @db.Timestamptz(6)
+  mutedUntil        DateTime? @map("muted_until") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  conversation Conversation @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Cascade)
+  user         User         @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, conversationId, userId])
+  @@index([tenantId, userId, pinnedAt(sort: Desc), archivedAt, updatedAt(sort: Desc)], map: "conversation_user_states_list_idx")
+  @@index([tenantId, conversationId, unreadCount], map: "conversation_user_states_unread_idx")
+  @@map("conversation_user_states")
+}
+
 model Message {
-  id              String                      @id @default(uuid()) @db.Uuid
-  tenantId        String                      @map("tenant_id") @db.Uuid
-  conversationId  String                      @map("conversation_id") @db.Uuid
-  senderType      ConversationParticipantType @map("sender_type")
-  senderUserId    String?                     @map("sender_user_id") @db.Uuid
-  senderAgentId   String?                     @map("sender_agent_id") @db.Uuid
-  senderKey       String                      @map("sender_key") @db.VarChar(48)
-  senderName      String                      @map("sender_name") @db.VarChar(200)
-  clientMessageId String                      @map("client_message_id") @db.VarChar(200)
-  contentType     MessageContentType          @default(TEXT) @map("content_type")
-  content         Json
-  createdAt       DateTime                    @default(now()) @map("created_at") @db.Timestamptz(6)
+  id                 String                      @id @default(uuid()) @db.Uuid
+  tenantId           String                      @map("tenant_id") @db.Uuid
+  conversationId     String                      @map("conversation_id") @db.Uuid
+  senderType         ConversationParticipantType @map("sender_type")
+  senderUserId       String?                     @map("sender_user_id") @db.Uuid
+  senderAgentId      String?                     @map("sender_agent_id") @db.Uuid
+  senderKey          String                      @map("sender_key") @db.VarChar(48)
+  senderName         String                      @map("sender_name") @db.VarChar(200)
+  clientMessageId    String                      @map("client_message_id") @db.VarChar(200)
+  contentType        MessageContentType          @default(TEXT) @map("content_type")
+  content            Json
+  responseTargetType String?                     @map("response_target_type") @db.VarChar(16)
+  responseTargetId   String?                     @map("response_target_id") @db.Uuid
+  createdAt          DateTime                    @default(now()) @map("created_at") @db.Timestamptz(6)
 
   tenant          Tenant           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   conversation    Conversation     @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Restrict)
@@ -1991,68 +2049,68 @@ model AnswerFeedback {
 }
 
 model AgentRun {
-  id                        String          @id @default(uuid()) @db.Uuid
-  tenantId                  String          @map("tenant_id") @db.Uuid
-  taskId                    String?         @map("task_id") @db.Uuid
-  conversationId            String          @map("conversation_id") @db.Uuid
-  inputMessageId            String          @map("input_message_id") @db.Uuid
-  outputMessageId           String?         @map("output_message_id") @db.Uuid
-  requesterUserId           String          @map("requester_user_id") @db.Uuid
-  agentId                   String          @map("agent_id") @db.Uuid
-  agentVersionId            String          @map("agent_version_id") @db.Uuid
-  parentRunId               String?         @map("parent_run_id") @db.Uuid
-  retryOfRunId              String?         @map("retry_of_run_id") @db.Uuid
-  trigger                   AgentRunTrigger @default(USER_MESSAGE)
-  turnIndex                 Int             @default(1) @map("turn_index")
-  turnLimit                 Int             @default(1) @map("turn_limit")
-  status                    AgentRunStatus  @default(QUEUED)
-  provider                  String          @default("ai-runtime") @db.VarChar(80)
-  externalRunId             String?         @map("external_run_id") @db.Uuid
-  idempotencyKey            String          @map("idempotency_key") @db.VarChar(200)
-  policySnapshot            Json            @map("policy_snapshot")
-  memoryContextSnapshot     Json?           @map("memory_context_snapshot")
-  modelRoutePolicyVersionId String?         @map("model_route_policy_version_id") @db.Uuid
-  modelRouteSnapshot        Json?           @map("model_route_snapshot")
-  attempts                  Int             @default(0)
-  version                   Int             @default(1)
-  errorCode                 String?         @map("error_code") @db.VarChar(120)
-  errorMessage              String?         @map("error_message") @db.Text
-  runtimeProvider           String?         @map("runtime_provider") @db.VarChar(80)
-  runtimeModel              String?         @map("runtime_model") @db.VarChar(256)
-  inputTokens               Int             @default(0) @map("input_tokens")
-  outputTokens              Int             @default(0) @map("output_tokens")
-  totalTokens               Int             @default(0) @map("total_tokens")
+  id                        String                @id @default(uuid()) @db.Uuid
+  tenantId                  String                @map("tenant_id") @db.Uuid
+  taskId                    String?               @map("task_id") @db.Uuid
+  conversationId            String                @map("conversation_id") @db.Uuid
+  inputMessageId            String                @map("input_message_id") @db.Uuid
+  outputMessageId           String?               @map("output_message_id") @db.Uuid
+  requesterUserId           String                @map("requester_user_id") @db.Uuid
+  agentId                   String                @map("agent_id") @db.Uuid
+  agentVersionId            String                @map("agent_version_id") @db.Uuid
+  parentRunId               String?               @map("parent_run_id") @db.Uuid
+  retryOfRunId              String?               @map("retry_of_run_id") @db.Uuid
+  trigger                   AgentRunTrigger       @default(USER_MESSAGE)
+  turnIndex                 Int                   @default(1) @map("turn_index")
+  turnLimit                 Int                   @default(1) @map("turn_limit")
+  status                    AgentRunStatus        @default(QUEUED)
+  provider                  String                @default("ai-runtime") @db.VarChar(80)
+  externalRunId             String?               @map("external_run_id") @db.Uuid
+  idempotencyKey            String                @map("idempotency_key") @db.VarChar(200)
+  policySnapshot            Json                  @map("policy_snapshot")
+  memoryContextSnapshot     Json?                 @map("memory_context_snapshot")
+  modelRoutePolicyVersionId String?               @map("model_route_policy_version_id") @db.Uuid
+  modelRouteSnapshot        Json?                 @map("model_route_snapshot")
+  attempts                  Int                   @default(0)
+  version                   Int                   @default(1)
+  errorCode                 String?               @map("error_code") @db.VarChar(120)
+  errorMessage              String?               @map("error_message") @db.Text
+  runtimeProvider           String?               @map("runtime_provider") @db.VarChar(80)
+  runtimeModel              String?               @map("runtime_model") @db.VarChar(256)
+  inputTokens               Int                   @default(0) @map("input_tokens")
+  outputTokens              Int                   @default(0) @map("output_tokens")
+  totalTokens               Int                   @default(0) @map("total_tokens")
   tokenEvidence             AgentRunTokenEvidence @default(UNREPORTED) @map("token_evidence")
-  quotaChargedTokens        Int             @default(0) @map("quota_charged_tokens")
-  quotaSettledAt            DateTime?       @map("quota_settled_at") @db.Timestamptz(6)
-  toolCalls                 Int             @default(0) @map("tool_calls")
-  costMicros                BigInt          @default(0) @map("cost_micros")
-  latencyMs                 Int?            @map("latency_ms")
-  groundedCitationCount     Int             @default(0) @map("grounded_citation_count")
-  reservedTokens            Int             @default(0) @map("reserved_tokens")
-  cancellationRequestedAt   DateTime?       @map("cancellation_requested_at") @db.Timestamptz(6)
-  cancellationReason        String?         @map("cancellation_reason") @db.VarChar(120)
-  cancellationConfirmedAt   DateTime?       @map("cancellation_confirmed_at") @db.Timestamptz(6)
-  usageRecordedAt           DateTime?       @map("usage_recorded_at") @db.Timestamptz(6)
-  costRecordedAt            DateTime?       @map("cost_recorded_at") @db.Timestamptz(6)
-  dispatchStartedAt         DateTime?       @map("dispatch_started_at") @db.Timestamptz(6)
-  startedAt                 DateTime?       @map("started_at") @db.Timestamptz(6)
-  finishedAt                DateTime?       @map("finished_at") @db.Timestamptz(6)
-  createdAt                 DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt                 DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  quotaChargedTokens        Int                   @default(0) @map("quota_charged_tokens")
+  quotaSettledAt            DateTime?             @map("quota_settled_at") @db.Timestamptz(6)
+  toolCalls                 Int                   @default(0) @map("tool_calls")
+  costMicros                BigInt                @default(0) @map("cost_micros")
+  latencyMs                 Int?                  @map("latency_ms")
+  groundedCitationCount     Int                   @default(0) @map("grounded_citation_count")
+  reservedTokens            Int                   @default(0) @map("reserved_tokens")
+  cancellationRequestedAt   DateTime?             @map("cancellation_requested_at") @db.Timestamptz(6)
+  cancellationReason        String?               @map("cancellation_reason") @db.VarChar(120)
+  cancellationConfirmedAt   DateTime?             @map("cancellation_confirmed_at") @db.Timestamptz(6)
+  usageRecordedAt           DateTime?             @map("usage_recorded_at") @db.Timestamptz(6)
+  costRecordedAt            DateTime?             @map("cost_recorded_at") @db.Timestamptz(6)
+  dispatchStartedAt         DateTime?             @map("dispatch_started_at") @db.Timestamptz(6)
+  startedAt                 DateTime?             @map("started_at") @db.Timestamptz(6)
+  finishedAt                DateTime?             @map("finished_at") @db.Timestamptz(6)
+  createdAt                 DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                 DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant                @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  conversation  Conversation          @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Restrict)
-  inputMessage  Message               @relation("AgentRunInputMessage", fields: [tenantId, conversationId, inputMessageId], references: [tenantId, conversationId, id], onDelete: Restrict)
-  outputMessage Message?              @relation("AgentRunOutputMessage", fields: [tenantId, conversationId, outputMessageId], references: [tenantId, conversationId, id], onDelete: Restrict)
-  requester     User                  @relation("AgentRunRequester", fields: [tenantId, requesterUserId], references: [tenantId, id], onDelete: Restrict)
-  agent         AgentInstance         @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
-  agentVersion  AgentVersion          @relation(fields: [tenantId, agentVersionId], references: [tenantId, id], onDelete: Restrict)
-  parentRun     AgentRun?             @relation("AgentRunRelayChain", fields: [tenantId, parentRunId], references: [tenantId, id], onDelete: Restrict)
-  childRuns     AgentRun[]            @relation("AgentRunRelayChain")
-  retryOf       AgentRun?             @relation("AgentRunRetries", fields: [tenantId, retryOfRunId], references: [tenantId, id], onDelete: Restrict)
-  retries       AgentRun[]            @relation("AgentRunRetries")
-  streamEvents  AgentRunStreamEvent[]
+  tenant            Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  conversation      Conversation              @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Restrict)
+  inputMessage      Message                   @relation("AgentRunInputMessage", fields: [tenantId, conversationId, inputMessageId], references: [tenantId, conversationId, id], onDelete: Restrict)
+  outputMessage     Message?                  @relation("AgentRunOutputMessage", fields: [tenantId, conversationId, outputMessageId], references: [tenantId, conversationId, id], onDelete: Restrict)
+  requester         User                      @relation("AgentRunRequester", fields: [tenantId, requesterUserId], references: [tenantId, id], onDelete: Restrict)
+  agent             AgentInstance             @relation(fields: [tenantId, agentId], references: [tenantId, id], onDelete: Restrict)
+  agentVersion      AgentVersion              @relation(fields: [tenantId, agentVersionId], references: [tenantId, id], onDelete: Restrict)
+  parentRun         AgentRun?                 @relation("AgentRunRelayChain", fields: [tenantId, parentRunId], references: [tenantId, id], onDelete: Restrict)
+  childRuns         AgentRun[]                @relation("AgentRunRelayChain")
+  retryOf           AgentRun?                 @relation("AgentRunRetries", fields: [tenantId, retryOfRunId], references: [tenantId, id], onDelete: Restrict)
+  retries           AgentRun[]                @relation("AgentRunRetries")
+  streamEvents      AgentRunStreamEvent[]
   connectivityProbe AiModelConnectivityProbe?
 
   @@unique([tenantId, id])
@@ -2072,12 +2130,12 @@ model AgentRun {
 }
 
 model AiModelConnectivityProbe {
-  tenantId              String   @map("tenant_id") @db.Uuid
-  runId                 String   @map("run_id") @db.Uuid
+  tenantId               String   @map("tenant_id") @db.Uuid
+  runId                  String   @map("run_id") @db.Uuid
   targetCatalogVersionId String   @map("target_catalog_version_id") @db.Uuid
-  requesterUserId       String   @map("requester_user_id") @db.Uuid
-  conversationId        String   @map("conversation_id") @db.Uuid
-  createdAt             DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  requesterUserId        String   @map("requester_user_id") @db.Uuid
+  conversationId         String   @map("conversation_id") @db.Uuid
+  createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   run AgentRun @relation(fields: [tenantId, runId], references: [tenantId, id], onDelete: Restrict)
 

@@ -145,6 +145,7 @@ describe('admin API', () => {
       displayName: 'Member',
       status: 'PENDING',
       deliveryStatus: 'NOT_CONFIGURED',
+      deliveryTargetEvidence: 'ISSUED',
       issuedAt: '2026-07-29T01:00:00.000Z',
       expiresAt: '2026-07-29T01:15:00.000Z',
       consumedAt: null,

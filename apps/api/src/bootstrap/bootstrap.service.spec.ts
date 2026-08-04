@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { BootstrapService } from './bootstrap.service.js';
 
 describe('BootstrapService employee navigation', () => {
-  it('publishes employee workspaces without client-side invention', async () => {
+  it('publishes only the four canonical employee business destinations', async () => {
     const service = new BootstrapService(
       { current: { tenantId: 'tenant', userId: 'user' } } as never,
       {
@@ -17,6 +17,7 @@ describe('BootstrapService employee navigation', () => {
       } as never,
       {
         listMemberAgents: vi.fn().mockResolvedValue([]),
+        listDepartmentAgents: vi.fn().mockResolvedValue([]),
       } as never,
       {
         assertTenantAccess: vi.fn(),
@@ -28,14 +29,12 @@ describe('BootstrapService employee navigation', () => {
 
     const response = await service.getBootstrap();
 
-    expect(response.navigation).toEqual(
-      expect.arrayContaining([
-        { id: 'roles', label: '我的角色' },
-        { id: 'workbench', label: '目标与任务' },
-        { id: 'memories', label: '我的记忆' },
-        { id: 'experience-usage', label: '经验与用量' },
-      ]),
-    );
+    expect(response.navigation).toEqual([
+      { id: 'workbench', label: '工作台' },
+      { id: 'messages', label: '消息' },
+      { id: 'contacts', label: '通讯录' },
+      { id: 'profile', label: '我的' },
+    ]);
   });
 
   it('does not advertise an online configuration as contactable without verified runtime evidence', async () => {
@@ -71,6 +70,7 @@ describe('BootstrapService employee navigation', () => {
             versionStatus: 'published',
           },
         ]),
+        listDepartmentAgents: vi.fn().mockResolvedValue([]),
       } as never,
       {
         assertTenantAccess: vi.fn(),

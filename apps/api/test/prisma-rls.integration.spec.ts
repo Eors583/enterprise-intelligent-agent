@@ -1707,6 +1707,8 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
         userId: '00000000-0000-7000-8000-000000000101',
         purpose: 'PASSWORD_RESET',
         tokenHash,
+        deliveryTargetEmail: 'owner@example.test',
+        deliveryTargetEvidence: 'ISSUED',
         expiresAt: new Date(Date.now() + 60_000),
       },
     });

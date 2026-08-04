@@ -107,6 +107,56 @@ export function formatJsonObject(value: Readonly<Record<string, unknown>>): stri
   return JSON.stringify(value, null, 2);
 }
 
+export function generatedRoleIdentifier(name: string, prefix = 'role'): string {
+  const normalized = name
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .replace(/-{2,}/gu, '-');
+  const encoded =
+    normalized ||
+    [...name.trim()]
+      .map((character) => character.codePointAt(0)?.toString(36) ?? '')
+      .filter(Boolean)
+      .join('-');
+  const candidate = (encoded ? `${prefix}-${encoded}` : `${prefix}-new`)
+    .slice(0, 100)
+    .replace(/[-._:]+$/u, '');
+  return candidate.length >= 3 ? candidate : `${prefix}-new`;
+}
+
+export function identifierForRenamedRoleField(
+  currentKey: string,
+  currentName: string,
+  nextName: string,
+  prefix = 'role',
+): string {
+  return !currentKey || currentKey === generatedRoleIdentifier(currentName, prefix)
+    ? generatedRoleIdentifier(nextName, prefix)
+    : currentKey;
+}
+
+export function withGeneratedRoleKeys<T extends { readonly key: string; readonly name: string }>(
+  items: ReadonlyArray<T>,
+  prefix: string,
+): T[] {
+  const used = new Set<string>();
+  return items.map((item) => {
+    const base = item.key.trim().toLowerCase() || generatedRoleIdentifier(item.name, prefix);
+    let candidate = base;
+    let ordinal = 2;
+    while (used.has(candidate)) {
+      const suffix = `-${ordinal}`;
+      candidate = `${base.slice(0, 100 - suffix.length).replace(/[-._:]+$/u, '')}${suffix}`;
+      ordinal += 1;
+    }
+    used.add(candidate);
+    return { ...item, key: candidate };
+  });
+}
+
 export function diffRoleVersions(
   baseline: RoleVersion,
   target: RoleVersion,

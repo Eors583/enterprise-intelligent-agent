@@ -6,6 +6,16 @@ import {
 } from './identity-governance.js';
 
 export const tenantRoleSchema = z.enum(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN', 'MEMBER']);
+export const adminConsoleRoleSchema = z.enum(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN']);
+export const advancedSettingsRoleSchema = z.enum(['OWNER', 'ADMIN']);
+
+export function canAccessAdminConsole(role: TenantRole): boolean {
+  return adminConsoleRoleSchema.safeParse(role).success;
+}
+
+export function canAccessAdvancedSettings(role: TenantRole): boolean {
+  return advancedSettingsRoleSchema.safeParse(role).success;
+}
 
 export const registerTenantRequestSchema = z.object({
   tenantName: z.string().trim().min(2).max(200),

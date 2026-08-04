@@ -1,7 +1,7 @@
 import type { AdminMember } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
 
-import { buildMemberUpdateRequest } from './MembersPage';
+import { buildMemberUpdateRequest, isPlaceholderMemberEmail } from './MembersPage';
 
 const member: AdminMember = {
   id: '83ceae87-554e-451d-b411-c336f1d02bf9',
@@ -20,16 +20,17 @@ const member: AdminMember = {
 };
 
 describe('member synchronization ownership policy', () => {
-  it('only submits the local enterprise role for a Feishu-managed member', () => {
+  it('submits the local login email and enterprise role for a Feishu-managed member', () => {
     expect(
       buildMemberUpdateRequest(member, {
+        email: '  New.Login@Example.COM ',
         displayName: '不应提交的姓名',
         role: 'ADMIN',
         status: 'LOCKED',
         orgUnitId: 'd9428888-122b-4b7f-82cd-34e3f4f622b1',
         title: '不应提交的职位',
       }),
-    ).toEqual({ role: 'ADMIN' });
+    ).toEqual({ email: 'new.login@example.com', role: 'ADMIN' });
   });
 
   it('keeps all editable fields for a locally managed member', () => {
@@ -37,6 +38,7 @@ describe('member synchronization ownership policy', () => {
       buildMemberUpdateRequest(
         { ...member, source: 'LOCAL' },
         {
+          email: 'Local.Member@Example.COM',
           displayName: '本地成员',
           role: 'KNOWLEDGE_ADMIN',
           status: 'INACTIVE',
@@ -45,11 +47,31 @@ describe('member synchronization ownership policy', () => {
         },
       ),
     ).toEqual({
+      email: 'local.member@example.com',
       displayName: '本地成员',
       role: 'KNOWLEDGE_ADMIN',
       status: 'INACTIVE',
       orgUnitId: 'd9428888-122b-4b7f-82cd-34e3f4f622b1',
       title: '知识管理员',
     });
+  });
+
+  it('recognizes generated Feishu placeholder addresses case-insensitively', () => {
+    expect(isPlaceholderMemberEmail('feishu-123@external.invalid')).toBe(true);
+    expect(isPlaceholderMemberEmail(' FEISHU-123@EXTERNAL.INVALID ')).toBe(true);
+    expect(isPlaceholderMemberEmail('member@example.com')).toBe(false);
+  });
+
+  it('does not resubmit an unchanged placeholder when only the local role changes', () => {
+    expect(
+      buildMemberUpdateRequest(member, {
+        email: member.email,
+        displayName: member.displayName,
+        role: 'ADMIN',
+        status: member.status,
+        orgUnitId: member.employment!.orgUnitId,
+        title: member.employment!.title ?? '',
+      }),
+    ).toEqual({ role: 'ADMIN' });
   });
 });

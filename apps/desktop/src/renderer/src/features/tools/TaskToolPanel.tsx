@@ -19,9 +19,12 @@ import {
   parseToolInput,
   requesterActionsFor,
   requesterToolActionLabel,
+  toolInputFields,
+  toolInputValue,
   toolInvocationStatusLabel,
   toolOperationError,
   toolRiskLabel,
+  updateToolInput,
   type RequesterToolAction,
 } from './tool-view';
 import './tools.css';
@@ -354,10 +357,7 @@ function ToolCatalog({
               <span>工</span>
               <span>
                 <strong>{tool.name}</strong>
-                <small>
-                  {toolRiskLabel(tool.riskClass)} · v{tool.version}
-                </small>
-                <code>{tool.key}</code>
+                <small>{toolRiskLabel(tool.riskClass)}</small>
               </span>
             </button>
           ))}
@@ -397,10 +397,7 @@ function InvocationList({
               <span className={`tool-status-dot ${invocation.status.toLowerCase()}`} />
               <span>
                 <strong>{toolInvocationStatusLabel(invocation.status)}</strong>
-                <small>
-                  v{invocation.toolVersion} · r{invocation.revision}
-                </small>
-                <code>{shortId(invocation.id)}</code>
+                <small>{formatToolTime(invocation.updatedAt)}</small>
               </span>
             </button>
           ))}
@@ -440,10 +437,7 @@ function ApprovalList({
               <span className="tool-status-dot pending_approval" />
               <span>
                 <strong>高风险工具审批</strong>
-                <small>
-                  申请人 {shortId(invocation.requesterUserId)} · r{invocation.revision}
-                </small>
-                <code>{shortId(invocation.id)}</code>
+                <small>{formatToolTime(invocation.updatedAt)}</small>
               </span>
             </button>
           ))}
@@ -472,33 +466,34 @@ function ApprovalDetail({
         <div>
           <p className="eyebrow">Maker-checker approval</p>
           <h3>高风险工具独立审批</h3>
-          <p>
-            {toolRiskLabel(invocation.riskClass)} · 申请任命 {shortId(invocation.roleAssignmentId)}
-          </p>
+          <p>{toolRiskLabel(invocation.riskClass)} · 需要另一位有权限的员工复核</p>
         </div>
         <span className="tool-risk high_risk_approval">职责分离</span>
       </header>
       <div className="tool-gate-message">
-        你只能以不同员工的有效审批任命处理此调用。批准将绑定当前输入哈希、任务、工具版本与策略快照。
+        请根据当前任务目标与操作影响独立判断；申请人不能审批自己的请求。
       </div>
-      <dl className="tool-trace-grid">
-        <Trace label="Invocation" value={invocation.id} />
-        <Trace label="Requester" value={invocation.requesterUserId} />
-        <Trace label="Task" value={invocation.taskId} />
-        <Trace label="Tool Version" value={invocation.toolVersionId} />
-        <Trace label="Policy" value={invocation.policyDecisionId} />
-        <Trace label="Input Hash" value={invocation.inputHash} />
-      </dl>
-      <section className="tool-payload-grid">
-        <div>
-          <strong>待审批输入</strong>
-          <pre>{JSON.stringify(invocation.input, null, 2)}</pre>
-        </div>
-        <div>
-          <strong>策略快照</strong>
-          <pre>{JSON.stringify(invocation.policySnapshot, null, 2)}</pre>
-        </div>
-      </section>
+      <details className="tool-advanced-details">
+        <summary>高级详情</summary>
+        <dl className="tool-trace-grid">
+          <Trace label="Invocation" value={invocation.id} />
+          <Trace label="Requester" value={invocation.requesterUserId} />
+          <Trace label="Task" value={invocation.taskId} />
+          <Trace label="Tool Version" value={invocation.toolVersionId} />
+          <Trace label="Policy" value={invocation.policyDecisionId} />
+          <Trace label="Input Hash" value={invocation.inputHash} />
+        </dl>
+        <section className="tool-payload-grid">
+          <div>
+            <strong>待审批输入</strong>
+            <BusinessDataSummary value={invocation.input} />
+          </div>
+          <div>
+            <strong>策略快照</strong>
+            <p>执行范围、权限和审批要求已由系统策略锁定。</p>
+          </div>
+        </section>
+      </details>
       <section className="tool-action-zone">
         <label>
           审批意见
@@ -553,6 +548,7 @@ function ToolInvocationForm({
   readonly onDryRunChange: (value: boolean) => void;
   readonly onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }): React.JSX.Element {
+  const fields = toolInputFields(tool);
   const gates = useMemo(
     () =>
       [
@@ -565,7 +561,7 @@ function ToolInvocationForm({
     <form className="tool-invocation-form" onSubmit={onSubmit}>
       <header>
         <div>
-          <p className="eyebrow">{tool.key}</p>
+          <p className="eyebrow">任务工具</p>
           <h3>{tool.name}</h3>
           <p>{tool.description}</p>
         </div>
@@ -574,23 +570,23 @@ function ToolInvocationForm({
         </span>
       </header>
       <div className="tool-policy-summary">
-        <span>数据密级：{tool.dataClassification}</span>
-        <span>演练模式：{tool.dryRunMode}</span>
-        <span>{gates.length > 0 ? `门禁：${gates.join(' + ')}` : '门禁：策略通过后自动执行'}</span>
+        <span>资料范围：由当前任务权限自动控制</span>
+        <span>{tool.dryRunMode === 'UNSUPPORTED' ? '不支持预演' : '支持先预演'}</span>
+        <span>{gates.length > 0 ? `执行前：${gates.join(' + ')}` : '策略通过后自动执行'}</span>
       </div>
-      <label>
-        严格 JSON 输入
-        <textarea
-          rows={12}
-          spellCheck={false}
-          value={input}
-          onChange={(event) => onInputChange(event.target.value)}
-        />
-      </label>
-      <details>
-        <summary>查看输入 Schema</summary>
-        <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
-      </details>
+      <div className="tool-business-fields">
+        {fields.map((field) => (
+          <ToolBusinessField
+            key={field.key}
+            field={field}
+            value={toolInputValue(input, field.key)}
+            onChange={(value) => onInputChange(updateToolInput(input, field.key, value))}
+          />
+        ))}
+      </div>
+      <p className="tool-form-note">
+        输入项由工具配置自动生成；字段格式、必填规则和敏感信息保护由系统统一校验。
+      </p>
       <label>
         业务原因
         <textarea
@@ -620,7 +616,7 @@ function ToolInvocationForm({
         </span>
       </label>
       <footer>
-        <span>调用将记录员工、角色任命、任务、输入哈希、策略和结果。</span>
+        <span>系统会自动记录本次操作及审批结果。</span>
         <button type="submit" disabled={pending || !reason.trim()}>
           {pending ? '登记中…' : '通过网关调用'}
         </button>
@@ -656,22 +652,13 @@ function InvocationDetail({
           <p className="eyebrow">Immutable invocation trace</p>
           <h3>{toolInvocationStatusLabel(invocation.status)}</h3>
           <p>
-            {toolRiskLabel(invocation.riskClass)} · v{invocation.toolVersion} · r
-            {invocation.revision}
+            {toolRiskLabel(invocation.riskClass)} · {formatToolTime(invocation.updatedAt)}
           </p>
         </div>
         <button type="button" onClick={onCreateNew}>
           新建调用
         </button>
       </header>
-      <dl className="tool-trace-grid">
-        <Trace label="Invocation" value={invocation.id} />
-        <Trace label="Task" value={invocation.taskId} />
-        <Trace label="Role Assignment" value={invocation.roleAssignmentId} />
-        <Trace label="Correlation" value={invocation.correlationId} />
-        <Trace label="Policy" value={invocation.policyDecisionId} />
-        <Trace label="Input Hash" value={invocation.inputHash} />
-      </dl>
       {invocation.status === 'PENDING_APPROVAL' ? (
         <div className="tool-gate-message">
           已完成本人确认，必须由不同员工的有效审批任命独立审批；申请人不能自批。
@@ -689,16 +676,31 @@ function InvocationDetail({
           。系统只查询原请求状态，不会重放原副作用。
         </div>
       ) : null}
-      <section className="tool-payload-grid">
-        <div>
-          <strong>输入</strong>
-          <pre>{JSON.stringify(invocation.input, null, 2)}</pre>
-        </div>
-        <div>
-          <strong>{invocation.output ? '输出' : '策略快照'}</strong>
-          <pre>{JSON.stringify(invocation.output ?? invocation.policySnapshot, null, 2)}</pre>
-        </div>
-      </section>
+      <details className="tool-advanced-details">
+        <summary>高级详情</summary>
+        <dl className="tool-trace-grid">
+          <Trace label="Invocation" value={invocation.id} />
+          <Trace label="Task" value={invocation.taskId} />
+          <Trace label="Role Assignment" value={invocation.roleAssignmentId} />
+          <Trace label="Correlation" value={invocation.correlationId} />
+          <Trace label="Policy" value={invocation.policyDecisionId} />
+          <Trace label="Input Hash" value={invocation.inputHash} />
+        </dl>
+        <section className="tool-payload-grid">
+          <div>
+            <strong>输入</strong>
+            <BusinessDataSummary value={invocation.input} />
+          </div>
+          <div>
+            <strong>{invocation.output ? '输出' : '策略快照'}</strong>
+            {invocation.output ? (
+              <BusinessDataSummary value={invocation.output} />
+            ) : (
+              <p>执行范围、权限和审批要求已由系统策略锁定。</p>
+            )}
+          </div>
+        </section>
+      </details>
       {invocation.errorCode || invocation.errorDetail ? (
         <div className="tool-provider-error" role="alert">
           <strong>{invocation.errorCode ?? 'PROVIDER_ERROR'}</strong>
@@ -748,6 +750,68 @@ function Trace({ label, value }: { readonly label: string; readonly value: strin
   );
 }
 
+function ToolBusinessField({
+  field,
+  value,
+  onChange,
+}: {
+  readonly field: ReturnType<typeof toolInputFields>[number];
+  readonly value: unknown;
+  readonly onChange: (value: unknown) => void;
+}): React.JSX.Element {
+  if (field.kind === 'unsupported') {
+    return (
+      <div className="tool-field-unsupported">
+        <strong>{field.label}</strong>
+        <span>该复合字段请在“高级输入与技术详情”中配置。</span>
+      </div>
+    );
+  }
+  if (field.kind === 'boolean') {
+    return (
+      <label className="tool-dry-run">
+        <input
+          type="checkbox"
+          checked={value === true}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        <span>
+          {field.label}
+          {field.description ? <small>{field.description}</small> : null}
+        </span>
+      </label>
+    );
+  }
+  return (
+    <label>
+      {field.label}
+      {field.required ? <small>必填</small> : null}
+      {field.enumValues.length > 0 ? (
+        <select
+          value={typeof value === 'string' ? value : ''}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="">请选择</option>
+          {field.enumValues.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type={field.kind === 'number' ? 'number' : 'text'}
+          value={typeof value === 'string' || typeof value === 'number' ? value : ''}
+          onChange={(event) =>
+            onChange(field.kind === 'number' ? Number(event.target.value) : event.target.value)
+          }
+        />
+      )}
+      {field.description ? <small>{field.description}</small> : null}
+    </label>
+  );
+}
+
 function reconciliationStatusLabel(
   state: 'NONE' | 'PENDING' | 'INCONCLUSIVE' | 'RESOLVED',
 ): string {
@@ -755,6 +819,47 @@ function reconciliationStatusLabel(
   if (state === 'INCONCLUSIVE') return '仍无法确认，保持未知';
   if (state === 'RESOLVED') return '已由可信回执确认';
   return '尚未请求';
+}
+
+function BusinessDataSummary({ value }: { readonly value: unknown }): React.JSX.Element {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return <p>{String(value ?? '暂无可展示内容')}</p>;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  return (
+    <dl className="tool-business-data-summary">
+      {entries.map(([key, item]) => (
+        <div key={key}>
+          <dt>{businessFieldLabel(key)}</dt>
+          <dd>
+            {Array.isArray(item)
+              ? `${item.length} 项`
+              : item && typeof item === 'object'
+                ? '已记录'
+                : typeof item === 'boolean'
+                  ? item
+                    ? '是'
+                    : '否'
+                  : String(item ?? '—')}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function businessFieldLabel(key: string): string {
+  const labels: Record<string, string> = {
+    query: '查询内容',
+    title: '标题',
+    description: '说明',
+    customer: '客户',
+    amount: '金额',
+    status: '状态',
+    reason: '原因',
+    result: '结果',
+  };
+  return labels[key] ?? '业务字段';
 }
 
 function ToolState({
@@ -785,6 +890,11 @@ function ToolState({
   );
 }
 
-function shortId(value: string): string {
-  return `${value.slice(0, 8)}…${value.slice(-4)}`;
+function formatToolTime(value: string): string {
+  return new Intl.DateTimeFormat('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(value));
 }

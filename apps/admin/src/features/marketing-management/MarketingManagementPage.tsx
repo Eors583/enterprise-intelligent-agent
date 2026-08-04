@@ -1,8 +1,16 @@
 import type {
+  Evidence,
+  MetricDefinition,
   MarketingActionPlan,
   MarketingInsight,
   MarketingObservation,
   MarketingTarget,
+  Objective,
+  RoleAssignment,
+  Strategy,
+  Task,
+  ValueDefinition,
+  ValueVersion,
 } from '@enterprise/contracts';
 import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 
@@ -24,7 +32,17 @@ import {
   type MarketingMasterPath,
 } from './api';
 import { messageFromError } from '@/api/client';
+import { listRoleAssignments } from '@/api/admin-api';
 import { Icon } from '@/components/Icons';
+import {
+  listEvidence,
+  listMetricDefinitions,
+  listObjectives,
+  listStrategies,
+  listTasks,
+  listValueDefinitions,
+  listValueVersions,
+} from '@/features/business-semantics/api';
 
 import './marketing-management.css';
 
@@ -61,6 +79,13 @@ interface MarketingData {
   products: Awaited<ReturnType<typeof listMarketingMasterData>>;
   regions: Awaited<ReturnType<typeof listMarketingMasterData>>;
   segments: Awaited<ReturnType<typeof listMarketingMasterData>>;
+  evidence: Evidence[];
+  strategies: Strategy[];
+  objectives: Objective[];
+  valueVersions: Array<{ definition: ValueDefinition; version: ValueVersion }>;
+  roleAssignments: RoleAssignment[];
+  metrics: MetricDefinition[];
+  tasks: Task[];
 }
 
 const EMPTY_DATA: MarketingData = {
@@ -71,6 +96,13 @@ const EMPTY_DATA: MarketingData = {
   products: [],
   regions: [],
   segments: [],
+  evidence: [],
+  strategies: [],
+  objectives: [],
+  valueVersions: [],
+  roleAssignments: [],
+  metrics: [],
+  tasks: [],
 };
 
 export function MarketingManagementPage({ currentUserId }: { currentUserId: string }): ReactNode {
@@ -83,17 +115,64 @@ export function MarketingManagementPage({ currentUserId }: { currentUserId: stri
     setLoading(true);
     setError(null);
     try {
-      const [observations, insights, targets, plans, products, regions, segments] =
-        await Promise.all([
-          listMarketingObservations(signal),
-          listMarketingInsights(signal),
-          listMarketingTargets(signal),
-          listMarketingActionPlans(signal),
-          listMarketingMasterData('products', signal),
-          listMarketingMasterData('regions', signal),
-          listMarketingMasterData('customer-segments', signal),
-        ]);
-      setData({ observations, insights, targets, plans, products, regions, segments });
+      const [
+        observations,
+        insights,
+        targets,
+        plans,
+        products,
+        regions,
+        segments,
+        evidence,
+        strategies,
+        objectives,
+        valueDefinitions,
+        roleAssignments,
+        metrics,
+        tasks,
+      ] = await Promise.all([
+        listMarketingObservations(signal),
+        listMarketingInsights(signal),
+        listMarketingTargets(signal),
+        listMarketingActionPlans(signal),
+        listMarketingMasterData('products', signal),
+        listMarketingMasterData('regions', signal),
+        listMarketingMasterData('customer-segments', signal),
+        listEvidence(signal).catch(() => []),
+        listStrategies(signal).catch(() => []),
+        listObjectives(signal).catch(() => []),
+        listValueDefinitions(signal).catch(() => []),
+        listRoleAssignments(signal)
+          .then((response) => response.items)
+          .catch(() => []),
+        listMetricDefinitions(signal).catch(() => []),
+        listTasks(signal).catch(() => []),
+      ]);
+      const valueVersions = (
+        await Promise.all(
+          valueDefinitions.map(async (definition) =>
+            listValueVersions(definition.id, signal)
+              .then((versions) => versions.map((version) => ({ definition, version })))
+              .catch(() => []),
+          ),
+        )
+      ).flat();
+      setData({
+        observations,
+        insights,
+        targets,
+        plans,
+        products,
+        regions,
+        segments,
+        evidence,
+        strategies,
+        objectives,
+        valueVersions,
+        roleAssignments,
+        metrics,
+        tasks,
+      });
     } catch (caught) {
       if (!(caught instanceof DOMException && caught.name === 'AbortError')) {
         setError(messageFromError(caught));
@@ -182,6 +261,7 @@ export function MarketingManagementPage({ currentUserId }: { currentUserId: stri
       {!loading && tab === 'FIVE_LOOKS' ? (
         <FiveLooksPanel
           observations={data.observations}
+          evidence={data.evidence}
           onCreate={(input) => mutation(() => createMarketingObservation(input))}
         />
       ) : null}
@@ -200,6 +280,7 @@ export function MarketingManagementPage({ currentUserId }: { currentUserId: stri
           products={data.products}
           regions={data.regions}
           segments={data.segments}
+          references={data}
           onCreate={(input) => mutation(() => createMarketingTarget(input))}
           onTransition={(id, input) => mutation(() => transitionMarketingTarget(id, input))}
         />
@@ -208,6 +289,7 @@ export function MarketingManagementPage({ currentUserId }: { currentUserId: stri
         <ActionPlansPanel
           plans={data.plans}
           targets={data.targets}
+          references={data}
           onCreate={(input) => mutation(() => createMarketingActionPlan(input))}
           onCreateItem={(planId, input) => mutation(() => createMarketingActionItem(planId, input))}
           onTransition={(id, input) => mutation(() => transitionMarketingActionPlan(id, input))}
@@ -238,14 +320,16 @@ function Summary({ label, value }: { label: string; value: number }): ReactNode 
 
 function FiveLooksPanel({
   observations,
+  evidence,
   onCreate,
 }: {
   observations: MarketingObservation[];
+  evidence: Evidence[];
   onCreate: (input: Parameters<typeof createMarketingObservation>[0]) => Promise<void>;
 }): ReactNode {
   return (
     <div className="marketing-stack">
-      <ObservationForm onSubmit={onCreate} />
+      <ObservationForm evidence={evidence} onSubmit={onCreate} />
       <div className="five-look-grid">
         {Object.entries(DIMENSION_LABELS).map(([dimension, label]) => {
           const items = observations.filter((item) => item.dimension === dimension);
@@ -287,8 +371,10 @@ function FiveLooksPanel({
 }
 
 function ObservationForm({
+  evidence,
   onSubmit,
 }: {
+  evidence: Evidence[];
   onSubmit: (input: Parameters<typeof createMarketingObservation>[0]) => Promise<void>;
 }): ReactNode {
   const [open, setOpen] = useState(false);
@@ -298,21 +384,24 @@ function ObservationForm({
       open={open}
       onToggle={() => setOpen((value) => !value)}
       onSubmit={async (form) => {
-        const origin = String(form.get('origin')) as 'HUMAN' | 'AI';
+        const selectedEvidence = evidence.find(
+          (item) => item.id === String(form.get('evidenceId')),
+        );
+        if (!selectedEvidence) throw new Error('请选择一条有效证据。');
         await onSubmit({
-          code: String(form.get('code')).trim().toUpperCase(),
+          code: generatedMarketingCode('OBSERVATION', String(form.get('statement'))),
           dimension: String(form.get('dimension')) as MarketingObservation['dimension'],
           assertionType: String(form.get('assertionType')) as MarketingObservation['assertionType'],
           statement: String(form.get('statement')),
           confidence: Number(form.get('confidence')),
-          origin,
-          agentRunId: origin === 'AI' ? String(form.get('agentRunId')) : null,
+          origin: 'HUMAN',
+          agentRunId: null,
           evidence: [
             {
               evidenceId: String(form.get('evidenceId')),
-              evidenceVersion: Number(form.get('evidenceVersion')),
+              evidenceVersion: selectedEvidence.version,
               linkType: 'SUPPORTS',
-              expectedContentHash: String(form.get('contentHash')).toLowerCase(),
+              expectedContentHash: selectedEvidence.contentHash,
             },
           ],
           idempotencyKey: crypto.randomUUID(),
@@ -320,7 +409,6 @@ function ObservationForm({
         setOpen(false);
       }}
     >
-      <Field name="code" label="观察编码" required />
       <SelectField name="dimension" label="五看维度" options={Object.entries(DIMENSION_LABELS)} />
       <SelectField
         name="assertionType"
@@ -332,18 +420,17 @@ function ObservationForm({
         ]}
       />
       <Field name="confidence" label="置信度（0-1）" type="number" step="0.01" required />
-      <SelectField
-        name="origin"
-        label="来源"
-        options={[
-          ['HUMAN', '人工'],
-          ['AI', 'AI 候选'],
-        ]}
-      />
-      <Field name="agentRunId" label="Agent Run ID（AI 候选必填）" />
-      <Field name="evidenceId" label="证据 ID" required />
-      <Field name="evidenceVersion" label="证据版本" type="number" required />
-      <Field name="contentHash" label="证据 SHA-256" required />
+      <label>
+        <span>支持该观察的证据</span>
+        <select name="evidenceId" required>
+          <option value="">请选择已登记证据</option>
+          {evidence.map((item) => (
+            <option key={item.id} value={item.id}>
+              {item.summary || item.code}
+            </option>
+          ))}
+        </select>
+      </label>
       <TextField name="statement" label="观察陈述" required />
     </GovernedForm>
   );
@@ -370,37 +457,33 @@ function InsightsPanel({
       <GovernedForm
         title="创建洞察候选"
         onSubmit={async (form) => {
-          const origin = String(form.get('origin')) as 'HUMAN' | 'AI';
           await onCreate({
-            code: String(form.get('code')).trim().toUpperCase(),
+            code: generatedMarketingCode('INSIGHT', String(form.get('title'))),
             title: String(form.get('title')),
             statement: String(form.get('statement')),
-            origin,
-            agentRunId: origin === 'AI' ? String(form.get('agentRunId')) : null,
-            observationIds: String(form.get('observationIds'))
-              .split(',')
-              .map((value) => value.trim())
-              .filter(Boolean),
+            origin: 'HUMAN',
+            agentRunId: null,
+            observationIds: form.getAll('observationIds').map(String),
             idempotencyKey: crypto.randomUUID(),
           });
         }}
       >
-        <Field name="code" label="洞察编码" required />
         <Field name="title" label="洞察标题" required />
-        <SelectField
-          name="origin"
-          label="来源"
-          options={[
-            ['HUMAN', '人工'],
-            ['AI', 'AI 候选'],
-          ]}
-        />
-        <Field name="agentRunId" label="Agent Run ID（AI 候选必填）" />
-        <Field
-          name="observationIds"
-          label={`观察 ID（逗号分隔，当前 ${observations.length} 条）`}
-          required
-        />
+        <label>
+          <span>依据哪些观察</span>
+          <select
+            name="observationIds"
+            required
+            multiple
+            size={Math.min(8, Math.max(3, observations.length))}
+          >
+            {observations.map((item) => (
+              <option key={item.id} value={item.id}>
+                {DIMENSION_LABELS[item.dimension]} · {item.statement}
+              </option>
+            ))}
+          </select>
+        </label>
         <TextField name="statement" label="洞察陈述" required />
       </GovernedForm>
 
@@ -502,6 +585,7 @@ function TargetMatrixPanel({
   products,
   regions,
   segments,
+  references,
   onCreate,
   onTransition,
 }: {
@@ -509,6 +593,7 @@ function TargetMatrixPanel({
   products: MarketingData['products'];
   regions: MarketingData['regions'];
   segments: MarketingData['segments'];
+  references: MarketingData;
   onCreate: (input: Parameters<typeof createMarketingTarget>[0]) => Promise<void>;
   onTransition: (
     id: string,
@@ -528,23 +613,38 @@ function TargetMatrixPanel({
         title="创建产品目标矩阵项"
         onSubmit={async (form) => {
           const axis = String(form.get('axis')) as MarketingTarget['axis'];
+          const strategy = references.strategies.find(
+            (item) => item.id === String(form.get('strategyId')),
+          );
+          const objective = references.objectives.find(
+            (item) => item.id === String(form.get('objectiveId')),
+          );
+          const value = references.valueVersions.find(
+            (item) => item.version.id === String(form.get('valueVersionId')),
+          );
+          const metric = references.metrics.find(
+            (item) => item.id === String(form.get('metricDefinitionId')),
+          );
+          if (!strategy || !objective || !value || !metric) {
+            throw new Error('请选择有效的战略、目标、价值版本和指标。');
+          }
           await onCreate({
-            code: String(form.get('code')).trim().toUpperCase(),
+            code: generatedMarketingCode('TARGET', String(form.get('productId'))),
             productId: String(form.get('productId')),
             axis,
             regionId: axis === 'REGION' ? String(form.get('axisEntityId')) : null,
             customerSegmentId:
               axis === 'CUSTOMER_SEGMENT' ? String(form.get('axisEntityId')) : null,
             strategyId: String(form.get('strategyId')),
-            strategyVersion: Number(form.get('strategyVersion')),
+            strategyVersion: strategy.version,
             objectiveId: String(form.get('objectiveId')),
-            objectiveVersion: Number(form.get('objectiveVersion')),
-            valueDefinitionId: String(form.get('valueDefinitionId')),
+            objectiveVersion: objective.version,
+            valueDefinitionId: value.definition.id,
             valueVersionId: String(form.get('valueVersionId')),
-            valueVersionNumber: Number(form.get('valueVersionNumber')),
+            valueVersionNumber: value.version.version,
             responsibleRoleAssignmentId: String(form.get('roleAssignmentId')),
             metricDefinitionId: String(form.get('metricDefinitionId')),
-            metricDefinitionVersion: Number(form.get('metricDefinitionVersion')),
+            metricDefinitionVersion: metric.version,
             baselineValue: nullableNumber(form.get('baselineValue')),
             targetValue: Number(form.get('targetValue')),
             unit: String(form.get('unit')),
@@ -556,8 +656,12 @@ function TargetMatrixPanel({
           });
         }}
       >
-        <Field name="code" label="目标编码" required />
-        <DatalistField name="productId" label="产品 ID" records={products} required />
+        <SelectOptionsField
+          name="productId"
+          label="产品"
+          options={products.map((item) => choice(item.id, item.name))}
+          required
+        />
         <SelectField
           name="axis"
           label="目标轴"
@@ -566,22 +670,46 @@ function TargetMatrixPanel({
             ['CUSTOMER_SEGMENT', '客户群'],
           ]}
         />
-        <DatalistField
+        <SelectOptionsField
           name="axisEntityId"
-          label="区域/客户群 ID"
-          records={[...regions, ...segments]}
+          label="区域或客户群"
+          options={[...regions, ...segments].map((item) => choice(item.id, item.name))}
           required
         />
-        <Field name="strategyId" label="Strategy ID" required />
-        <Field name="strategyVersion" label="Strategy 版本" type="number" required />
-        <Field name="objectiveId" label="Objective ID" required />
-        <Field name="objectiveVersion" label="Objective 版本" type="number" required />
-        <Field name="valueDefinitionId" label="Value Definition ID" required />
-        <Field name="valueVersionId" label="Value Version ID" required />
-        <Field name="valueVersionNumber" label="Value 版本" type="number" required />
-        <Field name="roleAssignmentId" label="责任 RoleAssignment ID" required />
-        <Field name="metricDefinitionId" label="Metric Definition ID" required />
-        <Field name="metricDefinitionVersion" label="Metric 版本" type="number" required />
+        <SelectOptionsField
+          name="strategyId"
+          label="关联战略"
+          options={references.strategies.map((item) => choice(item.id, item.name))}
+          required
+        />
+        <SelectOptionsField
+          name="objectiveId"
+          label="关联目标"
+          options={references.objectives.map((item) => choice(item.id, item.name))}
+          required
+        />
+        <SelectOptionsField
+          name="valueVersionId"
+          label="价值版本"
+          options={references.valueVersions.map(({ definition, version }) =>
+            choice(version.id, `${definition.name} · 第 ${version.version} 版`),
+          )}
+          required
+        />
+        <SelectOptionsField
+          name="roleAssignmentId"
+          label="责任人及角色"
+          options={references.roleAssignments.map((item) =>
+            choice(item.id, `${item.assignee.displayName} · ${item.agent.name}`),
+          )}
+          required
+        />
+        <SelectOptionsField
+          name="metricDefinitionId"
+          label="衡量指标"
+          options={references.metrics.map((item) => choice(item.id, item.name))}
+          required
+        />
         <Field name="baselineValue" label="基线值" type="number" step="any" />
         <Field name="targetValue" label="目标值" type="number" step="any" required />
         <Field name="unit" label="单位" required />
@@ -647,12 +775,14 @@ function TargetMatrixPanel({
 function ActionPlansPanel({
   plans,
   targets,
+  references,
   onCreate,
   onCreateItem,
   onTransition,
 }: {
   plans: MarketingActionPlan[];
   targets: MarketingTarget[];
+  references: MarketingData;
   onCreate: (input: Parameters<typeof createMarketingActionPlan>[0]) => Promise<void>;
   onCreateItem: (
     planId: string,
@@ -669,7 +799,7 @@ function ActionPlansPanel({
         title="创建行动计划"
         onSubmit={async (form) => {
           await onCreate({
-            code: String(form.get('code')).trim().toUpperCase(),
+            code: generatedMarketingCode('PLAN', String(form.get('title'))),
             targetId: String(form.get('targetId')),
             title: String(form.get('title')),
             description: String(form.get('description')),
@@ -682,15 +812,23 @@ function ActionPlansPanel({
           });
         }}
       >
-        <Field name="code" label="计划编码" required />
-        <DatalistField
+        <SelectOptionsField
           name="targetId"
-          label="目标 ID"
-          records={targets.map(targetRecord)}
+          label="对应营销目标"
+          options={targets.map((target) =>
+            choice(target.id, `${target.targetValue} ${target.unit}`),
+          )}
           required
         />
         <Field name="title" label="计划名称" required />
-        <Field name="roleAssignmentId" label="责任 RoleAssignment ID" required />
+        <SelectOptionsField
+          name="roleAssignmentId"
+          label="负责人及角色"
+          options={references.roleAssignments.map((item) =>
+            choice(item.id, `${item.assignee.displayName} · ${item.agent.name}`),
+          )}
+          required
+        />
         <Field name="periodStart" label="开始时间" type="datetime-local" required />
         <Field name="periodEnd" label="结束时间" type="datetime-local" required />
         <Field name="budgetAmount" label="计划预算" type="number" step="any" />
@@ -735,13 +873,15 @@ function ActionPlansPanel({
               title="添加行动项"
               onSubmit={async (form) => {
                 await onCreateItem(plan.id, {
-                  code: String(form.get('code')).trim().toUpperCase(),
-                  ordinal: Number(form.get('ordinal')),
+                  code: generatedMarketingCode('ACTION', String(form.get('title'))),
+                  ordinal: plan.items.length + 1,
                   title: String(form.get('title')),
                   description: String(form.get('description')),
                   responsibleRoleAssignmentId: String(form.get('roleAssignmentId')),
                   linkedTaskId: nullableString(form.get('taskId')),
-                  linkedTaskVersion: nullableNumber(form.get('taskVersion')),
+                  linkedTaskVersion:
+                    references.tasks.find((item) => item.id === String(form.get('taskId')))
+                      ?.version ?? null,
                   contributionType: String(form.get('contributionType')) as
                     'RESPONSIBLE' | 'ACCOUNTABLE' | 'CONSULTED' | 'INFORMED',
                   acceptanceCriteria: String(form.get('acceptanceCriteria')),
@@ -750,10 +890,15 @@ function ActionPlansPanel({
                 });
               }}
             >
-              <Field name="code" label="行动项编码" required />
-              <Field name="ordinal" label="顺序" type="number" required />
               <Field name="title" label="行动项名称" required />
-              <Field name="roleAssignmentId" label="责任 RoleAssignment ID" required />
+              <SelectOptionsField
+                name="roleAssignmentId"
+                label="负责人及角色"
+                options={references.roleAssignments.map((item) =>
+                  choice(item.id, `${item.assignee.displayName} · ${item.agent.name}`),
+                )}
+                required
+              />
               <SelectField
                 name="contributionType"
                 label="贡献类型"
@@ -764,8 +909,11 @@ function ActionPlansPanel({
                   ['INFORMED', '知会'],
                 ]}
               />
-              <Field name="taskId" label="关联 Task ID（可选）" />
-              <Field name="taskVersion" label="Task 版本" type="number" />
+              <SelectOptionsField
+                name="taskId"
+                label="关联任务（可选）"
+                options={references.tasks.map((item) => choice(item.id, item.title))}
+              />
               <Field name="dueAt" label="到期时间" type="datetime-local" required />
               <TextField name="description" label="执行说明" required />
               <TextField name="acceptanceCriteria" label="验收标准" required />
@@ -820,14 +968,13 @@ function MasterDataPanel({
             title={`新增${labels[path]}`}
             onSubmit={async (form) => {
               await onCreate(path, {
-                code: String(form.get('code')).trim().toUpperCase(),
+                code: generatedMarketingCode(path.toUpperCase(), String(form.get('name'))),
                 name: String(form.get('name')),
                 description: String(form.get('description')),
                 idempotencyKey: crypto.randomUUID(),
               });
             }}
           >
-            <Field name="code" label="唯一编码" required />
             <Field name="name" label="名称" required />
             <TextField name="description" label="说明" />
           </GovernedForm>
@@ -957,35 +1104,45 @@ function SelectField({
   );
 }
 
-function DatalistField({
+function generatedMarketingCode(prefix: string, label: string): string {
+  const slug = label
+    .normalize('NFKD')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, '.')
+    .replace(/^\.|\.$/gu, '')
+    .slice(0, 40);
+  const suffix = crypto.randomUUID().replaceAll('-', '').slice(0, 8).toUpperCase();
+  return `${prefix}.${slug || 'RECORD'}.${suffix}`;
+}
+
+function SelectOptionsField({
   name,
   label,
-  records,
+  options,
   required = false,
 }: {
   name: string;
   label: string;
-  records: ReadonlyArray<{ readonly id: string; readonly code: string; readonly name: string }>;
+  options: ReadonlyArray<readonly [string, string]>;
   required?: boolean;
 }): ReactNode {
-  const listId = `${name}-options`;
   return (
     <label>
       <span>{label}</span>
-      <input name={name} list={listId} required={required} />
-      <datalist id={listId}>
-        {records.map((record) => (
-          <option value={record.id} key={record.id}>
-            {record.code} · {record.name}
+      <select name={name} required={required}>
+        <option value="">请选择</option>
+        {options.map(([value, copy]) => (
+          <option value={value} key={value}>
+            {copy}
           </option>
         ))}
-      </datalist>
+      </select>
     </label>
   );
 }
 
-function targetRecord(target: MarketingTarget): { id: string; code: string; name: string } {
-  return { id: target.id, code: target.code, name: `${target.targetValue} ${target.unit}` };
+function choice(value: string, label: string): readonly [string, string] {
+  return [value, label] as const;
 }
 
 function actionLabel(action: string): string {

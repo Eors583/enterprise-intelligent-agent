@@ -158,6 +158,58 @@ describe('HttpAgentRuntimeClient', () => {
     });
   });
 
+  it('accepts a provider failure whose optional safety decision is serialized as null', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        jsonResponse({
+          run_id: EXTERNAL_ID,
+          status: 'failed',
+          output: null,
+          usage: null,
+          error: {
+            code: 'PROVIDER_UNAVAILABLE',
+            message: 'model provider is unavailable',
+            retryable: false,
+            model_attempts: [
+              {
+                attempt_number: 1,
+                catalog_version_id: '184d7d3e-54bb-4a36-b841-649e8dbe7ea0',
+                route_key: 'GENERAL.PRIMARY',
+                provider: 'MANUS',
+                model: 'manus-1.6-lite',
+                outcome: 'UNKNOWN',
+                reason_code: 'PROVIDER_UNAVAILABLE',
+                retry_safe: false,
+                started_at: '2026-08-04T04:41:19.070Z',
+                finished_at: '2026-08-04T04:41:19.295Z',
+              },
+            ],
+            safety_decision: null,
+          },
+        }),
+      ),
+    );
+
+    await expect(
+      createClient().get(TENANT_ID, EXTERNAL_ID, new AbortController().signal),
+    ).resolves.toMatchObject({
+      runId: EXTERNAL_ID,
+      status: 'failed',
+      error: {
+        code: 'PROVIDER_UNAVAILABLE',
+        retryable: false,
+      },
+      modelAttempts: [
+        expect.objectContaining({
+          attemptNumber: 1,
+          outcome: 'UNKNOWN',
+          reasonCode: 'PROVIDER_UNAVAILABLE',
+        }),
+      ],
+    });
+  });
+
   it('preserves explicitly unreported token and cost usage without trusting zeroes', async () => {
     vi.stubGlobal(
       'fetch',

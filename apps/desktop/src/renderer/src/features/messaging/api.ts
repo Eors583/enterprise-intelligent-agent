@@ -5,15 +5,21 @@ import {
   agentRunStreamPageSchema,
   conversationListResponseSchema,
   conversationSchema,
+  conversationListQuerySchema,
   createConversationRequestSchema,
   createMessageRequestSchema,
   currentAnswerFeedbackResponseSchema,
   knowledgeCitationDetailSchema,
   messageListResponseSchema,
+  messageSearchResponseSchema,
   messageSchema,
+  updateConversationStateRequestSchema,
+  updateGroupMembersRequestSchema,
+  updateGroupRequestSchema,
   upsertAnswerFeedbackRequestSchema,
   type AnswerFeedback,
   type Conversation,
+  type ConversationListQuery,
   type AgentRunResponse,
   type AgentRunStreamPage,
   type CreateConversationRequest,
@@ -21,7 +27,11 @@ import {
   type CurrentAnswerFeedbackResponse,
   type KnowledgeCitationDetail,
   type Message,
+  type MessageSearchResponse,
   type MessageListResponse,
+  type UpdateConversationStateRequest,
+  type UpdateGroupMembersRequest,
+  type UpdateGroupRequest,
   type UpsertAnswerFeedbackRequest,
 } from '@enterprise/contracts';
 import { z } from 'zod';
@@ -32,12 +42,20 @@ const resourceIdSchema = z.string().uuid();
 export async function listConversations(
   signal?: AbortSignal,
   apiBaseUrl?: string,
+  query: Partial<ConversationListQuery> = {},
 ): Promise<Conversation[]> {
-  const response = await apiRequest('/api/v1/conversations', {
-    schema: conversationListResponseSchema,
-    ...(signal ? { signal } : {}),
-    ...(apiBaseUrl ? { apiBaseUrl } : {}),
-  });
+  const parsed = conversationListQuerySchema.parse(query);
+  const search = new URLSearchParams();
+  if (parsed.query !== undefined) search.set('query', parsed.query);
+  if (parsed.includeArchived) search.set('includeArchived', 'true');
+  const response = await apiRequest(
+    `/api/v1/conversations${search.size === 0 ? '' : `?${search.toString()}`}`,
+    {
+      schema: conversationListResponseSchema,
+      ...(signal ? { signal } : {}),
+      ...(apiBaseUrl ? { apiBaseUrl } : {}),
+    },
+  );
   return response.items;
 }
 
@@ -116,10 +134,14 @@ export async function listMessages(
   conversationId: string,
   signal?: AbortSignal,
   apiBaseUrl?: string,
+  page: { readonly before?: string; readonly limit?: number } = {},
 ): Promise<MessageListResponse> {
   const validatedId = resourceIdSchema.parse(conversationId);
+  const search = new URLSearchParams();
+  if (page.before !== undefined) search.set('before', resourceIdSchema.parse(page.before));
+  if (page.limit !== undefined) search.set('limit', String(page.limit));
   const response = await apiRequest(
-    `/api/v1/conversations/${encodeURIComponent(validatedId)}/messages`,
+    `/api/v1/conversations/${encodeURIComponent(validatedId)}/messages${search.size === 0 ? '' : `?${search.toString()}`}`,
     {
       schema: messageListResponseSchema,
       ...(signal ? { signal } : {}),
@@ -127,6 +149,71 @@ export async function listMessages(
     },
   );
   return response;
+}
+
+export async function searchConversationMessages(
+  conversationId: string,
+  query: string,
+  signal?: AbortSignal,
+): Promise<MessageSearchResponse> {
+  const validatedId = resourceIdSchema.parse(conversationId);
+  const search = new URLSearchParams({ query, limit: '30' });
+  return apiRequest(
+    `/api/v1/conversations/${encodeURIComponent(validatedId)}/messages/search?${search.toString()}`,
+    {
+      schema: messageSearchResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export async function markConversationRead(
+  conversationId: string,
+  lastMessageId?: string,
+): Promise<Conversation> {
+  const validatedId = resourceIdSchema.parse(conversationId);
+  return apiRequest(`/api/v1/conversations/${encodeURIComponent(validatedId)}/read`, {
+    method: 'POST',
+    body:
+      lastMessageId === undefined ? {} : { lastMessageId: resourceIdSchema.parse(lastMessageId) },
+    schema: conversationSchema,
+  });
+}
+
+export async function updateConversationState(
+  conversationId: string,
+  input: UpdateConversationStateRequest,
+): Promise<Conversation> {
+  const validatedId = resourceIdSchema.parse(conversationId);
+  return apiRequest(`/api/v1/conversations/${encodeURIComponent(validatedId)}/state`, {
+    method: 'PATCH',
+    body: updateConversationStateRequestSchema.parse(input),
+    schema: conversationSchema,
+  });
+}
+
+export async function renameGroupConversation(
+  conversationId: string,
+  input: UpdateGroupRequest,
+): Promise<Conversation> {
+  const validatedId = resourceIdSchema.parse(conversationId);
+  return apiRequest(`/api/v1/conversations/${encodeURIComponent(validatedId)}/group`, {
+    method: 'PATCH',
+    body: updateGroupRequestSchema.parse(input),
+    schema: conversationSchema,
+  });
+}
+
+export async function changeGroupMembers(
+  conversationId: string,
+  input: UpdateGroupMembersRequest,
+): Promise<Conversation> {
+  const validatedId = resourceIdSchema.parse(conversationId);
+  return apiRequest(`/api/v1/conversations/${encodeURIComponent(validatedId)}/group/members`, {
+    method: 'PATCH',
+    body: updateGroupMembersRequestSchema.parse(input),
+    schema: conversationSchema,
+  });
 }
 
 export async function getKnowledgeCitationOriginal(

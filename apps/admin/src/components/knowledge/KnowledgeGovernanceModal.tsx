@@ -1,30 +1,31 @@
 import type {
+  AdminOrganizationResponse,
   KnowledgeDocumentSummary,
   KnowledgeDocumentVersionSummary,
   KnowledgeDocumentGovernancePolicy,
+  RoleBlueprint,
+  Task,
 } from '@enterprise/contracts';
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
+  getOrganization,
+  listRoleBlueprints,
   reviewKnowledgeDocumentGovernance,
   updateKnowledgeDocumentVersionGovernance,
 } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
-import { FieldError, Modal, Spinner, StatusPill } from '@/components/ui';
+import {
+  EntityMultiPicker,
+  EntitySelect,
+  TagInput,
+  type EntityOption,
+} from '@/components/EntityPicker';
+import { FieldError, Modal, Notice, Spinner, StatusPill } from '@/components/ui';
+import { listTasks } from '@/features/business-semantics/api';
 
-function listText(values: readonly string[]): string {
-  return values.join('\n');
-}
-
-function parseList(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[\s,，;；]+/u)
-        .map((item) => item.trim())
-        .filter(Boolean),
-    ),
-  ].sort();
+function sortedUnique(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
 }
 
 function localDateTime(value: string | null): string {
@@ -60,15 +61,14 @@ export function KnowledgeGovernanceModal({
   const [scopeMode, setScopeMode] = useState<KnowledgeDocumentGovernancePolicy['scopeMode']>(
     initial.scopeMode,
   );
-  const [organizationScopeIds, setOrganizationScopeIds] = useState(
-    listText(initial.organizationScopeIds),
-  );
-  const [projectScopeIds, setProjectScopeIds] = useState(listText(initial.projectScopeIds));
-  const [taskScopeIds, setTaskScopeIds] = useState(listText(initial.taskScopeIds));
-  const [roleTemplateScopeIds, setRoleTemplateScopeIds] = useState(
-    listText(initial.roleTemplateScopeIds),
-  );
-  const [dataLabels, setDataLabels] = useState(listText(initial.dataLabels));
+  const [organizationScopeIds, setOrganizationScopeIds] = useState<string[]>([
+    ...initial.organizationScopeIds,
+  ]);
+  const [taskScopeIds, setTaskScopeIds] = useState<string[]>([...initial.taskScopeIds]);
+  const [roleTemplateScopeIds, setRoleTemplateScopeIds] = useState<string[]>([
+    ...initial.roleTemplateScopeIds,
+  ]);
+  const [dataLabels, setDataLabels] = useState<string[]>([...initial.dataLabels]);
   const [effectiveFrom, setEffectiveFrom] = useState(localDateTime(initial.effectiveFrom));
   const [expiresAt, setExpiresAt] = useState(localDateTime(initial.expiresAt));
   const [retentionUntil, setRetentionUntil] = useState(localDateTime(initial.retentionUntil));
@@ -79,18 +79,84 @@ export function KnowledgeGovernanceModal({
   const [reviewNote, setReviewNote] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [referenceError, setReferenceError] = useState<string | null>(null);
+  const [references, setReferences] = useState<{
+    organization: AdminOrganizationResponse | null;
+    tasks: readonly Task[];
+    roleBlueprints: readonly RoleBlueprint[];
+  }>({ organization: null, tasks: [], roleBlueprints: [] });
   const published = version.publishedAt !== null;
   const restricted = scopeMode === 'RESTRICTED';
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setReferenceError(null);
+    void Promise.all([
+      getOrganization(controller.signal),
+      listTasks(controller.signal),
+      listRoleBlueprints(controller.signal),
+    ])
+      .then(([organization, tasks, roleBlueprintResponse]) => {
+        setReferences({
+          organization,
+          tasks,
+          roleBlueprints: roleBlueprintResponse.items,
+        });
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) setReferenceError(messageFromError(caught));
+      });
+    return () => controller.abort();
+  }, []);
+
+  const referenceOptions = useMemo(
+    () => ({
+      owners:
+        references.organization?.members.map<EntityOption>((member) => ({
+          id: member.id,
+          label: member.displayName,
+          description: `${member.email} · ${member.status}`,
+          disabled: member.status !== 'ACTIVE',
+        })) ?? [],
+      organizationUnits:
+        references.organization?.orgUnits.map<EntityOption>((unit) => ({
+          id: unit.id,
+          label: unit.name,
+          description: unit.status === 'ACTIVE' ? '启用部门' : '已归档',
+          disabled: unit.status !== 'ACTIVE',
+        })) ?? [],
+      tasks: references.tasks.map<EntityOption>((task) => ({
+        id: task.id,
+        label: task.title,
+        description: `${task.code} · ${task.status}`,
+      })),
+      roleBlueprints: references.roleBlueprints.map<EntityOption>((blueprint) => ({
+        id: blueprint.id,
+        label: blueprint.name,
+        description: `${blueprint.key} · r${blueprint.revision}`,
+      })),
+      versions: document.versions
+        .filter((candidate) => candidate.id !== version.id)
+        .sort((left, right) => right.versionNumber - left.versionNumber)
+        .map<EntityOption>((candidate) => ({
+          id: candidate.id,
+          label: `v${candidate.versionNumber} · ${candidate.status}`,
+          description: candidate.publishedAt ? '已发布版本' : '未发布版本',
+        })),
+    }),
+    [document.versions, references, version.id],
+  );
+
   const policy = useMemo<KnowledgeDocumentGovernancePolicy>(
     () => ({
       ownerUserId: ownerUserId.trim(),
       classification,
       scopeMode,
-      organizationScopeIds: restricted ? parseList(organizationScopeIds) : [],
-      projectScopeIds: restricted ? parseList(projectScopeIds) : [],
-      taskScopeIds: restricted ? parseList(taskScopeIds) : [],
-      roleTemplateScopeIds: restricted ? parseList(roleTemplateScopeIds) : [],
-      dataLabels: restricted ? parseList(dataLabels) : [],
+      organizationScopeIds: restricted ? sortedUnique(organizationScopeIds) : [],
+      projectScopeIds: restricted ? [...initial.projectScopeIds] : [],
+      taskScopeIds: restricted ? sortedUnique(taskScopeIds) : [],
+      roleTemplateScopeIds: restricted ? sortedUnique(roleTemplateScopeIds) : [],
+      dataLabels: restricted ? sortedUnique(dataLabels) : [],
       effectiveFrom: isoDateTime(effectiveFrom),
       expiresAt: expiresAt === '' ? null : isoDateTime(expiresAt),
       retentionUntil: retentionUntil === '' ? null : isoDateTime(retentionUntil),
@@ -104,7 +170,6 @@ export function KnowledgeGovernanceModal({
       expiresAt,
       organizationScopeIds,
       ownerUserId,
-      projectScopeIds,
       restricted,
       retentionAction,
       retentionUntil,
@@ -168,10 +233,12 @@ export function KnowledgeGovernanceModal({
       <form className="form-stack" onSubmit={(event) => void save(event)}>
         <div className="form-grid three">
           <label>
-            <span>数据所有者用户 ID</span>
-            <input
+            <span>数据所有者</span>
+            <EntitySelect
               value={ownerUserId}
-              onChange={(event) => setOwnerUserId(event.target.value)}
+              options={referenceOptions.owners}
+              onChange={setOwnerUserId}
+              placeholder="选择企业成员"
               disabled={published}
               required
             />
@@ -207,54 +274,56 @@ export function KnowledgeGovernanceModal({
             </select>
           </label>
         </div>
+        {referenceError ? (
+          <FieldError message={`关联数据暂时无法读取，已保留当前策略值：${referenceError}`} />
+        ) : null}
         {restricted ? (
           <div className="form-grid two">
             <label>
-              <span>组织 / 部门 ID（每行一个）</span>
-              <textarea
+              <span>可访问组织 / 部门</span>
+              <EntityMultiPicker
                 value={organizationScopeIds}
-                onChange={(event) => setOrganizationScopeIds(event.target.value)}
+                options={referenceOptions.organizationUnits}
+                onChange={setOrganizationScopeIds}
+                ariaLabel="可访问部门"
                 disabled={published}
-                rows={4}
               />
             </label>
             <label>
-              <span>项目 ID（每行一个）</span>
-              <textarea
-                value={projectScopeIds}
-                onChange={(event) => setProjectScopeIds(event.target.value)}
-                disabled={published}
-                rows={4}
-              />
-            </label>
-            <label>
-              <span>任务 ID（每行一个）</span>
-              <textarea
+              <span>可访问任务</span>
+              <EntityMultiPicker
                 value={taskScopeIds}
-                onChange={(event) => setTaskScopeIds(event.target.value)}
+                options={referenceOptions.tasks}
+                onChange={setTaskScopeIds}
+                ariaLabel="可访问任务"
                 disabled={published}
-                rows={4}
               />
             </label>
             <label>
-              <span>角色模板 ID（每行一个）</span>
-              <textarea
+              <span>可访问角色模板</span>
+              <EntityMultiPicker
                 value={roleTemplateScopeIds}
-                onChange={(event) => setRoleTemplateScopeIds(event.target.value)}
+                options={referenceOptions.roleBlueprints}
+                onChange={setRoleTemplateScopeIds}
+                ariaLabel="可访问角色模板"
                 disabled={published}
-                rows={4}
               />
             </label>
             <label>
-              <span>数据标签（每行一个）</span>
-              <textarea
+              <span>数据标签</span>
+              <TagInput
                 value={dataLabels}
-                onChange={(event) => setDataLabels(event.target.value)}
-                disabled={published}
-                rows={4}
+                onChange={setDataLabels}
+                ariaLabel="数据标签"
                 placeholder="例如 CLASSIFICATION:SENSITIVE"
+                disabled={published}
               />
             </label>
+            {initial.projectScopeIds.length > 0 ? (
+              <Notice tone="info">
+                已保留历史项目范围。项目目录接入前不允许手填项目标识，避免误授权。
+              </Notice>
+            ) : null}
           </div>
         ) : null}
         <div className="form-grid three">
@@ -303,10 +372,12 @@ export function KnowledgeGovernanceModal({
             </select>
           </label>
           <label>
-            <span>替代版本 ID（可选）</span>
-            <input
+            <span>替代版本（可选）</span>
+            <EntitySelect
               value={supersedesVersionId}
-              onChange={(event) => setSupersedesVersionId(event.target.value)}
+              options={referenceOptions.versions}
+              onChange={setSupersedesVersionId}
+              placeholder="未替代其他版本"
               disabled={published}
             />
           </label>

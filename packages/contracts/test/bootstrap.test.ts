@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { bootstrapResponseSchema } from '../src/index.js';
+import {
+  bootstrapResponseSchema,
+  employeePrimaryNavigationIdSchema,
+  employeePrimaryNavigationIds,
+  legacyEmployeeNavigationAliases,
+} from '../src/index.js';
 
 const validPayload = {
   tenant: { id: 'tenant-demo', name: '示例企业' },
@@ -29,6 +34,7 @@ const validPayload = {
       capabilities: { canContactHuman: true, canContactAgent: true },
     },
   ],
+  departmentAgents: [],
 } as const;
 
 describe('bootstrapResponseSchema', () => {
@@ -50,5 +56,18 @@ describe('bootstrapResponseSchema', () => {
     delete (members[0]?.agent as Record<string, unknown>).operationalAvailability;
 
     expect(bootstrapResponseSchema.safeParse(invalid).success).toBe(false);
+  });
+
+  it('exports the four canonical employee destinations and explicit legacy aliases', () => {
+    expect(employeePrimaryNavigationIds).toEqual(['workbench', 'messages', 'contacts', 'profile']);
+    expect(employeePrimaryNavigationIdSchema.safeParse('agents').success).toBe(false);
+    expect(legacyEmployeeNavigationAliases).toEqual({
+      home: 'workbench',
+      agents: 'messages',
+      roles: 'profile',
+      growth: 'profile',
+      memories: 'profile',
+      'experience-usage': 'profile',
+    });
   });
 });

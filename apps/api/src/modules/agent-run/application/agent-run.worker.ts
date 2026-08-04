@@ -713,8 +713,14 @@ const KNOWLEDGE_GROUNDING_NO_ANSWER =
 const MAX_VISIBLE_CITATIONS = 12;
 const RAW_SOURCE_PATTERN = /\[\s*SOURCE\s*:\s*([^\]\s]+)\s*\]/iu;
 const RAW_SOURCE_PATTERN_GLOBAL = /\[\s*SOURCE\s*:\s*([^\]\s]+)\s*\]/giu;
-const TRUSTED_SOURCE_SUFFIX_PATTERN = /(?:\s*\[\s*SOURCE\s*:\s*[^\]\s]+\s*\])+\s*$/iu;
-const TRUSTED_SOURCE_GROUP_PATTERN_GLOBAL = /(?:\s*\[\s*SOURCE\s*:\s*[^\]\s]+\s*\])+/giu;
+// Models commonly place sentence punctuation immediately after the citation
+// marker ("... [SOURCE:id]。") even though the marker is still the semantic
+// suffix of that claim. Include that punctuation in the marker group so it is
+// normalized away instead of rejecting a correctly grounded answer.
+const TRUSTED_SOURCE_SUFFIX_PATTERN =
+  /(?:\s*\[\s*SOURCE\s*:\s*[^\]\s]+\s*\])+(?:[。！？；，：.!?;,:]\s*)?$/iu;
+const TRUSTED_SOURCE_GROUP_PATTERN_GLOBAL =
+  /(?:\s*\[\s*SOURCE\s*:\s*[^\]\s]+\s*\])+(?:[。！？；，：.!?;,:](?=\s|$))?/giu;
 const MODEL_CITATION_NUMBER_PATTERN = /\[\s*来源\s*\d+\s*\]/gu;
 const ENTERPRISE_KNOWLEDGE_AUTHORITY_PATTERN =
   /(?:依据|根据|来自|引用).{0,8}(?:(?:企业|公司|内部).{0,8})?(?:知识库|资料|来源)|(?:企业|公司|内部).{0,8}(?:知识库|资料|来源).{0,8}(?:显示|规定|指出|表明)|according\s+to\s+(?:the\s+)?(?:enterprise|company|corporate|internal)\s+(?:knowledge|source|documentation)/iu;

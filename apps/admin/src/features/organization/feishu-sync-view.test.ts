@@ -4,6 +4,7 @@ import {
   buildFeishuApplyIdempotencyKey,
   feishuSyncStatusLabel,
   isFeishuRetryableTerminalRun,
+  nextSiblingSortOrder,
   summarizeFeishuFieldChanges,
 } from './OrganizationPage';
 
@@ -65,5 +66,16 @@ describe('Feishu synchronization view policy', () => {
     expect(feishuSyncStatusLabel('NOT_CONFIGURED')).toBe('未配置');
     expect(feishuSyncStatusLabel('READY')).toBe('已配置（尚未同步）');
     expect(feishuSyncStatusLabel('SUCCEEDED')).toBe('最近一次同步成功');
+  });
+
+  it('places a new department at the end of the selected sibling group', () => {
+    const units = [
+      { id: 'one', parentId: null, sortOrder: 2 },
+      { id: 'two', parentId: null, sortOrder: 8 },
+      { id: 'child', parentId: 'one', sortOrder: 20 },
+    ];
+    expect(nextSiblingSortOrder(units, null)).toBe(9);
+    expect(nextSiblingSortOrder(units, 'one')).toBe(21);
+    expect(nextSiblingSortOrder(units, 'missing')).toBe(0);
   });
 });

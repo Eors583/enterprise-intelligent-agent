@@ -30,6 +30,7 @@ const validPayload = {
       },
     },
   ],
+  departmentAgents: [],
 };
 
 afterEach(() => {

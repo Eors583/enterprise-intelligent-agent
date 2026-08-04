@@ -8,6 +8,19 @@ vi.mock('@/api/admin-api', () => ({ logout: vi.fn() }));
 vi.mock('@/features/auth/ChangePasswordModal', () => ({
   ChangePasswordModal: () => null,
 }));
+vi.mock('@/features/admin-overview/AdminOverviewPage', () => ({
+  AdminOverviewPage: () => null,
+}));
+vi.mock('@/features/ai-model-routing/AiModelRoutingPage', () => ({
+  AiModelRoutingPage: () => null,
+}));
+vi.mock('@/features/identity-governance/IdentitySecurityPage', async () => {
+  const { createElement: createMockElement } = await import('react');
+  return {
+    IdentitySecurityPage: () =>
+      createMockElement('section', { 'data-testid': 'identity-security-page' }, '账号与安全'),
+  };
+});
 vi.mock('@/features/agents/AgentsPage', () => ({ AgentsPage: () => null }));
 vi.mock('@/features/knowledge/KnowledgePage', () => ({ KnowledgePage: () => null }));
 vi.mock('@/features/members/MembersPage', () => ({ MembersPage: () => null }));
@@ -29,13 +42,6 @@ vi.mock('@/features/business-semantics/BusinessSemanticsPage', async () => {
         { 'data-testid': 'business-semantics-page', 'data-current-user': currentUserId },
         '经营主链工作区',
       ),
-  };
-});
-vi.mock('@/features/runtime-governance/RuntimeGovernancePage', async () => {
-  const { createElement: createMockElement } = await import('react');
-  return {
-    RuntimeGovernancePage: () =>
-      createMockElement('section', { 'data-testid': 'runtime-governance-page' }, '运行治理工作区'),
   };
 });
 vi.mock('@/features/ai-evaluation/AiEvaluationPage', async () => {
@@ -64,13 +70,14 @@ const SESSION: BrowserAuthSessionResponse = {
   },
 };
 
-describe('admin business-semantics navigation', () => {
-  it('exposes the management entry and switches to the real page slot accessibly', async () => {
+describe('admin consolidated navigation', () => {
+  it('shows exactly five primary entries and opens business work from the consolidated entry', async () => {
     const dom = await renderInTestDom(createElement(AdminShell, { session: SESSION }));
     try {
-      const navigation = dom.container.querySelector('nav');
+      const navigation = dom.container.querySelector('[aria-label="管理后台主导航"]');
+      expect(navigation?.querySelectorAll('button')).toHaveLength(5);
       const entry = [...(navigation?.querySelectorAll('button') ?? [])].find((button) =>
-        button.textContent?.includes('经营主链'),
+        button.textContent?.includes('业务管理'),
       );
 
       expect(entry).not.toBeUndefined();
@@ -81,44 +88,70 @@ describe('admin business-semantics navigation', () => {
       const page = dom.container.querySelector('[data-testid="business-semantics-page"]');
       expect(page?.textContent).toContain('经营主链工作区');
       expect(page?.getAttribute('data-current-user')).toBe(SESSION.account.userId);
+      expect(navigation?.textContent).not.toContain('营销管理');
+      expect(dom.container.textContent).not.toContain('已安全登录');
     } finally {
       await dom.cleanup();
     }
   });
 
-  it('exposes the process, event, and DLQ governance entry', async () => {
+  it('removes non-business governance entries from this release', async () => {
     const dom = await renderInTestDom(createElement(AdminShell, { session: SESSION }));
     try {
-      const entry = [...dom.container.querySelectorAll('nav button')].find((button) =>
-        button.textContent?.includes('运行治理'),
-      );
-      expect(entry).not.toBeUndefined();
-      expect(entry?.textContent).toContain('流程、事件与 DLQ');
-
-      if (entry) await dom.click(entry);
-
-      expect(entry?.getAttribute('aria-current')).toBe('page');
-      expect(
-        dom.container.querySelector('[data-testid="runtime-governance-page"]')?.textContent,
-      ).toBe('运行治理工作区');
+      const text = dom.container.textContent ?? '';
+      expect(text).not.toContain('高级设置');
+      expect(text).not.toContain('工具与连接器');
+      expect(text).not.toContain('审计');
+      expect(text).not.toContain('运行治理');
+      expect(text).not.toContain('成本与配额');
     } finally {
       await dom.cleanup();
     }
   });
 
-  it('exposes the governed AI evaluation entry and page slot', async () => {
+  it('moves governed AI evaluation under the agent center', async () => {
     const dom = await renderInTestDom(createElement(AdminShell, { session: SESSION }));
     try {
-      const entry = [...dom.container.querySelectorAll('nav button')].find((button) =>
-        button.textContent?.includes('AI 评测'),
+      const primaryEntry = [
+        ...dom.container.querySelectorAll('[aria-label="管理后台主导航"] button'),
+      ].find((button) => button.textContent?.includes('智能体中心'));
+      expect(primaryEntry).not.toBeUndefined();
+      if (primaryEntry) await dom.click(primaryEntry);
+
+      const entry = [...dom.container.querySelectorAll('.admin-secondary-nav button')].find(
+        (button) => button.textContent?.includes('测试与发布'),
+      );
+      const modelEntry = [...dom.container.querySelectorAll('.admin-secondary-nav button')].find(
+        (button) => button.textContent?.includes('模型服务'),
       );
       expect(entry).not.toBeUndefined();
-      expect(entry?.textContent).toContain('数据集、Run 与发布门禁');
+      expect(modelEntry).not.toBeUndefined();
+      expect(modelEntry?.textContent).toContain('智能体使用的模型与路由');
+      expect(entry?.textContent).toContain('评测集、Run 与发布门禁');
       if (entry) await dom.click(entry);
       expect(entry?.getAttribute('aria-current')).toBe('page');
       expect(dom.container.querySelector('[data-testid="ai-evaluation-page"]')?.textContent).toBe(
         'AI 评测工作区',
       );
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('keeps account security in the avatar menu instead of primary navigation', async () => {
+    const dom = await renderInTestDom(createElement(AdminShell, { session: SESSION }));
+    try {
+      const primaryNavigation = dom.container.querySelector('[aria-label="管理后台主导航"]');
+      expect(primaryNavigation?.textContent).not.toContain('身份安全');
+
+      const accountEntry = [
+        ...dom.container.querySelectorAll('.sidebar-account-popover button'),
+      ].find((button) => button.textContent?.includes('账号与安全'));
+      expect(accountEntry).not.toBeUndefined();
+      if (accountEntry) await dom.click(accountEntry);
+
+      expect(window.location.hash.replace(/^#/, '')).toBe('identity-security');
+      expect(dom.container.querySelector('.admin-secondary-nav')).toBeNull();
     } finally {
       await dom.cleanup();
     }

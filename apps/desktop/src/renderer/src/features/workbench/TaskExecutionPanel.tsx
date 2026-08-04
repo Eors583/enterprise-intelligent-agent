@@ -9,13 +9,13 @@ import { useEffect, useMemo, useState, type FormEvent } from 'react';
 
 import { ApiClientError } from '../../shared/api/client';
 import {
-  useContributeEmployeeEvidence,
+  useContributeEmployeeEvidenceCommand,
   useEmployeeTaskExecution,
   useRequestEmployeeAcceptance,
-  useSubmitEmployeeDeliverable,
+  useSubmitEmployeeDeliverableCommand,
   useTransitionEmployeeTask,
 } from './hooks';
-import { formatWorkbenchDate, shortBusinessId, taskStatusLabel } from './workbench-view';
+import { formatWorkbenchDate, taskStatusLabel } from './workbench-view';
 
 type CapabilityAction = EmployeeTaskCapability['action'];
 type TaskAction = EmployeeTaskTransitionRequest['action'];
@@ -101,9 +101,9 @@ export function TaskExecutionPanel({ taskId }: { taskId: string }): React.JSX.El
 
       <header className="task-execution-header">
         <div>
-          <p className="eyebrow">Authorized task execution</p>
+          <p className="eyebrow">Task execution</p>
           <h2>任务执行与验收</h2>
-          <p>所有写入均绑定当前有效角色、任务范围和 revision，由服务端确认后才显示成功。</p>
+          <p>系统自动校验当前角色与任务权限，服务端确认后才显示成功。</p>
         </div>
         <button
           type="button"
@@ -172,9 +172,7 @@ function CapabilitySummary({
             <span>{assignments.length > 0 ? '已授权' : '未授权'}</span>
             <strong>{CAPABILITY_LABEL[action]}</strong>
             <small>
-              {assignments.length > 0
-                ? `${assignments.length} 个有效角色 · ${shortBusinessId(assignments[0]!)}`
-                : '服务端未返回可用角色'}
+              {assignments.length > 0 ? `${assignments.length} 个有效角色` : '暂无可用角色'}
             </small>
           </article>
         );
@@ -205,9 +203,7 @@ function TaskTransitionSection({
         effectiveAt: new Date().toISOString(),
       });
       setReason('');
-      onConfirmed(
-        `服务端已确认任务状态为“${taskStatusLabel(updated.status)}”（r${updated.revision}）。`,
-      );
+      onConfirmed(`服务端已确认任务状态为“${taskStatusLabel(updated.status)}”。`);
     } catch (error) {
       onError(error);
     }
@@ -217,18 +213,13 @@ function TaskTransitionSection({
     <section className="task-execution-section">
       <header>
         <div>
-          <p className="eyebrow">Revision-bound transition</p>
+          <p className="eyebrow">Task status</p>
           <h3>任务状态</h3>
         </div>
-        <span>
-          {taskStatusLabel(snapshot.task.status)} · r{snapshot.task.revision}
-        </span>
+        <span>{taskStatusLabel(snapshot.task.status)}</span>
       </header>
       {processControlled ? (
-        <p className="task-execution-warning">
-          此任务由流程实例 {shortBusinessId(snapshot.task.processRef.instanceId!)}{' '}
-          控制，请在对应流程步骤中推进。
-        </p>
+        <p className="task-execution-warning">此任务由业务流程控制，请在对应流程步骤中推进。</p>
       ) : null}
       <label>
         <span>执行说明</span>
@@ -273,57 +264,31 @@ function EvidenceContributionSection({
   onConfirmed,
   onError,
 }: ExecutionSectionProps): React.JSX.Element {
-  const mutation = useContributeEmployeeEvidence(snapshot.task.id);
+  const mutation = useContributeEmployeeEvidenceCommand(snapshot.task.id);
   const roleAssignmentId = capabilityRole(snapshot, 'business.evidence.contribute');
   const [form, setForm] = useState({
-    code: '',
     sourceType: 'DOCUMENT' as 'DOCUMENT' | 'HUMAN_ATTESTATION',
-    sourceSystem: '',
-    sourceRecordId: '',
-    sourceVersion: '',
     sourceUri: '',
-    contentHash: '',
-    summary: '',
+    businessDescription: '',
   });
-  const valid =
-    form.code.trim().length > 0 &&
-    form.sourceSystem.trim().length > 0 &&
-    form.sourceRecordId.trim().length > 0 &&
-    form.sourceVersion.trim().length > 0 &&
-    /^[a-f0-9]{64}$/.test(form.contentHash.trim().toLowerCase()) &&
-    form.summary.trim().length > 0;
+  const valid = form.businessDescription.trim().length > 0;
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     if (!valid || roleAssignmentId === null || mutation.isPending) return;
-    const observedAt = new Date().toISOString();
     try {
       const created = await mutation.mutateAsync({
         roleAssignmentId,
-        code: form.code.trim(),
         sourceType: form.sourceType,
-        sourceSystem: form.sourceSystem.trim(),
-        sourceRecordId: form.sourceRecordId.trim(),
-        sourceVersion: form.sourceVersion.trim(),
         sourceUri: form.sourceUri.trim() || null,
-        observedAt,
-        contentHash: form.contentHash.trim().toLowerCase(),
-        summary: form.summary.trim(),
-        effectiveFrom: observedAt,
-        effectiveTo: null,
-        permissionLabels: snapshot.task.permissionLabels,
+        businessDescription: form.businessDescription.trim(),
       });
       setForm({
-        code: '',
         sourceType: 'DOCUMENT',
-        sourceSystem: '',
-        sourceRecordId: '',
-        sourceVersion: '',
         sourceUri: '',
-        contentHash: '',
-        summary: '',
+        businessDescription: '',
       });
-      onConfirmed(`证据 ${created.code} 已真实入库为草稿；管理员核验为 ACTIVE 后才能用于交付。`);
+      onConfirmed(`证据“${created.summary}”已入库待核验；通过核验后才能用于交付。`);
     } catch (error) {
       onError(error);
     }
@@ -333,21 +298,12 @@ function EvidenceContributionSection({
     <section className="task-execution-section">
       <header>
         <div>
-          <p className="eyebrow">Provenance-first evidence</p>
+          <p className="eyebrow">Evidence contribution</p>
           <h3>贡献证据</h3>
         </div>
         <span>员工提交后：DRAFT / UNVERIFIED</span>
       </header>
       <form className="task-evidence-form" onSubmit={(event) => void submit(event)}>
-        <label>
-          <span>证据编码</span>
-          <input
-            value={form.code}
-            disabled={mutation.isPending || roleAssignmentId === null}
-            placeholder="EVIDENCE.CUSTOMER.REVIEW"
-            onChange={(event) => setForm((current) => ({ ...current, code: event.target.value }))}
-          />
-        </label>
         <label>
           <span>来源类型</span>
           <select
@@ -365,37 +321,6 @@ function EvidenceContributionSection({
           </select>
         </label>
         <label>
-          <span>来源系统</span>
-          <input
-            value={form.sourceSystem}
-            disabled={mutation.isPending || roleAssignmentId === null}
-            placeholder="SYSTEM.DOCUMENT"
-            onChange={(event) =>
-              setForm((current) => ({ ...current, sourceSystem: event.target.value }))
-            }
-          />
-        </label>
-        <label>
-          <span>来源记录 ID</span>
-          <input
-            value={form.sourceRecordId}
-            disabled={mutation.isPending || roleAssignmentId === null}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, sourceRecordId: event.target.value }))
-            }
-          />
-        </label>
-        <label>
-          <span>来源版本</span>
-          <input
-            value={form.sourceVersion}
-            disabled={mutation.isPending || roleAssignmentId === null}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, sourceVersion: event.target.value }))
-            }
-          />
-        </label>
-        <label>
           <span>来源链接（可选）</span>
           <input
             type="url"
@@ -407,24 +332,13 @@ function EvidenceContributionSection({
           />
         </label>
         <label className="wide">
-          <span>内容 SHA-256</span>
-          <input
-            value={form.contentHash}
-            disabled={mutation.isPending || roleAssignmentId === null}
-            placeholder="64 位小写十六进制摘要"
-            onChange={(event) =>
-              setForm((current) => ({ ...current, contentHash: event.target.value }))
-            }
-          />
-        </label>
-        <label className="wide">
-          <span>证据摘要</span>
+          <span>证据说明</span>
           <textarea
             rows={3}
-            value={form.summary}
+            value={form.businessDescription}
             disabled={mutation.isPending || roleAssignmentId === null}
             onChange={(event) =>
-              setForm((current) => ({ ...current, summary: event.target.value }))
+              setForm((current) => ({ ...current, businessDescription: event.target.value }))
             }
           />
         </label>
@@ -455,7 +369,7 @@ function DeliverableSection({
     <section className="task-execution-section">
       <header>
         <div>
-          <p className="eyebrow">Evidence-sealed output</p>
+          <p className="eyebrow">Delivery and acceptance</p>
           <h3>交付物与验收</h3>
         </div>
         <span>{snapshot.deliverables.length} 项交付物</span>
@@ -498,11 +412,14 @@ function DeliverableCard({
   onConfirmed: (message: string) => void;
   onError: (error: unknown) => void;
 }): React.JSX.Element {
-  const submitMutation = useSubmitEmployeeDeliverable(snapshot.task.id);
+  const submitMutation = useSubmitEmployeeDeliverableCommand(snapshot.task.id);
   const acceptanceMutation = useRequestEmployeeAcceptance(snapshot.task.id);
-  const activeEvidence = snapshot.evidence.filter((item) => item.status === 'ACTIVE');
-  const [artifactUri, setArtifactUri] = useState(deliverable.artifactUri ?? '');
-  const [contentHash, setContentHash] = useState(deliverable.contentHash ?? '');
+  const activeEvidence = snapshot.evidence.filter(
+    (item) => item.status === 'ACTIVE' && item.trustLevel === 'VERIFIED',
+  );
+  const [sourceType, setSourceType] = useState<'DOCUMENT' | 'HUMAN_ATTESTATION'>('DOCUMENT');
+  const [sourceUri, setSourceUri] = useState(deliverable.artifactUri ?? '');
+  const [businessDescription, setBusinessDescription] = useState('');
   const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<string[]>([]);
   const [acceptanceReason, setAcceptanceReason] = useState('');
   const [dueAt, setDueAt] = useState('');
@@ -514,27 +431,21 @@ function DeliverableCard({
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
-    if (
-      roleForSubmit === null ||
-      selectedEvidenceIds.length === 0 ||
-      !artifactUri.trim() ||
-      !/^[a-f0-9]{64}$/.test(contentHash.trim().toLowerCase())
-    ) {
+    if (roleForSubmit === null || selectedEvidenceIds.length === 0 || !businessDescription.trim()) {
       return;
     }
     try {
       const updated = await submitMutation.mutateAsync({
         deliverableId: deliverable.id,
         input: {
-          expectedRevision: deliverable.revision,
           roleAssignmentId: roleForSubmit,
-          submittedAt: new Date().toISOString(),
-          artifactUri: artifactUri.trim(),
-          contentHash: contentHash.trim().toLowerCase(),
+          businessDescription: businessDescription.trim(),
+          sourceType,
+          sourceUri: sourceUri.trim() || null,
           evidenceIds: selectedEvidenceIds,
         },
       });
-      onConfirmed(`交付物 ${updated.code} 已由服务端封存证据并确认提交。`);
+      onConfirmed(`交付物“${updated.title}”已由服务端封存证据并确认提交。`);
     } catch (error) {
       onError(error);
     }
@@ -573,30 +484,39 @@ function DeliverableCard({
       <header>
         <div>
           <strong>{deliverable.title}</strong>
-          <code>{deliverable.code}</code>
         </div>
-        <span>
-          {deliverable.status} · r{deliverable.revision}
-        </span>
+        <span>{deliverable.status}</span>
       </header>
       <p>{deliverable.description}</p>
       {deliverable.status === 'DRAFT' ? (
         <form className="task-deliverable-form" onSubmit={(event) => void submit(event)}>
           <label>
-            <span>交付物地址</span>
-            <input
-              type="url"
-              value={artifactUri}
+            <span>来源类型</span>
+            <select
+              value={sourceType}
               disabled={submitMutation.isPending || roleForSubmit === null}
-              onChange={(event) => setArtifactUri(event.target.value)}
-            />
+              onChange={(event) => setSourceType(event.target.value as typeof sourceType)}
+            >
+              <option value="DOCUMENT">文档</option>
+              <option value="HUMAN_ATTESTATION">人工证明</option>
+            </select>
           </label>
           <label>
-            <span>内容 SHA-256</span>
+            <span>交付物链接（可选）</span>
             <input
-              value={contentHash}
+              type="url"
+              value={sourceUri}
               disabled={submitMutation.isPending || roleForSubmit === null}
-              onChange={(event) => setContentHash(event.target.value)}
+              onChange={(event) => setSourceUri(event.target.value)}
+            />
+          </label>
+          <label className="wide">
+            <span>交付说明</span>
+            <textarea
+              rows={3}
+              value={businessDescription}
+              disabled={submitMutation.isPending || roleForSubmit === null}
+              onChange={(event) => setBusinessDescription(event.target.value)}
             />
           </label>
           <fieldset disabled={submitMutation.isPending || roleForSubmit === null}>
@@ -616,7 +536,7 @@ function DeliverableCard({
                     }
                   />
                   <span>
-                    {item.code} · {item.trustLevel}
+                    {item.summary} · {item.sourceType}
                   </span>
                 </label>
               ))
@@ -632,8 +552,7 @@ function DeliverableCard({
                 submitMutation.isPending ||
                 roleForSubmit === null ||
                 selectedEvidenceIds.length === 0 ||
-                !artifactUri.trim() ||
-                !/^[a-f0-9]{64}$/.test(contentHash.trim().toLowerCase())
+                !businessDescription.trim()
               }
             >
               {submitMutation.isPending ? '正在封存证据…' : '提交交付物'}
@@ -714,10 +633,9 @@ function EvidenceList({ evidence }: { evidence: readonly Evidence[] }): React.JS
           <article key={item.id}>
             <span className={item.status.toLowerCase()}>{item.status}</span>
             <div>
-              <strong>{item.code}</strong>
+              <strong>{item.sourceType === 'DOCUMENT' ? '文档证据' : '人工证明'}</strong>
               <small>{item.summary}</small>
             </div>
-            <code>{shortBusinessId(item.id)}</code>
           </article>
         ))
       ) : (
@@ -736,7 +654,7 @@ function AuthorizationHint({
     <small className={roleAssignmentId === null ? 'authorization-denied' : ''}>
       {roleAssignmentId === null
         ? '没有匹配此动作和任务范围的有效角色授权'
-        : `以授权角色 ${shortBusinessId(roleAssignmentId)} 执行`}
+        : '已通过当前角色授权校验'}
     </small>
   );
 }
@@ -796,7 +714,7 @@ function isRevisionConflict(error: unknown): boolean {
 
 function executionErrorText(error: unknown): string {
   if (isRevisionConflict(error)) {
-    return '任务或交付物已被其他人更新。请刷新最新 revision，确认后再执行。';
+    return '任务或交付物已被其他人更新。请刷新最新状态，确认后再执行。';
   }
   if (error instanceof ApiClientError) {
     if (error.status === 403) {

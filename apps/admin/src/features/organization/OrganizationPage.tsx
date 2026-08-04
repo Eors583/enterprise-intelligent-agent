@@ -89,6 +89,34 @@ function descendantsOf(id: string, units: ReadonlyArray<AdminOrgUnit>): Set<stri
   return result;
 }
 
+export function nextSiblingSortOrder(
+  units: ReadonlyArray<Pick<AdminOrgUnit, 'parentId' | 'sortOrder'>>,
+  parentId: string | null,
+): number {
+  const highest = units
+    .filter((unit) => unit.parentId === parentId)
+    .reduce((maximum, unit) => Math.max(maximum, unit.sortOrder), -1);
+  return Math.min(highest + 1, 1_000_000);
+}
+
+export const COMMON_IANA_TIMEZONES = [
+  'Asia/Shanghai',
+  'Asia/Hong_Kong',
+  'Asia/Taipei',
+  'Asia/Singapore',
+  'Asia/Tokyo',
+  'Asia/Seoul',
+  'Asia/Dubai',
+  'Europe/London',
+  'Europe/Paris',
+  'America/New_York',
+  'America/Chicago',
+  'America/Denver',
+  'America/Los_Angeles',
+  'Australia/Sydney',
+  'UTC',
+] as const;
+
 export function OrganizationPage(): ReactNode {
   const [data, setData] = useState<AdminOrganizationResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -502,15 +530,15 @@ function FeishuSyncCard({
           </Notice>
         ) : null}
 
-        {(notConfigured || showBindingForm) && (
+        {showBindingForm ? (
           <Notice tone="error">
             安全阻断：曾在聊天、工单、截图、日志或源码中暴露的 App Secret
             不得再次使用。请先在飞书开放平台轮换，再输入新生成且未暴露的
             Secret；系统不会从历史内容复用密钥。
           </Notice>
-        )}
+        ) : null}
 
-        {notConfigured || showBindingForm ? (
+        {showBindingForm ? (
           <form className="feishu-binding-form" onSubmit={(event) => void submitBinding(event)}>
             <div className="binding-form-heading">
               <div>
@@ -718,7 +746,7 @@ function FeishuSyncCard({
       </div>
 
       <footer className="integration-actions">
-        {!notConfigured && !showBindingForm ? (
+        {!showBindingForm ? (
           <button
             className="button secondary"
             type="button"
@@ -729,7 +757,7 @@ function FeishuSyncCard({
             }}
             disabled={loading || starting || binding || running}
           >
-            更新绑定
+            {notConfigured ? '绑定飞书应用' : '更新飞书凭据'}
           </button>
         ) : null}
         <button
@@ -840,7 +868,6 @@ function CreateOrgUnitModal({
 }): ReactNode {
   const [name, setName] = useState('');
   const [parentId, setParentId] = useState('');
-  const [sortOrder, setSortOrder] = useState('0');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -852,7 +879,7 @@ function CreateOrgUnitModal({
       await createOrgUnit({
         name,
         parentId: parentId || null,
-        sortOrder: Number(sortOrder),
+        sortOrder: nextSiblingSortOrder(units, parentId || null),
       });
       onCreated();
     } catch (caught) {
@@ -888,16 +915,7 @@ function CreateOrgUnitModal({
               ))}
           </select>
         </label>
-        <label>
-          <span>排序值</span>
-          <input
-            type="number"
-            min="0"
-            max="1000000"
-            value={sortOrder}
-            onChange={(event) => setSortOrder(event.target.value)}
-          />
-        </label>
+        <p className="form-hint">新部门会自动排在所选上级部门的同级列表末尾。</p>
         <FieldError message={error} />
         <div className="modal-actions">
           <button className="button secondary" type="button" onClick={onClose}>
@@ -957,11 +975,17 @@ function RenameOrganizationModal({
         </label>
         <label>
           <span>默认时区</span>
-          <input
-            value={timezone}
-            onChange={(event) => setTimezone(event.target.value)}
-            placeholder="Asia/Shanghai"
-          />
+          <select value={timezone} onChange={(event) => setTimezone(event.target.value)}>
+            {!COMMON_IANA_TIMEZONES.includes(timezone as (typeof COMMON_IANA_TIMEZONES)[number]) ? (
+              <option value={timezone}>{timezone}</option>
+            ) : null}
+            {COMMON_IANA_TIMEZONES.map((candidate) => (
+              <option key={candidate} value={candidate}>
+                {candidate}
+              </option>
+            ))}
+          </select>
+          <small className="form-hint">使用标准 IANA 时区；默认保留当前企业设置。</small>
         </label>
         <FieldError message={error} />
         <div className="modal-actions">

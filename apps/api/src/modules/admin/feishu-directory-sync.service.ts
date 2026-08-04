@@ -1213,6 +1213,9 @@ export class FeishuDirectorySyncService {
           binding.user.status !== desiredUserStatus ||
           binding.openId !== desiredOpenId ||
           binding.unionId !== desiredUnionId;
+        if (desiredUserStatus !== 'ACTIVE' && remoteMayDeactivateAccount) {
+          await lockDirectoryMemberPasswordFlow(transaction, claim.principal.tenantId, localUserId);
+        }
         if (binding.user.status === 'ACTIVE' && desiredUserStatus !== 'ACTIVE') {
           summary.members.deactivated += 1;
         }
@@ -1251,6 +1254,15 @@ export class FeishuDirectorySyncService {
           },
           data: { revokedAt },
         });
+        await transaction.authActionToken.updateMany({
+          where: {
+            tenantId: claim.principal.tenantId,
+            userId: localUserId,
+            consumedAt: null,
+            revokedAt: null,
+          },
+          data: { revokedAt },
+        });
         await revokeDirectoryRoleAssignments(
           transaction,
           claim,
@@ -1278,6 +1290,25 @@ export class FeishuDirectorySyncService {
       const previousPrimaryEmployment = ownedEmploymentBindings.find(
         (candidate) => candidate.employment.isPrimary,
       )?.employment;
+      // An administrator's email override is an identity alias owned by the
+      // tenant, not by Feishu. Carry one canonical override to every active
+      // membership, including departments first seen after the override.
+      const localWorkEmailOverride =
+        ownedEmploymentBindings.find(
+          (candidate) =>
+            candidate.employment.status !== 'TERMINATED' &&
+            candidate.employment.isPrimary &&
+            candidate.employment.workEmailOverridden,
+        ) ??
+        ownedEmploymentBindings.find(
+          (candidate) =>
+            candidate.employment.status !== 'TERMINATED' &&
+            candidate.employment.workEmailOverridden,
+        ) ??
+        ownedEmploymentBindings.find(
+          (candidate) => candidate.employment.isPrimary && candidate.employment.workEmailOverridden,
+        ) ??
+        ownedEmploymentBindings.find((candidate) => candidate.employment.workEmailOverridden);
       if (ownedEmploymentIds.length > 0) {
         await transaction.employment.updateMany({
           where: { id: { in: ownedEmploymentIds }, tenantId: claim.principal.tenantId },
@@ -1295,6 +1326,21 @@ export class FeishuDirectorySyncService {
       );
       const remoteWorkEmail =
         remote.email === undefined ? undefined : normalizeWorkEmail(remote.email);
+      const claimedWorkEmail =
+        localWorkEmailOverride === undefined
+          ? remoteWorkEmail
+          : localWorkEmailOverride.employment.workEmail;
+      if (
+        typeof claimedWorkEmail === 'string' &&
+        (await directoryWorkEmailConflicts(
+          transaction,
+          claim.principal.tenantId,
+          localUserId,
+          claimedWorkEmail,
+        ))
+      ) {
+        throw new InvalidFeishuSnapshotError('USER_EMAIL_CONFLICT');
+      }
       const employeeNumber = await this.availableEmployeeNumber(
         transaction,
         claim.principal.tenantId,
@@ -1335,8 +1381,13 @@ export class FeishuDirectorySyncService {
         if (existingBinding === undefined && employment !== undefined) {
           throw new InvalidFeishuSnapshotError('LOCAL_EMPLOYMENT_OWNERSHIP_CONFLICT');
         }
-        const desiredWorkEmail =
-          remoteWorkEmail === undefined ? (employment?.workEmail ?? null) : remoteWorkEmail;
+        const preserveLocalWorkEmail = localWorkEmailOverride !== undefined;
+        const desiredWorkEmail = preserveLocalWorkEmail
+          ? localWorkEmailOverride.employment.workEmail
+          : remoteWorkEmail === undefined
+            ? (employment?.workEmail ?? null)
+            : remoteWorkEmail;
+        const desiredWorkEmailOverridden = preserveLocalWorkEmail;
 
         if (employment === null || employment === undefined) {
           employment = await transaction.employment.create({
@@ -1348,6 +1399,7 @@ export class FeishuDirectorySyncService {
               positionId: desiredPositionId,
               employeeNumber: desiredEmployeeNumber,
               workEmail: desiredWorkEmail,
+              workEmailOverridden: desiredWorkEmailOverridden,
               status: desiredEmploymentStatus,
               isPrimary,
             },
@@ -1360,6 +1412,7 @@ export class FeishuDirectorySyncService {
             employment.positionId !== desiredPositionId ||
             employment.employeeNumber !== desiredEmployeeNumber ||
             employment.workEmail !== desiredWorkEmail ||
+            employment.workEmailOverridden !== desiredWorkEmailOverridden ||
             employment.status !== desiredEmploymentStatus ||
             employment.isPrimary !== isPrimary;
           // Primary flags and employee numbers are cleared before membership
@@ -1374,6 +1427,7 @@ export class FeishuDirectorySyncService {
                 positionId: desiredPositionId,
                 employeeNumber: desiredEmployeeNumber,
                 workEmail: desiredWorkEmail,
+                workEmailOverridden: desiredWorkEmailOverridden,
                 status: desiredEmploymentStatus,
                 isPrimary,
               },
@@ -1494,9 +1548,11 @@ export class FeishuDirectorySyncService {
       potentiallyDeactivated.add(binding.externalUserId);
     }
 
-    for (const externalUserId of potentiallyDeactivated) {
-      const binding = usersByExternalId.get(externalUserId);
-      if (binding === undefined) continue;
+    const deactivationBindings = [...potentiallyDeactivated]
+      .map((externalUserId) => usersByExternalId.get(externalUserId))
+      .filter((binding): binding is (typeof userBindings)[number] => binding !== undefined)
+      .sort((left, right) => left.userId.localeCompare(right.userId));
+    for (const binding of deactivationBindings) {
       if (binding.user.role === 'OWNER') continue;
       const activeEmployments = await transaction.employment.count({
         where: {
@@ -1505,16 +1561,28 @@ export class FeishuDirectorySyncService {
           status: { in: ['ACTIVE', 'PENDING'] },
         },
       });
-      if (activeEmployments > 0 || binding.user.status !== 'ACTIVE') continue;
-      await transaction.user.update({
-        where: { id: binding.userId },
-        data: { status: 'INACTIVE' },
-      });
+      if (activeEmployments > 0) continue;
+      await lockDirectoryMemberPasswordFlow(transaction, claim.principal.tenantId, binding.userId);
+      if (binding.user.status === 'ACTIVE') {
+        await transaction.user.update({
+          where: { id: binding.userId },
+          data: { status: 'INACTIVE' },
+        });
+      }
       const revokedAt = new Date();
       await transaction.authSession.updateMany({
         where: {
           tenantId: claim.principal.tenantId,
           userId: binding.userId,
+          revokedAt: null,
+        },
+        data: { revokedAt },
+      });
+      await transaction.authActionToken.updateMany({
+        where: {
+          tenantId: claim.principal.tenantId,
+          userId: binding.userId,
+          consumedAt: null,
           revokedAt: null,
         },
         data: { revokedAt },
@@ -1526,7 +1594,7 @@ export class FeishuDirectorySyncService {
         'DIRECTORY_ACCOUNT_REMOVED',
         revokedAt,
       );
-      summary.members.deactivated += 1;
+      if (binding.user.status === 'ACTIVE') summary.members.deactivated += 1;
     }
   }
 
@@ -1813,11 +1881,51 @@ function normalizeWorkEmail(value: string | undefined): string | null {
     normalized === undefined ||
     normalized.length === 0 ||
     normalized.length > 320 ||
+    normalized.endsWith('@external.invalid') ||
     !adminMemberSchema.shape.email.safeParse(normalized).success
   ) {
     return null;
   }
   return normalized;
+}
+
+async function lockDirectoryMemberPasswordFlow(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  userId: string,
+): Promise<void> {
+  await transaction.$queryRaw`
+    WITH password_flow_lock AS (
+      SELECT pg_advisory_xact_lock(hashtextextended(${`password-flow:${tenantId}:${userId}`}, 0))
+    )
+    SELECT 1::integer AS locked FROM password_flow_lock
+  `;
+}
+
+async function directoryWorkEmailConflicts(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  userId: string | null,
+  email: string,
+): Promise<boolean> {
+  const [canonicalOwners, employmentOwners] = await Promise.all([
+    transaction.user.count({
+      where: {
+        tenantId,
+        ...(userId === null ? {} : { id: { not: userId } }),
+        emailNormalized: email,
+      },
+    }),
+    transaction.employment.count({
+      where: {
+        tenantId,
+        ...(userId === null ? {} : { userId: { not: userId } }),
+        status: { not: 'TERMINATED' },
+        workEmail: { equals: email, mode: 'insensitive' },
+      },
+    }),
+  ]);
+  return canonicalOwners > 0 || employmentOwners > 0;
 }
 
 function emptyCounters(): SyncCounters {
@@ -2233,6 +2341,23 @@ export async function buildPreviewChanges(
     seenUsers.add(remote.externalId);
     const binding = usersByExternalId.get(remote.externalId);
     if (binding === undefined) {
+      const remoteEmail = normalizeWorkEmail(remote.email);
+      if (
+        typeof remoteEmail === 'string' &&
+        (await directoryWorkEmailConflicts(transaction, input.tenantId, null, remoteEmail))
+      ) {
+        changes.push({
+          entityType: 'MEMBER',
+          action: 'CONFLICT',
+          externalId: remote.externalId,
+          displayName: remote.name,
+          localResourceType: null,
+          localResourceId: null,
+          fieldChanges: { workEmail: { before: null, after: remoteEmail } },
+          diagnosticCode: 'USER_EMAIL_CONFLICT',
+        });
+        continue;
+      }
       changes.push({
         entityType: 'MEMBER',
         action: remote.active ? 'CREATE' : 'DEACTIVATE',
@@ -2307,9 +2432,64 @@ export async function buildPreviewChanges(
         fields.jobTitle = { before: currentTitle, after: desiredTitle };
       }
     }
-    if (remote.email !== undefined) {
+    const workEmailLocallyOverridden = currentEmployments.some(
+      (record) => record.employment.workEmailOverridden === true,
+    );
+    const locallyOverriddenWorkEmail = currentEmployments.find(
+      (record) =>
+        record.employment.workEmailOverridden === true &&
+        typeof record.employment.workEmail === 'string',
+    )?.employment.workEmail;
+    if (
+      typeof locallyOverriddenWorkEmail === 'string' &&
+      (await directoryWorkEmailConflicts(
+        transaction,
+        input.tenantId,
+        binding.userId,
+        locallyOverriddenWorkEmail,
+      ))
+    ) {
+      changes.push({
+        entityType: 'MEMBER',
+        action: 'CONFLICT',
+        externalId: remote.externalId,
+        displayName: remote.name,
+        localResourceType: 'user',
+        localResourceId: binding.userId,
+        fieldChanges: {
+          workEmail: {
+            before: locallyOverriddenWorkEmail,
+            after: locallyOverriddenWorkEmail,
+          },
+        },
+        diagnosticCode: 'USER_EMAIL_CONFLICT',
+      });
+      continue;
+    }
+    if (remote.email !== undefined && !workEmailLocallyOverridden) {
       const currentEmail = currentPrimary?.employment.workEmail ?? null;
       const desiredEmail = normalizeWorkEmail(remote.email);
+      if (
+        typeof desiredEmail === 'string' &&
+        (await directoryWorkEmailConflicts(
+          transaction,
+          input.tenantId,
+          binding.userId,
+          desiredEmail,
+        ))
+      ) {
+        changes.push({
+          entityType: 'MEMBER',
+          action: 'CONFLICT',
+          externalId: remote.externalId,
+          displayName: remote.name,
+          localResourceType: 'user',
+          localResourceId: binding.userId,
+          fieldChanges: { workEmail: { before: currentEmail, after: desiredEmail } },
+          diagnosticCode: 'USER_EMAIL_CONFLICT',
+        });
+        continue;
+      }
       if (currentEmail !== desiredEmail) {
         fields.workEmail = { before: currentEmail, after: desiredEmail };
       }

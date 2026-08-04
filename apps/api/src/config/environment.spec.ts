@@ -618,6 +618,61 @@ describe('validateEnvironment', () => {
     ).toThrow('TENCENT_IM_HTTP_TIMEOUT_MS must be less than IM_PROVIDER_TIMEOUT_MS');
   });
 
+  it('requires secure WuKongIM credentials and origins', () => {
+    expect(() => validateEnvironment({ NODE_ENV: 'test', IM_PROVIDER: 'wukong' })).toThrow(
+      'WUKONG_IM_TOKEN_SIGNING_SECRET is required',
+    );
+    const configured = validateEnvironment({
+      NODE_ENV: 'test',
+      IM_PROVIDER: 'wukong',
+      WUKONG_IM_TOKEN_SIGNING_SECRET: 'test-signing-secret-value',
+      WUKONG_IM_API_BASE_URL: 'http://127.0.0.1:5501',
+      WUKONG_IM_PUBLIC_WS_URL: 'ws://127.0.0.1:5520',
+    });
+    expect(configured).toMatchObject({
+      IM_PROVIDER: 'wukong',
+      WUKONG_IM_API_BASE_URL: 'http://127.0.0.1:5501',
+      WUKONG_IM_PUBLIC_WS_URL: 'ws://127.0.0.1:5520',
+      WUKONG_IM_HTTP_TIMEOUT_MS: 5_000,
+    });
+    expect(() =>
+      validateEnvironment({
+        NODE_ENV: 'test',
+        IM_PROVIDER: 'wukong',
+        WUKONG_IM_TOKEN_SIGNING_SECRET: 'test-signing-secret-value',
+        WUKONG_IM_API_BASE_URL: 'http://example.com',
+      }),
+    ).toThrow('loopback HTTP');
+    expect(() =>
+      validateEnvironment({
+        NODE_ENV: 'test',
+        IM_PROVIDER: 'wukong',
+        WUKONG_IM_TOKEN_SIGNING_SECRET: 'test-signing-secret-value',
+        WUKONG_IM_PUBLIC_WS_URL: 'ws://example.com',
+      }),
+    ).toThrow('loopback WS');
+  });
+
+  it('blocks production WuKongIM until upstream and proxy authentication are verified', () => {
+    const production = {
+      ...productionKnowledgeEnvironment(),
+      IM_PROVIDER: 'wukong',
+      WUKONG_IM_API_BASE_URL: 'https://im-internal.example.test',
+      WUKONG_IM_PUBLIC_WS_URL: 'wss://im.example.test',
+      WUKONG_IM_API_TOKEN: 'authenticated-internal-proxy-token',
+      WUKONG_IM_TOKEN_SIGNING_SECRET: 'production-wukong-signing-secret-at-least-32-characters',
+    };
+    expect(() => validateEnvironment(production)).toThrow(
+      'WUKONG_IM_VERIFIED_AUTH_ENABLED=true is required',
+    );
+    expect(
+      validateEnvironment({ ...production, WUKONG_IM_VERIFIED_AUTH_ENABLED: 'true' }),
+    ).toMatchObject({
+      IM_PROVIDER: 'wukong',
+      WUKONG_IM_VERIFIED_AUTH_ENABLED: true,
+    });
+  });
+
   it('requires Prisma and complete server-side credentials for Feishu directory sync', () => {
     expect(() =>
       validateEnvironment({

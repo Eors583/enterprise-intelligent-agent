@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 
 import { BadRequestException, ConflictException, Inject, Injectable } from '@nestjs/common';
 import {
@@ -11,7 +11,9 @@ import {
   type Deliverable,
   type EmployeeAcceptanceRequest,
   type EmployeeAcceptanceRequestInput,
+  type EmployeeDeliverableSubmissionCommand,
   type EmployeeDeliverableSubmissionRequest,
+  type EmployeeEvidenceContributionCommand,
   type EmployeeEvidenceContributionRequest,
   type EmployeeTaskCapability,
   type EmployeeTaskExecutionSnapshot,
@@ -280,6 +282,113 @@ export class EmployeeTaskExecutionService {
     );
   }
 
+  async submitDeliverableCommand(
+    taskId: string,
+    deliverableId: string,
+    request: EmployeeDeliverableSubmissionCommand,
+    suppliedKey?: string,
+  ): Promise<Deliverable> {
+    const principal = this.context.current;
+    const { task } = await this.authorizeDeliverableSubmission(
+      principal,
+      taskId,
+      deliverableId,
+      request,
+    );
+    assertEmployeeDeliverableTaskState(task);
+    const identity = idempotencyIdentity({ taskId, deliverableId, command: request }, suppliedKey);
+    return this.withExecutor(
+      principal,
+      request.roleAssignmentId,
+      'business.deliverable.submit',
+      async (transaction) => {
+        await lockEmployeeCommand(transaction, principal.tenantId, identity.key);
+        const replay = await readCommandReplay(transaction, principal, identity.key);
+        if (replay !== null) {
+          assertReplayHash(replay.requestHash, identity.requestHash);
+          return deliverableSchema.parse(replay.responsePayload);
+        }
+        const [currentTask, current] = await Promise.all([
+          transaction.task.findFirst({
+            where: { tenantId: principal.tenantId, id: taskId },
+          }),
+          transaction.deliverable.findFirst({
+            where: { tenantId: principal.tenantId, id: deliverableId, taskId },
+          }),
+        ]);
+        if (currentTask === null || current === null) throw semanticNotFound('Deliverable');
+        assertEmployeeDeliverableTaskState(currentTask);
+        await assertEvidenceLinkedToTask(
+          transaction,
+          principal.tenantId,
+          taskId,
+          request.evidenceIds,
+        );
+        const submittedAt = new Date();
+        const contentHash = serverContentHash({
+          schema: 'employee-deliverable-submission-command.v1',
+          tenantId: principal.tenantId,
+          taskId,
+          deliverableId,
+          roleAssignmentId: request.roleAssignmentId,
+          businessDescription: request.businessDescription,
+          sourceType: request.sourceType,
+          sourceUri: request.sourceUri,
+          evidenceIds: [...request.evidenceIds].sort(),
+        });
+        const artifactUri =
+          request.sourceUri ??
+          `urn:enterprise-agent:deliverable:${deliverableId}:submission:${contentHash}`;
+        const effectivePermissionLabels = employeePermissionLabels(
+          currentTask.permissionLabels,
+          current.permissionLabels,
+        );
+        await submitDeliverableWithinTransaction(transaction, principal.tenantId, taskId, current, {
+          action: 'SUBMIT',
+          expectedRevision: current.revision,
+          submittedAt: submittedAt.toISOString(),
+          artifactUri,
+          contentHash,
+          evidenceIds: request.evidenceIds,
+          effectivePermissionLabels,
+        });
+        const updated = mapDeliverable(
+          await transaction.deliverable.findFirstOrThrow({
+            where: { tenantId: principal.tenantId, id: deliverableId, taskId },
+          }),
+        );
+        await recordEmployeeCommand(
+          transaction,
+          principal,
+          request.roleAssignmentId,
+          'business.deliverable.submit',
+          taskId,
+          identity,
+          updated,
+        );
+        await recordBusinessMutation(
+          transaction,
+          principal,
+          'business_semantics.employee.deliverable.submitted',
+          'deliverable',
+          deliverableId,
+          {
+            taskId,
+            roleAssignmentId: request.roleAssignmentId,
+            sourceType: request.sourceType,
+            sourceUri: request.sourceUri,
+            businessDescription: request.businessDescription,
+            effectivePermissionLabels,
+            evidenceCount: request.evidenceIds.length,
+            revision: updated.revision,
+            serverGeneratedMetadata: true,
+          },
+        );
+        return updated;
+      },
+    );
+  }
+
   async contributeEvidence(
     taskId: string,
     request: EmployeeEvidenceContributionRequest,
@@ -354,6 +463,117 @@ export class EmployeeTaskExecutionService {
             roleAssignmentId: request.roleAssignmentId,
             status: created.status,
             trustLevel: created.trustLevel,
+          },
+        );
+        return created;
+      },
+    );
+  }
+
+  async contributeEvidenceCommand(
+    taskId: string,
+    request: EmployeeEvidenceContributionCommand,
+    suppliedKey?: string,
+  ): Promise<Evidence> {
+    const principal = this.context.current;
+    await this.authorizeVirtualMutation(
+      principal,
+      taskId,
+      request.roleAssignmentId,
+      'business.evidence.contribute',
+      [],
+    );
+    const identity = idempotencyIdentity({ taskId, command: request }, suppliedKey);
+    return this.withExecutor(
+      principal,
+      request.roleAssignmentId,
+      'business.evidence.contribute',
+      async (transaction) => {
+        await lockEmployeeCommand(transaction, principal.tenantId, identity.key);
+        const replay = await readCommandReplay(transaction, principal, identity.key);
+        if (replay !== null) {
+          assertReplayHash(replay.requestHash, identity.requestHash);
+          return evidenceSchema.parse(replay.responsePayload);
+        }
+        const task = await transaction.task.findFirst({
+          where: { tenantId: principal.tenantId, id: taskId },
+        });
+        if (task === null) throw semanticNotFound('Task');
+        const generatedIdentity = serverContentHash({
+          schema: 'employee-evidence-identity.v1',
+          tenantId: principal.tenantId,
+          taskId,
+          idempotencyKey: identity.key,
+          requestHash: identity.requestHash,
+        });
+        const observedAt = new Date();
+        const contentHash = serverContentHash({
+          schema: 'employee-evidence-content.v1',
+          tenantId: principal.tenantId,
+          taskId,
+          roleAssignmentId: request.roleAssignmentId,
+          businessDescription: request.businessDescription,
+          sourceType: request.sourceType,
+          sourceUri: request.sourceUri,
+        });
+        const permissionLabels = employeePermissionLabels(task.permissionLabels);
+        const code = `EVD:${generatedIdentity.slice(0, 32).toUpperCase()}`;
+        const sourceSystem =
+          request.sourceType === 'DOCUMENT' ? 'EMPLOYEE.DOCUMENT' : 'EMPLOYEE.ATTESTATION';
+        const sourceRecordId = `task:${taskId}:contribution:${generatedIdentity}`;
+        const rows = await transaction.$queryRaw<Array<{ evidenceId: string }>>`
+          SELECT public.employee_submit_task_evidence(
+            ${principal.tenantId}::uuid,
+            ${taskId}::uuid,
+            ${code},
+            ${request.sourceType}::public."EvidenceSourceType",
+            ${sourceSystem},
+            ${sourceRecordId},
+            ${'1'},
+            ${request.sourceUri},
+            ${observedAt},
+            ${contentHash},
+            ${request.businessDescription},
+            ${observedAt},
+            ${null},
+            ${toJson(permissionLabels)}::jsonb,
+            ${identity.key},
+            ${identity.requestHash}
+          ) AS "evidenceId"
+        `;
+        const evidenceId = rows[0]?.evidenceId;
+        if (evidenceId === undefined) {
+          throw new ConflictException('Evidence contribution did not return a durable identity.');
+        }
+        const created = mapEvidence(
+          await transaction.evidence.findFirstOrThrow({
+            where: { tenantId: principal.tenantId, id: evidenceId },
+          }),
+        );
+        await recordEmployeeCommand(
+          transaction,
+          principal,
+          request.roleAssignmentId,
+          'business.evidence.contribute',
+          taskId,
+          identity,
+          created,
+        );
+        await recordBusinessMutation(
+          transaction,
+          principal,
+          'business_semantics.employee.evidence.contributed',
+          'evidence',
+          evidenceId,
+          {
+            taskId,
+            roleAssignmentId: request.roleAssignmentId,
+            sourceType: request.sourceType,
+            sourceUri: request.sourceUri,
+            status: created.status,
+            trustLevel: created.trustLevel,
+            effectivePermissionLabels: permissionLabels,
+            serverGeneratedMetadata: true,
           },
         );
         return created;
@@ -499,7 +719,10 @@ export class EmployeeTaskExecutionService {
     principal: TenantPrincipal,
     taskId: string,
     deliverableId: string,
-    request: EmployeeDeliverableSubmissionRequest,
+    request: {
+      readonly roleAssignmentId: string;
+      readonly evidenceIds: readonly string[];
+    },
   ): Promise<{ readonly task: DbTask; readonly deliverable: DbDeliverable }> {
     return this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const [task, deliverable] = await Promise.all([
@@ -531,20 +754,12 @@ export class EmployeeTaskExecutionService {
           mutation: { proposedTaskId: taskId },
         },
       );
-      const activeLinks = await transaction.evidenceLink.findMany({
-        where: {
-          tenantId: principal.tenantId,
-          targetTaskId: taskId,
-          status: 'ACTIVE',
-          evidenceId: { in: request.evidenceIds },
-        },
-        select: { evidenceId: true },
-      });
-      if (new Set(activeLinks.map((link) => link.evidenceId)).size !== request.evidenceIds.length) {
-        throw new ConflictException(
-          'Every submission Evidence item must already be linked to this Task.',
-        );
-      }
+      await assertEvidenceLinkedToTask(
+        transaction,
+        principal.tenantId,
+        taskId,
+        request.evidenceIds,
+      );
       return { task, deliverable };
     });
   }
@@ -905,4 +1120,45 @@ function employeePermissionLabels(...values: readonly unknown[]): string[] {
   return [
     ...new Set(values.flatMap((value) => [...businessPermissionLabelsSchema.parse(value)])),
   ].sort();
+}
+
+async function assertEvidenceLinkedToTask(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  taskId: string,
+  evidenceIds: readonly string[],
+): Promise<void> {
+  const activeLinks = await transaction.evidenceLink.findMany({
+    where: {
+      tenantId,
+      targetTaskId: taskId,
+      status: 'ACTIVE',
+      evidenceId: { in: [...evidenceIds] },
+    },
+    select: { evidenceId: true },
+  });
+  if (new Set(activeLinks.map((link) => link.evidenceId)).size !== evidenceIds.length) {
+    throw new ConflictException(
+      'Every submission Evidence item must already be linked to this Task.',
+    );
+  }
+}
+
+function assertEmployeeDeliverableTaskState(
+  task: Pick<DbTask, 'processInstanceId' | 'status'>,
+): void {
+  if (task.processInstanceId !== null) {
+    throw new ConflictException(
+      'This Task is controlled by a Process Instance; submit through its assigned process step.',
+    );
+  }
+  if (task.status !== 'IN_PROGRESS') {
+    throw new ConflictException(
+      'A Deliverable can be submitted only while its Task is in progress.',
+    );
+  }
+}
+
+function serverContentHash(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }

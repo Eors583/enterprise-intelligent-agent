@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseStoredSession } from './session';
+import { isSessionRoleAllowed, parseStoredSession } from './session';
 
 const STORED_SESSION = {
   accessToken: 'a'.repeat(32),
@@ -44,5 +44,17 @@ describe('legacy stored admin session disposal', () => {
     expect(
       parseStoredSession(JSON.stringify({ ...STORED_SESSION, accessToken: 'short' })),
     ).toBeNull();
+  });
+
+  it('rejects a regular employee from the management application shell', () => {
+    const parsed = parseStoredSession(
+      JSON.stringify({
+        ...STORED_SESSION,
+        account: { ...STORED_SESSION.account, role: 'MEMBER' },
+      }),
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed && isSessionRoleAllowed(parsed)).toBe(false);
   });
 });

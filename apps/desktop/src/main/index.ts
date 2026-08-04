@@ -8,6 +8,9 @@ import {
   type DesktopAgentRunStreamUpdate,
   type DesktopApiRequest,
   type DesktopAuthState,
+  type DesktopImRealtimePayload,
+  type DesktopImRealtimeStartRequest,
+  type DesktopImRealtimeUpdate,
   type DesktopOidcLoginRequest,
   type DesktopRuntimeInfo,
 } from '../shared/desktop-api';
@@ -19,6 +22,10 @@ let mainWindow: BrowserWindow | null = null;
 let oidcLoginWindow: BrowserWindow | null = null;
 let authManager: DesktopAuthManager | null = null;
 const agentRunStreams = new Map<
+  string,
+  { readonly controller: AbortController; readonly senderId: number }
+>();
+const imRealtimeStreams = new Map<
   string,
   { readonly controller: AbortController; readonly senderId: number }
 >();
@@ -156,6 +163,58 @@ function registerIpcHandlers(): void {
     if (active?.senderId === event.sender.id) {
       active.controller.abort(new Error('Agent Run stream subscription stopped.'));
       agentRunStreams.delete(subscriptionId);
+    }
+  });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.startImRealtime, async (event, request: unknown) => {
+    assertTrustedIpcSender(event);
+    const stream = parseImRealtimeStartRequest(request);
+    if (imRealtimeStreams.has(stream.subscriptionId)) {
+      throw new Error('Realtime messaging subscription already exists.');
+    }
+    if ([...imRealtimeStreams.values()].some((active) => active.senderId === event.sender.id)) {
+      throw new Error('This desktop window already has a realtime messaging subscription.');
+    }
+    const controller = new AbortController();
+    const registration = { controller, senderId: event.sender.id };
+    imRealtimeStreams.set(stream.subscriptionId, registration);
+    const send = (update: DesktopImRealtimePayload): void => {
+      if (
+        imRealtimeStreams.get(stream.subscriptionId) !== registration ||
+        event.sender.isDestroyed()
+      ) {
+        return;
+      }
+      event.sender.send(DESKTOP_IPC_CHANNELS.imRealtimeUpdate, {
+        ...update,
+        subscriptionId: stream.subscriptionId,
+      } satisfies DesktopImRealtimeUpdate);
+    };
+    void requireAuthManager()
+      .streamImRealtime(stream, send, controller.signal)
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) {
+          send({
+            kind: 'state',
+            state: 'closed',
+            error: error instanceof Error ? error.message : 'Realtime messaging failed.',
+          });
+        }
+      })
+      .finally(() => {
+        if (imRealtimeStreams.get(stream.subscriptionId) === registration) {
+          imRealtimeStreams.delete(stream.subscriptionId);
+        }
+      });
+  });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.stopImRealtime, (event, subscriptionId: unknown) => {
+    assertTrustedIpcSender(event);
+    if (typeof subscriptionId !== 'string' || !UUID_PATTERN.test(subscriptionId)) {
+      throw new Error('Invalid realtime messaging subscription id.');
+    }
+    const active = imRealtimeStreams.get(subscriptionId);
+    if (active?.senderId === event.sender.id) {
+      active.controller.abort(new Error('Realtime messaging subscription stopped.'));
+      imRealtimeStreams.delete(subscriptionId);
     }
   });
 }
@@ -343,11 +402,34 @@ function parseAgentRunStreamStartRequest(value: unknown): DesktopAgentRunStreamS
   return request;
 }
 
+function parseImRealtimeStartRequest(value: unknown): DesktopImRealtimeStartRequest {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    typeof Reflect.get(value, 'subscriptionId') !== 'string' ||
+    typeof Reflect.get(value, 'expectedSessionId') !== 'string'
+  ) {
+    throw new Error('Invalid realtime messaging subscription.');
+  }
+  const request = value as DesktopImRealtimeStartRequest;
+  if (!UUID_PATTERN.test(request.subscriptionId) || !UUID_PATTERN.test(request.expectedSessionId)) {
+    throw new Error('Invalid realtime messaging subscription.');
+  }
+  return request;
+}
+
 function abortAgentRunStreams(reason: string): void {
   for (const active of agentRunStreams.values()) {
     active.controller.abort(new Error(reason));
   }
   agentRunStreams.clear();
+}
+
+function abortImRealtimeStreams(reason: string): void {
+  for (const active of imRealtimeStreams.values()) {
+    active.controller.abort(new Error(reason));
+  }
+  imRealtimeStreams.clear();
 }
 
 function addConnectOrigin(origins: Set<string>, value: string | undefined): void {
@@ -489,6 +571,7 @@ if (!hasSingleInstanceLock) {
       __RENDERER_API_BASE_URL__,
       (state) => {
         abortAgentRunStreams('The active desktop account changed.');
+        abortImRealtimeStreams('The active desktop account changed.');
         if (!mainWindow || mainWindow.isDestroyed()) return;
         try {
           mainWindow.webContents.send(DESKTOP_IPC_CHANNELS.authStateChanged, state);
@@ -509,5 +592,6 @@ if (!hasSingleInstanceLock) {
 
 app.on('window-all-closed', () => {
   abortAgentRunStreams('The desktop window closed.');
+  abortImRealtimeStreams('The desktop window closed.');
   if (process.platform !== 'darwin') app.quit();
 });

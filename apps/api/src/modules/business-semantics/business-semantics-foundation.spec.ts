@@ -177,6 +177,6 @@ describe('business semantics service boundaries', () => {
       const source = readFileSync(path.join(moduleRoot, file), 'utf8');
       return count + (source.match(/@Headers\('idempotency-key'\)/g)?.length ?? 0);
     }, 0);
-    expect(headerCount).toBe(15);
+    expect(headerCount).toBe(16);
   });
 });

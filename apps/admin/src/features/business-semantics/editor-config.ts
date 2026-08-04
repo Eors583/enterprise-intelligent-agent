@@ -1,5 +1,4 @@
 import {
-  createEvidenceRequestSchema,
   createMetricDefinitionRequestSchema,
   createObjectiveRequestSchema,
   createProcessDefinitionRequestSchema,
@@ -24,7 +23,6 @@ import {
   updateTaskRequestSchema,
   updateValueDefinitionRequestSchema,
   updateValueVersionRequestSchema,
-  type CreateEvidenceRequest,
   type CreateMetricDefinitionRequest,
   type CreateObjectiveRequest,
   type CreateProcessDefinitionRequest,
@@ -62,7 +60,6 @@ import {
 import type { ZodType } from 'zod';
 
 import {
-  createEvidence,
   createMetricDefinition,
   createObjective,
   createProcessDefinition,
@@ -221,30 +218,7 @@ export function createEntityEditorConfig(
       });
     }
     case 'evidence':
-      return editor<CreateEvidenceRequest>({
-        title: '登记证据',
-        description: '证据身份、来源版本和内容哈希不可在后续编辑中被替换。',
-        initialValue: {
-          ...common,
-          code: 'EVIDENCE.NEW',
-          sourceType: 'DOCUMENT',
-          sourceSystem: 'SYSTEM.DOCUMENT',
-          sourceRecordId: 'replace-with-source-record-id',
-          sourceVersion: '1',
-          sourceUri: null,
-          observedAt: common.effectiveFrom,
-          contentHashAlgorithm: 'SHA256',
-          contentHash: '0'.repeat(64),
-          trustLevel: 'UNVERIFIED',
-          confidence: 0.5,
-          summary: '',
-          verifiedBy: null,
-          verifiedAt: null,
-        },
-        schema: createEvidenceRequestSchema,
-        submitLabel: '登记 Evidence',
-        submit: createEvidence,
-      });
+      throw new Error('Evidence creation must use the guided business dialog.');
   }
 }
 

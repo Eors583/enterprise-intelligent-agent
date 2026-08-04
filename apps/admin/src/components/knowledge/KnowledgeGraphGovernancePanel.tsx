@@ -1,7 +1,5 @@
 import type {
-  CreateKnowledgeGraphCorrectionRequest,
   KnowledgeGraphConflict,
-  KnowledgeGraphCorrectionAction,
   KnowledgeGraphGovernanceOverview,
   KnowledgeOntologyEntityTypeInput,
   KnowledgeOntologyPredicateInput,
@@ -444,16 +442,9 @@ export function KnowledgeGraphGovernancePanel({
         />
       </details>
 
-      <details className="knowledge-governance-create">
-        <summary>提交实体/关系人工修正</summary>
-        <CreateCorrectionForm
-          knowledgeBaseId={knowledgeBaseId}
-          onCreated={() => {
-            setNotice('人工修正草稿已保存；不会在独立复核与显式应用前影响检索。');
-            reload();
-          }}
-        />
-      </details>
+      <Notice tone="info">
+        实体与关系修正请从上方冲突记录或实体详情发起，系统会自动带入目标、版本和来源证据，不再接受手工结构化内容。
+      </Notice>
     </section>
   );
 }
@@ -465,12 +456,12 @@ function CreateOntologyForm({
   knowledgeBaseId: string;
   onCreated: () => void;
 }): ReactNode {
-  const [code, setCode] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [changeSummary, setChangeSummary] = useState('');
-  const [entityTypes, setEntityTypes] = useState(JSON.stringify(DEFAULT_ENTITY_TYPES, null, 2));
-  const [predicates, setPredicates] = useState(JSON.stringify(DEFAULT_PREDICATES, null, 2));
+  const [template, setTemplate] = useState<'DOCUMENT_OWNERSHIP' | 'DOCUMENT_ONLY'>(
+    'DOCUMENT_OWNERSHIP',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -480,12 +471,13 @@ function CreateOntologyForm({
     setError(null);
     try {
       await createKnowledgeOntology(knowledgeBaseId, {
-        code,
+        code: generatedOntologyCode(name),
         name,
         description: description.trim() || null,
         changeSummary,
-        entityTypes: parseJsonArray(entityTypes, '实体类型') as KnowledgeOntologyEntityTypeInput[],
-        predicates: parseJsonArray(predicates, '谓词') as KnowledgeOntologyPredicateInput[],
+        entityTypes:
+          template === 'DOCUMENT_ONLY' ? [DEFAULT_ENTITY_TYPES[0]!] : [...DEFAULT_ENTITY_TYPES],
+        predicates: template === 'DOCUMENT_ONLY' ? [] : [...DEFAULT_PREDICATES],
         idempotencyKey: governanceKey('ontology-create'),
       });
       onCreated();
@@ -498,16 +490,21 @@ function CreateOntologyForm({
 
   return (
     <form className="form-stack" onSubmit={(event) => void submit(event)}>
-      <div className="form-grid two">
-        <label>
-          <span>本体代码</span>
-          <input value={code} onChange={(event) => setCode(event.target.value.toUpperCase())} />
-        </label>
-        <label>
-          <span>本体名称</span>
-          <input value={name} onChange={(event) => setName(event.target.value)} />
-        </label>
-      </div>
+      <label>
+        <span>关系模板</span>
+        <select
+          value={template}
+          onChange={(event) => setTemplate(event.target.value as typeof template)}
+        >
+          <option value="DOCUMENT_OWNERSHIP">文档、人员与组织责任关系</option>
+          <option value="DOCUMENT_ONLY">仅管理文档实体</option>
+        </select>
+        <small>实体类型、关系方向和约束由系统模板生成。</small>
+      </label>
+      <label>
+        <span>本体名称</span>
+        <input required value={name} onChange={(event) => setName(event.target.value)} />
+      </label>
       <label>
         <span>说明</span>
         <textarea
@@ -520,104 +517,12 @@ function CreateOntologyForm({
         <span>变更摘要</span>
         <input value={changeSummary} onChange={(event) => setChangeSummary(event.target.value)} />
       </label>
-      <label>
-        <span>实体类型 JSON</span>
-        <textarea
-          rows={10}
-          value={entityTypes}
-          onChange={(event) => setEntityTypes(event.target.value)}
-        />
-      </label>
-      <label>
-        <span>谓词约束 JSON</span>
-        <textarea
-          rows={12}
-          value={predicates}
-          onChange={(event) => setPredicates(event.target.value)}
-        />
-      </label>
       <Notice tone="info">
-        inversePredicateKey 必须双向互指；domain/range
-        必须引用同版本实体类型。发布后定义不可变，只能创建新版本。
+        系统会自动生成内部标识并校验关系方向。发布后定义不可直接修改，如需调整请创建新版本。
       </Notice>
       <FieldError message={error} />
       <button className="button primary" type="submit" disabled={submitting}>
         {submitting ? <Spinner label="正在创建…" /> : '创建本体草稿'}
-      </button>
-    </form>
-  );
-}
-
-function CreateCorrectionForm({
-  knowledgeBaseId,
-  onCreated,
-}: {
-  knowledgeBaseId: string;
-  onCreated: () => void;
-}): ReactNode {
-  const [action, setAction] = useState<KnowledgeGraphCorrectionAction>('MERGE_ENTITY');
-  const [patch, setPatch] = useState(
-    JSON.stringify(
-      {
-        sourceEntityId: '00000000-0000-4000-8000-000000000000',
-        targetEntityId: '00000000-0000-4000-8000-000000000001',
-        reason: '重复实体消歧',
-      },
-      null,
-      2,
-    ),
-  );
-  const [evidence, setEvidence] = useState(
-    JSON.stringify([{ source: 'human-review', reason: '同一业务主键与来源证据' }], null, 2),
-  );
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    try {
-      const input = {
-        action,
-        patch: parseJsonObject(patch, '修正内容'),
-        evidence: parseJsonArray(evidence, '修正证据'),
-        idempotencyKey: governanceKey(`correction-${action}`),
-      } as CreateKnowledgeGraphCorrectionRequest;
-      await createKnowledgeGraphCorrection(knowledgeBaseId, input);
-      onCreated();
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  return (
-    <form className="form-stack" onSubmit={(event) => void submit(event)}>
-      <label>
-        <span>修正类型</span>
-        <select value={action} onChange={(event) => setAction(event.target.value as typeof action)}>
-          <option value="MERGE_ENTITY">合并重复实体</option>
-          <option value="ADD_ALIAS">添加实体别名</option>
-          <option value="UPSERT_RELATION_VALIDITY">更新关系本体与有效期</option>
-          <option value="RESOLVE_CONFLICT">关闭冲突</option>
-        </select>
-      </label>
-      <label>
-        <span>结构化修正内容 JSON</span>
-        <textarea rows={8} value={patch} onChange={(event) => setPatch(event.target.value)} />
-      </label>
-      <label>
-        <span>审批证据 JSON 数组</span>
-        <textarea rows={5} value={evidence} onChange={(event) => setEvidence(event.target.value)} />
-      </label>
-      <Notice tone="info">
-        修正必须经过“提交复核 → 独立复核 → 显式应用”，系统不会自动覆盖企业事实。
-      </Notice>
-      <FieldError message={error} />
-      <button className="button primary" type="submit" disabled={submitting}>
-        {submitting ? <Spinner label="正在保存…" /> : '保存修正草稿'}
       </button>
     </form>
   );
@@ -640,23 +545,14 @@ function GovernanceMetric({
   );
 }
 
-function parseJsonArray(value: string, label: string): Record<string, unknown>[] {
-  const parsed: unknown = JSON.parse(value);
-  if (!Array.isArray(parsed)) throw new Error(`${label}必须是 JSON 数组。`);
-  return parsed.map((item) => {
-    if (item === null || Array.isArray(item) || typeof item !== 'object') {
-      throw new Error(`${label}的每一项必须是 JSON 对象。`);
-    }
-    return item as Record<string, unknown>;
-  });
-}
-
-function parseJsonObject(value: string, label: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(value);
-  if (parsed === null || Array.isArray(parsed) || typeof parsed !== 'object') {
-    throw new Error(`${label}必须是 JSON 对象。`);
-  }
-  return parsed as Record<string, unknown>;
+function generatedOntologyCode(name: string): string {
+  const normalized = name
+    .normalize('NFKC')
+    .replace(/[^\p{L}\p{N}]+/gu, '_')
+    .replace(/^_+|_+$/gu, '')
+    .toUpperCase()
+    .slice(0, 48);
+  return `ONTOLOGY_${normalized || 'KNOWLEDGE'}_${Date.now().toString(36).toUpperCase()}`;
 }
 
 function governanceKey(prefix: string): string {

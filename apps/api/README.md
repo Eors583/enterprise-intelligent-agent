@@ -183,9 +183,18 @@ API 通过 OTLP/HTTP 输出 traces 与 metrics，并在加载 Nest、HTTP、Pris
 Provider：
 
 - `IM_PROVIDER=local`：开发/测试 sink，生产启用 Worker 时禁止；
-- `IM_PROVIDER=tencent`：需要 SDKAppID、管理员账号和 Secret，UserSig 只在服务端生成。
+- `IM_PROVIDER=tencent`：需要 SDKAppID、管理员账号和 Secret，UserSig 只在服务端生成；
+- `IM_PROVIDER=wukong`：通过 Outbox 调用 WuKongIM REST 发送，Electron 主进程使用
+  WebSocket 接收低延迟唤醒；租户、权限、消息正文和 Agent Run 仍以 PostgreSQL 为可信主数据。
 
-腾讯账号导入、回调 Inbox 和真实公网凭据验收仍未完成。桌面同步当前依赖可见性自适应轮询，而非腾讯客户端 SDK/WebSocket。
+WuKongIM 本地验收节点可用 `pnpm dev:im` 启动，并用
+`pnpm --filter @enterprise/desktop test:im:acceptance` 验证加密握手、实时送达、幂等重放和历史召回；
+`pnpm test:im:load` 运行上游 `wkbench` 容量测试。该节点只绑定 loopback，并开启仅供压测的
+Bench API。审计的上游提交尚未接通网关 Token verifier，REST API 也没有原生强制鉴权；生产环境
+必须通过内网认证代理隔离 REST，并采用已接通 Token 校验的网关版本。在此条件和源码许可证归属
+完成确认前，不得把本地验收配置用于生产。
+
+腾讯账号导入、回调 Inbox 和真实公网凭据验收仍未完成。
 
 ## 本地运行
 

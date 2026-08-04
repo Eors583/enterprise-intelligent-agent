@@ -164,6 +164,84 @@ describe('AuthRecoveryService token preflight', () => {
       }),
     );
   });
+
+  it('does not issue a reset token when the submitted email changed while waiting for the identity lock', async () => {
+    const config = recoveryConfig();
+    const tokens = new TokenService(config);
+    const create = vi.fn();
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      tenant: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: '00000000-0000-7000-8000-000000000001',
+          name: 'Tenant',
+          status: 'ACTIVE',
+        }),
+      },
+      user: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce({
+            id: '00000000-0000-7000-8000-000000000101',
+            email: 'old@example.test',
+            displayName: 'Member',
+          })
+          .mockResolvedValueOnce(null),
+      },
+      employment: { groupBy: vi.fn().mockResolvedValue([]) },
+      authActionToken: { create, updateMany: vi.fn() },
+    };
+    const prisma = {
+      enabled: true,
+      withAuth: <T>(operation: (value: typeof transaction) => Promise<T>) => operation(transaction),
+    } as unknown as AuthPrismaService;
+    const vault = secretVault();
+    const service = new AuthRecoveryService(prisma, {} as PasswordHasher, tokens, vault, config);
+
+    await expect(
+      service.requestPasswordReset({ tenantSlug: 'tenant', email: 'old@example.test' }),
+    ).resolves.toMatchObject({ accepted: true });
+    expect(create).not.toHaveBeenCalled();
+    expect(vault.encrypt).not.toHaveBeenCalled();
+  });
+
+  it('treats an external.invalid placeholder as an ineligible reset identity', async () => {
+    const config = recoveryConfig();
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      tenant: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: '00000000-0000-7000-8000-000000000001',
+          name: 'Tenant',
+          status: 'ACTIVE',
+        }),
+      },
+      user: { findFirst: vi.fn() },
+      employment: { groupBy: vi.fn() },
+      authActionToken: { create: vi.fn() },
+    };
+    const prisma = {
+      enabled: true,
+      withAuth: <T>(operation: (value: typeof transaction) => Promise<T>) => operation(transaction),
+    } as unknown as AuthPrismaService;
+    const service = new AuthRecoveryService(
+      prisma,
+      {} as PasswordHasher,
+      new TokenService(config),
+      secretVault(),
+      config,
+    );
+
+    await expect(
+      service.requestPasswordReset({
+        tenantSlug: 'tenant',
+        email: 'feishu-placeholder@external.invalid',
+      }),
+    ).resolves.toMatchObject({ accepted: true });
+    expect(transaction.user.findFirst).not.toHaveBeenCalled();
+    expect(transaction.employment.groupBy).not.toHaveBeenCalled();
+    expect(transaction.authActionToken.create).not.toHaveBeenCalled();
+  });
 });
 
 function secretVault(): IdentitySecretVault {

@@ -5,8 +5,10 @@ import {
   type AdminAgentUsageSummary,
   type AgentRunResponse,
   type AgentUsageLimits,
+  type CreateDepartmentAgentRequest,
   type UpdateAgentUsageLimitsRequest,
   type UpdateAdminAgentRequest,
+  createDepartmentAgentRequestSchema,
   updateAdminAgentRequestSchema,
   updateAgentUsageLimitsRequestSchema,
 } from '@enterprise/contracts';
@@ -46,6 +48,14 @@ export class AgentAdminController {
   reconcileUnknown(@Param('runId', new ParseUUIDPipe()) runId: string): Promise<AgentRunResponse> {
     const principal = this.access.requireDirectoryWrite();
     return this.runs.reconcileUnknown(principal.tenantId, principal.userId, runId);
+  }
+
+  @Post('departments')
+  createDepartment(
+    @Body(new SchemaValidationPipe(createDepartmentAgentRequestSchema))
+    request: CreateDepartmentAgentRequest,
+  ): Promise<AdminAgent> {
+    return this.agents.createDepartment(request);
   }
 
   @Patch(':id')

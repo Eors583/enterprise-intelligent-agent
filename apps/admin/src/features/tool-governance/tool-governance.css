@@ -310,6 +310,127 @@
   line-height: 1.5;
 }
 
+.tool-connection-wizard {
+  overflow: hidden;
+  border: 1px solid #d8dded;
+  border-radius: 14px;
+  background: #fbfcff;
+}
+
+.tool-connection-wizard > summary {
+  display: flex;
+  cursor: pointer;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 17px;
+  color: #3449bb;
+  font-weight: 750;
+}
+
+.tool-connection-wizard > summary small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.tool-connection-wizard[open] {
+  display: grid;
+  gap: 15px;
+  padding: 0 17px 17px;
+}
+
+.tool-connection-wizard[open] > summary {
+  margin: 0 -17px;
+  border-bottom: 1px solid #e4e7f2;
+}
+
+.tool-connection-boundary {
+  padding: 11px 13px;
+  color: #745713;
+  border: 1px solid #f1d690;
+  border-radius: 10px;
+  background: #fff9e9;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tool-schema-builder {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  align-content: start;
+  padding: 13px;
+  border: 1px solid var(--border);
+  border-radius: 11px;
+  background: white;
+}
+
+.tool-schema-builder > header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.tool-schema-builder > header select {
+  width: auto;
+}
+
+.tool-schema-builder > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.tool-schema-fields {
+  display: grid;
+  gap: 8px;
+}
+
+.tool-method-picker,
+.tool-sensitive-field-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid #dce4e2;
+  border-radius: 10px;
+}
+
+.tool-method-picker label,
+.tool-sensitive-field-picker label {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+}
+
+.tool-method-picker input,
+.tool-sensitive-field-picker input {
+  width: auto;
+}
+
+.tool-schema-field {
+  display: grid;
+  grid-template-columns: minmax(100px, 1fr) 92px minmax(130px, 1.5fr) auto auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.tool-schema-field > label,
+.tool-debug-toggle {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  align-items: center;
+  white-space: nowrap;
+}
+
+.tool-schema-field input[type='checkbox'],
+.tool-debug-toggle input {
+  width: auto;
+}
+
 @media (max-width: 1100px) {
   .tool-governance-layout {
     grid-template-columns: 1fr;
@@ -321,6 +442,10 @@
 
   .tool-definition-list > div:last-child {
     max-height: 320px;
+  }
+
+  .tool-schema-field {
+    grid-template-columns: minmax(100px, 1fr) 92px;
   }
 }
 

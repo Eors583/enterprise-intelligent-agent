@@ -62,6 +62,18 @@ describe('Agent Run policy snapshots', () => {
     expect(resolveAgentRunExecutionSnapshot(snapshot, version)).toBeNull();
   });
 
+  it('pins a validated per-Agent knowledge binding into the immutable Run snapshot', () => {
+    const version = agentVersion();
+    const snapshot = buildAgentRunPolicySnapshot({
+      agentVersion: version,
+      knowledgeScopeOverride: { knowledgeBaseIds: ['kb-department'] },
+    });
+
+    expect(resolveAgentRunExecutionSnapshot(snapshot, version)).toMatchObject({
+      knowledgeScope: { knowledgeBaseIds: ['kb-department'] },
+    });
+  });
+
   it('recognizes only a server-shaped controlled model connectivity probe marker', () => {
     const catalogVersionId = '00000000-0000-4000-8000-000000000004';
     const snapshot = buildAgentRunPolicySnapshot({

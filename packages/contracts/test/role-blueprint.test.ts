@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createRoleBlueprintRequestSchema,
+  createRoleVersionDraftRequestSchema,
   publishRoleVersionRequestSchema,
   reviewRoleVersionRequestSchema,
   rollbackRoleVersionResponseSchema,
@@ -92,6 +93,29 @@ describe('Role Blueprint contracts', () => {
       }),
     ).toMatchObject({ expectedRevision: 3 });
     expect(publishRoleVersionRequestSchema.safeParse({ expectedRevision: 3 }).success).toBe(false);
+  });
+
+  it('accepts only recognizable knowledge-base selections in a role version', () => {
+    const request = {
+      systemPrompt: 'Use only governed enterprise knowledge and cite every factual claim.',
+      modelPolicy: {},
+      toolPolicy: {},
+      changeSummary: 'Bind the approved policy knowledge base.',
+    };
+    expect(
+      createRoleVersionDraftRequestSchema.parse({
+        ...request,
+        knowledgeScope: {
+          knowledgeBaseIds: ['00000000-0000-7000-8000-000000000109'],
+        },
+      }).knowledgeScope.knowledgeBaseIds,
+    ).toEqual(['00000000-0000-7000-8000-000000000109']);
+    expect(
+      createRoleVersionDraftRequestSchema.safeParse({
+        ...request,
+        knowledgeScope: { knowledgeBaseIds: ['copied-name-not-an-id'] },
+      }).success,
+    ).toBe(false);
   });
 
   it('models rollback as a lineage draft that still requires independent review', () => {

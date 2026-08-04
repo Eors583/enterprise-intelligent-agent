@@ -5,6 +5,7 @@ vi.mock('@/api/client', () => ({ request: requestMock }));
 
 import {
   createDeliverableAcceptance,
+  createGuidedEvidence,
   createEvidenceLink,
   createObjectiveRelation,
   createProcessDefinition,
@@ -77,6 +78,31 @@ describe('business semantics admin API adapter', () => {
         expect.objectContaining({ signal: controller.signal, schema: expect.anything() }),
       );
     }
+  });
+
+  it('submits the business-facing Evidence form without technical identity fields', async () => {
+    await createGuidedEvidence({
+      sourceType: 'DOCUMENT',
+      sourceName: '2026 年客户服务复盘',
+      sourceUri: 'https://knowledge.example.local/customer-service',
+      observedAt: now,
+      summary: '复盘确认客户响应时间缩短，并保留可追溯来源。',
+      trustLevel: 'MEDIUM',
+      retentionDays: 365,
+    });
+
+    expect(requestMock).toHaveBeenCalledWith(
+      '/admin/business-semantics/evidence/guided',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.not.objectContaining({
+          code: expect.anything(),
+          contentHash: expect.anything(),
+          owner: expect.anything(),
+          permissionLabels: expect.anything(),
+        }),
+      }),
+    );
   });
 
   it('creates Value and Process identities and publishes nested versions through exact routes', async () => {

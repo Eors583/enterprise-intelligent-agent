@@ -113,7 +113,7 @@ export const competencyVersionSchema = z.object({
 });
 
 export const createCompetencyDefinitionRequestSchema = z.object({
-  code: CODE,
+  code: CODE.optional(),
   name: NAME,
   category: competencyCategorySchema,
   description: TEXT,
@@ -484,7 +484,7 @@ export const triangleTeamSchema = z.object({
 
 export const createTriangleTeamRequestSchema = z
   .object({
-    code: CODE,
+    code: CODE.optional(),
     name: NAME,
     objectiveId: UUID,
     objectiveVersion: z.number().int().positive(),

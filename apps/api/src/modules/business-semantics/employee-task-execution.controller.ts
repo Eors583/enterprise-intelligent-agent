@@ -1,13 +1,17 @@
 import { Body, Controller, Get, Headers, Inject, Param, ParseUUIDPipe, Post } from '@nestjs/common';
 import {
   employeeAcceptanceRequestInputSchema,
+  employeeDeliverableSubmissionCommandSchema,
   employeeDeliverableSubmissionRequestSchema,
+  employeeEvidenceContributionCommandSchema,
   employeeEvidenceContributionRequestSchema,
   employeeTaskTransitionRequestSchema,
   type Deliverable,
   type EmployeeAcceptanceRequest,
   type EmployeeAcceptanceRequestInput,
+  type EmployeeDeliverableSubmissionCommand,
   type EmployeeDeliverableSubmissionRequest,
+  type EmployeeEvidenceContributionCommand,
   type EmployeeEvidenceContributionRequest,
   type EmployeeTaskExecutionSnapshot,
   type EmployeeTaskTransitionRequest,
@@ -53,6 +57,17 @@ export class EmployeeTaskExecutionController {
     return this.execution.submitDeliverable(taskId, deliverableId, request, idempotencyKey);
   }
 
+  @Post('deliverables/:deliverableId/submissions')
+  submitDeliverableCommand(
+    @Param('taskId', new ParseUUIDPipe()) taskId: string,
+    @Param('deliverableId', new ParseUUIDPipe()) deliverableId: string,
+    @Body(new SchemaValidationPipe(employeeDeliverableSubmissionCommandSchema))
+    request: EmployeeDeliverableSubmissionCommand,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<Deliverable> {
+    return this.execution.submitDeliverableCommand(taskId, deliverableId, request, idempotencyKey);
+  }
+
   @Post('evidence')
   contributeEvidence(
     @Param('taskId', new ParseUUIDPipe()) taskId: string,
@@ -61,6 +76,16 @@ export class EmployeeTaskExecutionController {
     @Headers('idempotency-key') idempotencyKey?: string,
   ): Promise<Evidence> {
     return this.execution.contributeEvidence(taskId, request, idempotencyKey);
+  }
+
+  @Post('evidence/contributions')
+  contributeEvidenceCommand(
+    @Param('taskId', new ParseUUIDPipe()) taskId: string,
+    @Body(new SchemaValidationPipe(employeeEvidenceContributionCommandSchema))
+    request: EmployeeEvidenceContributionCommand,
+    @Headers('idempotency-key') idempotencyKey?: string,
+  ): Promise<Evidence> {
+    return this.execution.contributeEvidenceCommand(taskId, request, idempotencyKey);
   }
 
   @Post('deliverables/:deliverableId/acceptance-requests')

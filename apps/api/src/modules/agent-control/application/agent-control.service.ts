@@ -3,7 +3,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { TenantContext } from '../../../common/context/tenant-context.js';
 import { AuthorizationService } from '../../authorization/authorization.service.js';
 import { canContactMemberAgent } from '../domain/agent-access.policy.js';
-import type { MemberAgent } from '../domain/agent.models.js';
+import type { DepartmentAgent, MemberAgent } from '../domain/agent.models.js';
 import { AgentRepository } from '../domain/agent.repository.js';
 
 @Injectable()
@@ -45,5 +45,28 @@ export class AgentControlService {
         risk: 'LOW',
       }).allowed;
     });
+  }
+
+  async listDepartmentAgents(): Promise<readonly DepartmentAgent[]> {
+    const principal = this.context.current;
+    this.authorization.requireCurrent({
+      action: 'agent.list',
+      resourceTenantId: principal.tenantId,
+      risk: 'LOW',
+    });
+    const agents = await this.repository.listDepartmentAgents(principal.tenantId, principal.userId);
+    return agents.filter(
+      (agent) =>
+        this.authorization.decideCurrent({
+          action: 'agent.use',
+          resourceTenantId: agent.tenantId,
+          taskContext: {
+            resourceAgentId: agent.id,
+            resourceOwnerUserId: null,
+            resourceVisibility: 'tenant',
+          },
+          risk: 'LOW',
+        }).allowed,
+    );
   }
 }

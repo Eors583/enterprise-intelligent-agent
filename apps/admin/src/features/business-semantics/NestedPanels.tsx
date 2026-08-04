@@ -476,6 +476,11 @@ function DeliverableDetail({
           新建验收
         </button>
       </div>
+      {deliverable.status === 'DRAFT' ? (
+        <p className="semantic-subsection-empty">
+          交付物请在员工任务工作台通过上传文件、选择现有文档或填写资料链接提交，系统会生成校验信息并关联可信证据。
+        </p>
+      ) : null}
       <section className="acceptance-section">
         <header>
           <strong>验收决定</strong>
@@ -808,21 +813,7 @@ function transitionDeliverableConfig(
   deliverable: Deliverable,
 ): ContractJsonEditorConfig | null {
   if (deliverable.status === 'DRAFT') {
-    return editor<TransitionDeliverableRequest>({
-      title: `提交 ${deliverable.code}`,
-      description: '提交必须同时记录 artifact URI、SHA-256 和至少一条 Evidence。',
-      initialValue: {
-        expectedRevision: deliverable.revision,
-        action: 'SUBMIT',
-        submittedAt: new Date().toISOString(),
-        artifactUri: 'https://replace.example/artifact',
-        contentHash: '0'.repeat(64),
-        evidenceIds: ['<evidence-id>'],
-      },
-      schema: transitionDeliverableRequestSchema,
-      submitLabel: '提交 Deliverable',
-      submit: (input) => transitionTaskDeliverable(task.id, deliverable.id, input),
-    });
+    return null;
   }
   if (deliverable.status === 'SUBMITTED') {
     return editor<TransitionDeliverableRequest>({

@@ -15,6 +15,113 @@ const memberId = '00000000-0000-7000-8000-000000000102';
 const invitationId = '00000000-0000-7000-8000-000000000201';
 
 describe('MemberInvitationService directory activation', () => {
+  it('uses the passwordless invitation flow and generates an unknowable placeholder credential', async () => {
+    const now = new Date();
+    const user = {
+      id: memberId,
+      tenantId,
+      email: 'member@example.test',
+      emailNormalized: 'member@example.test',
+      displayName: 'Invited member',
+      status: 'INACTIVE',
+      role: 'MEMBER',
+    };
+    const invitation = {
+      id: invitationId,
+      tenantId,
+      userId: memberId,
+      purpose: 'MEMBER_INVITATION',
+      tokenHash: 'a'.repeat(64),
+      deliveryTargetEmail: 'member@example.test',
+      deliveryTargetEvidence: 'ISSUED',
+      deliveryStatus: 'PENDING',
+      deliveryAttempts: 0,
+      lastDeliveryAt: null,
+      expiresAt: new Date(now.getTime() + 60_000),
+      consumedAt: null,
+      revokedAt: null,
+      createdById: administratorId,
+      createdAt: now,
+      updatedAt: now,
+      user,
+    };
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ locked: 1 }]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      organization: { findFirst: vi.fn().mockResolvedValue({ id: invitationId }) },
+      orgUnit: { findFirst: vi.fn().mockResolvedValue({ id: invitationId }) },
+      user: { create: vi.fn().mockResolvedValue(user) },
+      passwordCredential: { create: vi.fn().mockResolvedValue({}) },
+      employment: { create: vi.fn().mockResolvedValue({}) },
+      authActionToken: {
+        create: vi.fn().mockResolvedValue(invitation),
+        update: vi.fn().mockResolvedValue({ ...invitation, deliveryStatus: 'SENT' }),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      tenant: { findUniqueOrThrow: vi.fn().mockResolvedValue({ name: 'Test tenant' }) },
+    };
+    const prisma = {
+      withTenant: <T>(
+        _tenantId: string,
+        operation: (value: typeof transaction) => Promise<T>,
+      ): Promise<T> => operation(transaction),
+    } as unknown as AdminPrismaService;
+    const passwords = {
+      hash: vi.fn().mockResolvedValue('scrypt$server-generated-placeholder'),
+    };
+    const service = new MemberInvitationService(
+      prisma,
+      {
+        requireDirectoryWrite: () => ({
+          tenantId,
+          userId: administratorId,
+          role: 'ADMIN',
+          authenticationSource: 'session',
+        }),
+        assertCanAssignRole: vi.fn(),
+      } as unknown as AdminAccessService,
+      passwords as unknown as PasswordHasher,
+      {
+        issueAction: () => ({
+          value: `ea_invite_${'x'.repeat(43)}`,
+          hash: 'a'.repeat(64),
+        }),
+      } as unknown as TokenService,
+      {
+        sendMemberInvitation: vi.fn().mockResolvedValue('SENT'),
+      } as unknown as AuthRecoveryNotificationService,
+      invitationConfig(),
+    );
+
+    await expect(
+      service.invite({
+        email: 'member@example.test',
+        displayName: 'Invited member',
+        role: 'MEMBER',
+        orgUnitId: invitationId,
+      }),
+    ).resolves.toMatchObject({
+      memberId,
+      email: 'member@example.test',
+      deliveryKind: 'EMAIL_SENT',
+    });
+
+    const generatedSecret = passwords.hash.mock.calls[0]?.[0];
+    expect(generatedSecret).toEqual(expect.any(String));
+    expect(generatedSecret).toHaveLength(43);
+    expect(transaction.user.create).toHaveBeenCalledWith({
+      data: expect.not.objectContaining({ password: expect.anything() }),
+    });
+    expect(transaction.passwordCredential.create).toHaveBeenCalledWith({
+      data: {
+        tenantId,
+        userId: memberId,
+        passwordHash: 'scrypt$server-generated-placeholder',
+        mustChangePassword: true,
+      },
+    });
+  });
+
   it('sends a one-time invitation to the unique work email without creating a shared credential', async () => {
     const now = new Date();
     const invitation = {
@@ -23,6 +130,8 @@ describe('MemberInvitationService directory activation', () => {
       userId: memberId,
       purpose: 'MEMBER_INVITATION',
       tokenHash: 'a'.repeat(64),
+      deliveryTargetEmail: 'member@example.test',
+      deliveryTargetEvidence: 'ISSUED',
       deliveryStatus: 'PENDING',
       deliveryAttempts: 0,
       lastDeliveryAt: null,
@@ -180,6 +289,114 @@ describe('MemberInvitationService directory activation', () => {
       ConflictException,
     );
     expect(transaction.authActionToken.create).not.toHaveBeenCalled();
+  });
+
+  it('requires an administrator-provided real email instead of a Feishu placeholder', async () => {
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ locked: 1 }]),
+      user: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: memberId,
+          role: 'MEMBER',
+          passwordCredential: null,
+          employments: [{ workEmail: 'feishu-placeholder@external.invalid' }],
+        }),
+      },
+      authActionToken: { create: vi.fn(), updateMany: vi.fn() },
+    };
+    const prisma = {
+      withTenant: <T>(
+        _tenantId: string,
+        operation: (value: typeof transaction) => Promise<T>,
+      ): Promise<T> => operation(transaction),
+    } as unknown as AdminPrismaService;
+    const service = new MemberInvitationService(
+      prisma,
+      {
+        requireDirectoryWrite: () => ({
+          tenantId,
+          userId: administratorId,
+          role: 'ADMIN',
+          authenticationSource: 'session',
+        }),
+        assertCanManageMember: vi.fn(),
+      } as unknown as AdminAccessService,
+      {} as PasswordHasher,
+      {
+        issueAction: () => ({
+          value: `ea_invite_${'x'.repeat(43)}`,
+          hash: 'a'.repeat(64),
+        }),
+      } as unknown as TokenService,
+      {} as AuthRecoveryNotificationService,
+      invitationConfig(),
+    );
+
+    await expect(service.issueForDirectoryMember(memberId)).rejects.toThrow(
+      'Set a real login email',
+    );
+    expect(transaction.authActionToken.updateMany).not.toHaveBeenCalled();
+    expect(transaction.authActionToken.create).not.toHaveBeenCalled();
+  });
+
+  it('lists the immutable delivery target instead of the synthetic directory identity', async () => {
+    const now = new Date();
+    const transaction = {
+      authActionToken: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: invitationId,
+            tenantId,
+            userId: memberId,
+            purpose: 'MEMBER_INVITATION',
+            tokenHash: 'a'.repeat(64),
+            deliveryTargetEmail: 'member@example.test',
+            deliveryTargetEvidence: 'ISSUED',
+            deliveryStatus: 'SENT',
+            deliveryAttempts: 1,
+            lastDeliveryAt: now,
+            expiresAt: new Date(now.getTime() + 60_000),
+            consumedAt: null,
+            revokedAt: null,
+            createdById: administratorId,
+            createdAt: now,
+            updatedAt: now,
+            user: {
+              email: 'feishu-placeholder@external.invalid',
+              displayName: 'Directory member',
+            },
+          },
+        ]),
+      },
+    };
+    const prisma = {
+      withTenant: <T>(
+        _tenantId: string,
+        operation: (value: typeof transaction) => Promise<T>,
+      ): Promise<T> => operation(transaction),
+    } as unknown as AdminPrismaService;
+    const service = new MemberInvitationService(
+      prisma,
+      {
+        requireDirectoryRead: () => ({
+          tenantId,
+          userId: administratorId,
+          role: 'ADMIN',
+          authenticationSource: 'session',
+        }),
+      } as unknown as AdminAccessService,
+      {} as PasswordHasher,
+      {} as TokenService,
+      {} as AuthRecoveryNotificationService,
+      invitationConfig(),
+    );
+
+    await expect(service.list()).resolves.toEqual([
+      expect.objectContaining({
+        email: 'member@example.test',
+        deliveryTargetEvidence: 'ISSUED',
+      }),
+    ]);
   });
 });
 

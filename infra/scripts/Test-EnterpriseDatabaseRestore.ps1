@@ -473,7 +473,49 @@ ROLLBACK;
   $authActionTokenRolePolicies = Invoke-TargetScalar (Get-EnterpriseAuthActionTokenPolicyIntegritySql)
   $agentRunUsageConstraints = Invoke-TargetScalar (Get-EnterpriseAgentRunUsageConstraintsSql)
   $authActionTokenKeys = Invoke-TargetScalar (Get-EnterpriseAuthActionTokenKeyConstraintsSql)
-  $authActionTokenCheckConstraints = Invoke-TargetScalar (Get-EnterpriseAuthActionTokenCheckConstraintsSql)
+  $authActionTokenCheckConstraintsSql = Get-EnterpriseAuthActionTokenCheckConstraintsSql
+  $authActionTokenCheckConstraints = Invoke-TargetScalar $authActionTokenCheckConstraintsSql
+  $authActionTokenDeliveryTargetSql = Get-EnterpriseAuthActionTokenDeliveryTargetIntegritySql
+  $authActionTokenDeliveryTargetIntegrity =
+    Invoke-TargetScalar $authActionTokenDeliveryTargetSql
+  $authActionTokenDeliveryEvidenceConstraintNegativeControl = 'f'
+  $authActionTokenDeliveryTargetTriggerNegativeControl = 'f'
+  $authActionTokenDeliveryTargetAclNegativeControl = 'f'
+  $authActionTokenDeliveryTargetRestoredAfterControl = 'f'
+  if (
+    $authActionTokenCheckConstraints -eq 't' -and
+    $authActionTokenDeliveryTargetIntegrity -eq 't'
+  ) {
+    $embeddedAuthActionTokenChecksSql =
+      $authActionTokenCheckConstraintsSql.Trim().TrimEnd(';')
+    $embeddedAuthActionTokenDeliveryTargetSql =
+      $authActionTokenDeliveryTargetSql.Trim().TrimEnd(';')
+    $authActionTokenDeliveryEvidenceConstraintNegativeControl = Invoke-TargetScalar @"
+BEGIN;
+ALTER TABLE public.auth_action_tokens
+  DROP CONSTRAINT auth_action_tokens_delivery_target_evidence_check;
+SELECT NOT ($embeddedAuthActionTokenChecksSql);
+ROLLBACK;
+"@
+    $authActionTokenDeliveryTargetTriggerNegativeControl = Invoke-TargetScalar @"
+BEGIN;
+ALTER TABLE public.auth_action_tokens
+  DISABLE TRIGGER auth_action_tokens_delivery_target_immutable;
+SELECT NOT ($embeddedAuthActionTokenDeliveryTargetSql);
+ROLLBACK;
+"@
+    $authActionTokenDeliveryTargetAclNegativeControl = Invoke-TargetScalar @"
+BEGIN;
+GRANT EXECUTE ON FUNCTION
+  public.enforce_auth_action_token_delivery_target_immutable() TO PUBLIC;
+SELECT NOT ($embeddedAuthActionTokenDeliveryTargetSql);
+ROLLBACK;
+"@
+    $authActionTokenDeliveryTargetRestoredAfterControl = Invoke-TargetScalar @"
+SELECT ($embeddedAuthActionTokenChecksSql)
+  AND ($embeddedAuthActionTokenDeliveryTargetSql);
+"@
+  }
   $authActionTokenActiveIndex = Invoke-TargetScalar (Get-EnterpriseAuthActionTokenActiveIndexSql)
   $authActionTokenSupportingIndexes = Invoke-TargetScalar (Get-EnterpriseAuthActionTokenSupportingIndexesSql)
   $agentRunStreamIntegrity = Invoke-TargetScalar (Get-EnterpriseAgentRunStreamIntegritySql)
@@ -608,6 +650,12 @@ ROLLBACK;
     authActionTokenRolePolicies = $authActionTokenRolePolicies -eq 't'
     authActionTokenKeys = $authActionTokenKeys -eq 't'
     authActionTokenCheckConstraints = $authActionTokenCheckConstraints -eq 't'
+    authActionTokenDeliveryTargetIntegrity = $authActionTokenDeliveryTargetIntegrity -eq 't'
+    authActionTokenDeliveryTargetNegativeControls = `
+      $authActionTokenDeliveryEvidenceConstraintNegativeControl -eq 't' -and `
+      $authActionTokenDeliveryTargetTriggerNegativeControl -eq 't' -and `
+      $authActionTokenDeliveryTargetAclNegativeControl -eq 't' -and `
+      $authActionTokenDeliveryTargetRestoredAfterControl -eq 't'
     authActionTokenActiveIndex = $authActionTokenActiveIndex -eq 't'
     authActionTokenSupportingIndexes = $authActionTokenSupportingIndexes -eq 't'
     agentRunStreamIntegrity = $agentRunStreamIntegrity -eq 't'

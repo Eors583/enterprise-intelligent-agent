@@ -1,10 +1,21 @@
-import type { AiEvaluationBadCase, AiEvaluationCategory } from '@enterprise/contracts';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import type { AiEvaluationBadCase, AiEvaluationCategory, Evidence } from '@enterprise/contracts';
+import { useEffect, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
 import { messageFromError } from '@/api/client';
 import { StatusPill } from '@/components/ui';
+import { listEvidence } from '@/features/business-semantics/api';
 
-import { ingestEvaluationBadCase, triageEvaluationBadCase } from './api';
+import {
+  ingestEvaluationBadCase,
+  listEvaluationDatasets,
+  listEvaluationDatasetVersions,
+  triageEvaluationBadCase,
+} from './api';
+import {
+  parseBadCaseLineagePackage,
+  selectedFormValues,
+  type BadCaseLineagePackage,
+} from './governance-form';
 import { badCaseStatusLabel, EVALUATION_CATEGORIES, parseUuidList } from './view';
 
 export function BadCaseGovernancePanel({
@@ -19,6 +30,65 @@ export function BadCaseGovernancePanel({
   onError: (message: string) => void;
 }): ReactNode {
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [lineagePackage, setLineagePackage] = useState<BadCaseLineagePackage | null>(null);
+  const [packageError, setPackageError] = useState<string | null>(null);
+  const [evidence, setEvidence] = useState<readonly Evidence[]>([]);
+  const [draftVersions, setDraftVersions] = useState<ReadonlyArray<{ id: string; label: string }>>(
+    [],
+  );
+  const verifiedEvidence = evidence.filter(
+    (item) => item.status === 'ACTIVE' && item.trustLevel === 'VERIFIED',
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void Promise.all([
+      listEvidence(controller.signal),
+      listEvaluationDatasets({ limit: 100 }, controller.signal),
+    ])
+      .then(async ([evidenceItems, datasetResponse]) => {
+        const versionResponses = await Promise.all(
+          datasetResponse.items.map(async (dataset) => ({
+            dataset,
+            versions: await listEvaluationDatasetVersions(
+              dataset.id,
+              { limit: 100 },
+              controller.signal,
+            ),
+          })),
+        );
+        if (controller.signal.aborted) return;
+        setEvidence(evidenceItems);
+        setDraftVersions(
+          versionResponses.flatMap(({ dataset, versions }) =>
+            versions.items
+              .filter((version) => version.status === 'DRAFT')
+              .map((version) => ({
+                id: version.id,
+                label: `${dataset.code} · ${dataset.name} · v${version.version}`,
+              })),
+          ),
+        );
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) {
+          onError(`坏样本引用目录加载失败：${messageFromError(caught)}`);
+        }
+      });
+    return () => controller.abort();
+  }, [onError]);
+
+  const importLineage = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.target.files?.[0];
+    setPackageError(null);
+    setLineagePackage(null);
+    if (!file) return;
+    try {
+      setLineagePackage(parseBadCaseLineagePackage(await file.text()));
+    } catch (caught) {
+      setPackageError(messageFromError(caught));
+    }
+  };
 
   const ingest = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -26,18 +96,26 @@ export function BadCaseGovernancePanel({
     const data = new FormData(form);
     setBusyId('ingest');
     try {
+      if (lineagePackage === null) {
+        throw new Error('请先导入由 Runner 或来源系统导出的坏样本结果包。');
+      }
       await ingestEvaluationBadCase({
-        sourceType: text(data, 'sourceType') as
-          'AGENT_RUN' | 'CORRECTION' | 'TOOL_INVOCATION' | 'SECURITY_EVENT',
-        sourceId: text(data, 'sourceId'),
-        sourceVersion: Number(text(data, 'sourceVersion')),
+        sourceType: lineagePackage.sourceType,
+        sourceId: lineagePackage.sourceId,
+        sourceVersion: lineagePackage.sourceVersion,
         category: text(data, 'category') as AiEvaluationCategory,
         sanitizedInput: text(data, 'sanitizedInput'),
-        sourceSnapshotHash: text(data, 'sourceSnapshotHash'),
-        evidenceIds: parseUuidList(text(data, 'evidenceIds'), '坏样本证据'),
+        sourceSnapshotHash: lineagePackage.sourceSnapshotHash,
+        evidenceIds: [
+          ...new Set([
+            ...selectedFormValues(data, 'evidenceIds'),
+            ...parseUuidList(text(data, 'evidenceIdsOverride'), '兼容坏样本证据'),
+          ]),
+        ],
         idempotencyKey: crypto.randomUUID(),
       });
       form.reset();
+      setLineagePackage(null);
       reload();
       onNotice('坏样本候选已入队；它仍需独立分流，不能直接污染评测数据集。');
     } catch (caught) {
@@ -56,12 +134,16 @@ export function BadCaseGovernancePanel({
     const action = text(data, 'action') as 'ADD_TO_DATASET' | 'DISMISS';
     setBusyId(badCase.id);
     try {
+      const datasetVersionId = text(data, 'datasetVersionId');
+      if (action === 'ADD_TO_DATASET' && !datasetVersionId) {
+        throw new Error('当前没有可分流的真实草稿版本；请先创建数据集草稿。');
+      }
       await triageEvaluationBadCase(
         badCase.id,
         action === 'ADD_TO_DATASET'
           ? {
               action,
-              datasetVersionId: text(data, 'datasetVersionId'),
+              datasetVersionId,
               expectedRevision: badCase.revision,
               reason: text(data, 'reason'),
               idempotencyKey: crypto.randomUUID(),
@@ -111,24 +193,47 @@ export function BadCaseGovernancePanel({
 
       <form className="card evaluation-form" onSubmit={(event) => void ingest(event)}>
         <h3>手工接收受控坏样本</h3>
+        <label>
+          坏样本来源结果包
+          <input
+            type="file"
+            accept="application/json,.json"
+            aria-label="坏样本来源结果包"
+            onChange={(event) => void importLineage(event)}
+          />
+          <small>
+            JSON 结果包由 Runner 或来源系统导出，必须包含 sourceType、sourceId、sourceVersion 和
+            sourceSnapshotHash；页面不会生成来源或快照。
+          </small>
+        </label>
+        {packageError ? <p role="alert">{packageError}</p> : null}
+        {lineagePackage ? (
+          <dl className="evaluation-definition">
+            <div>
+              <dt>来源</dt>
+              <dd>{lineagePackage.sourceType}</dd>
+            </div>
+            <div>
+              <dt>版本</dt>
+              <dd>v{lineagePackage.sourceVersion}</dd>
+            </div>
+            <div>
+              <dt>来源 ID</dt>
+              <dd>
+                <code>{lineagePackage.sourceId}</code>
+              </dd>
+            </div>
+            <div>
+              <dt>快照</dt>
+              <dd>
+                <code>{lineagePackage.sourceSnapshotHash.slice(0, 16)}…</code>
+              </dd>
+            </div>
+          </dl>
+        ) : (
+          <p>尚未导入可信来源结果包，接收操作将被阻断。</p>
+        )}
         <div className="evaluation-three-column">
-          <label>
-            来源类型
-            <select name="sourceType" defaultValue="AGENT_RUN">
-              <option value="AGENT_RUN">Agent Run</option>
-              <option value="CORRECTION">纠错</option>
-              <option value="TOOL_INVOCATION">工具调用</option>
-              <option value="SECURITY_EVENT">安全事件</option>
-            </select>
-          </label>
-          <label>
-            来源 ID
-            <input name="sourceId" required />
-          </label>
-          <label>
-            来源版本
-            <input name="sourceVersion" type="number" min="1" defaultValue="1" required />
-          </label>
           <label>
             类别
             <select name="category" defaultValue="FACTUALITY">
@@ -150,12 +255,17 @@ export function BadCaseGovernancePanel({
           />
         </label>
         <label>
-          来源快照 SHA-256
-          <input name="sourceSnapshotHash" required minLength={64} maxLength={64} />
-        </label>
-        <label>
-          已验证证据 ID
-          <textarea name="evidenceIds" required rows={2} />
+          已验证证据
+          <select name="evidenceIds" multiple size={Math.min(6, verifiedEvidence.length + 1)}>
+            {verifiedEvidence.map((item) => (
+              <option key={item.id} value={item.id}>
+                {item.code} · {item.summary}
+              </option>
+            ))}
+          </select>
+          {verifiedEvidence.length === 0 ? (
+            <small>当前没有 ACTIVE + VERIFIED 证据，接收操作将被 API 阻断。</small>
+          ) : null}
         </label>
         <button className="button primary" type="submit" disabled={busyId !== null}>
           接收候选
@@ -216,8 +326,18 @@ export function BadCaseGovernancePanel({
                   </select>
                 </label>
                 <label>
-                  草稿数据集版本 ID（忽略时可留空）
-                  <input name="datasetVersionId" />
+                  真实草稿数据集版本（忽略时可留空）
+                  <select name="datasetVersionId" defaultValue="">
+                    <option value="">请选择草稿版本</option>
+                    {draftVersions.map((version) => (
+                      <option key={version.id} value={version.id}>
+                        {version.label}
+                      </option>
+                    ))}
+                  </select>
+                  {draftVersions.length === 0 ? (
+                    <small>当前没有草稿版本；“加入草稿数据集”会被明确阻断。</small>
+                  ) : null}
                 </label>
                 <label>
                   分流理由

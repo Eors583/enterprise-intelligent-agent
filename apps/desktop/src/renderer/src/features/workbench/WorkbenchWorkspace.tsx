@@ -32,6 +32,7 @@ interface WorkbenchSidebarProps {
   isError: boolean;
   error: unknown;
   isRefreshing: boolean;
+  onShowOverview?: (() => void) | undefined;
   onSelectObjective: (objectiveId: string) => void;
   onSelectTask: (taskId: string) => void;
   onRetry: () => void;
@@ -46,6 +47,7 @@ export function WorkbenchSidebar({
   isError,
   error,
   isRefreshing,
+  onShowOverview,
   onSelectObjective,
   onSelectTask,
   onRetry,
@@ -137,6 +139,22 @@ export function WorkbenchSidebar({
         </button>
       </header>
       <p className="workbench-sidebar-intro">只展示当前账号经服务端授权返回的目标和任务。</p>
+      {onShowOverview && (
+        <button
+          type="button"
+          className={
+            selectedTaskId === null ? 'workbench-overview-link selected' : 'workbench-overview-link'
+          }
+          aria-current={selectedTaskId === null ? 'page' : undefined}
+          onClick={onShowOverview}
+        >
+          <span>工</span>
+          <span>
+            <strong>工作台概览</strong>
+            <small>目标、待办、协作与最近交付</small>
+          </span>
+        </button>
+      )}
 
       {isError ? (
         <div className="workbench-sidebar-error" role="alert">

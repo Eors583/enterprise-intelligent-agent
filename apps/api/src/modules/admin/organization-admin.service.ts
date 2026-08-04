@@ -399,127 +399,196 @@ export class OrganizationAdminService {
 
   async updateMember(id: string, request: UpdateMemberRequest): Promise<AdminMember> {
     const principal = this.access.requireDirectoryWrite();
-    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
-      const organization = await this.findOrganization(transaction, principal.tenantId);
-      await lockOrganizationDirectory(transaction, principal.tenantId, organization.id);
-      const current = await transaction.user.findFirst({
-        where: { id, tenantId: principal.tenantId },
-        include: {
-          directoryBindings: { take: 1 },
-          employments: {
-            where: { organizationId: organization.id },
-            orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-            take: 1,
-            include: { position: true },
+    try {
+      return await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        const organization = await this.findOrganization(transaction, principal.tenantId);
+        await lockOrganizationDirectory(transaction, principal.tenantId, organization.id);
+        const current = await transaction.user.findFirst({
+          where: { id, tenantId: principal.tenantId },
+          include: {
+            directoryBindings: { take: 1 },
+            employments: {
+              where: { organizationId: organization.id },
+              orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
+              take: 1,
+              include: { position: true },
+            },
           },
-        },
-      });
-      if (current === null) throw memberNotFound();
-      if (
-        current.directoryBindings.length > 0 &&
-        current.role !== 'OWNER' &&
-        request.role === 'OWNER'
-      ) {
-        throw new ConflictException('飞书导入成员尚未绑定本地登录身份，不能被设为企业所有者。');
-      }
-      if (
-        current.directoryBindings.length > 0 &&
-        (request.displayName !== undefined ||
-          request.orgUnitId !== undefined ||
-          request.title !== undefined ||
-          request.status !== undefined)
-      ) {
-        throw new ConflictException('该成员的姓名、部门、职位和在职状态由飞书通讯录管理。');
-      }
-
-      this.access.assertCanManageMember(principal, current.role);
-      if (request.role !== undefined) this.access.assertCanAssignRole(principal, request.role);
-      await this.assertOwnerContinuity(transaction, principal, current.role, request);
-
-      await transaction.user.update({
-        where: { id: current.id },
-        data: {
-          ...(request.displayName === undefined ? {} : { displayName: request.displayName }),
-          ...(request.role === undefined ? {} : { role: request.role }),
-          ...(request.status === undefined ? {} : { status: request.status }),
-        },
-      });
-
-      if (request.status !== undefined && request.status !== 'ACTIVE') {
-        const revokedAt = new Date();
-        await transaction.authSession.updateMany({
-          where: {
-            tenantId: principal.tenantId,
-            userId: current.id,
-            revokedAt: null,
-          },
-          data: { revokedAt },
         });
-        await transaction.authActionToken.updateMany({
-          where: {
-            tenantId: principal.tenantId,
-            userId: current.id,
-            consumedAt: null,
-            revokedAt: null,
-          },
-          data: { revokedAt },
-        });
-      }
+        if (current === null) throw memberNotFound();
+        const directoryManaged = current.directoryBindings.length > 0;
+        const requestedEmail =
+          request.email === undefined ? undefined : normalizeLoginEmail(request.email);
+        if (directoryManaged && current.role !== 'OWNER' && request.role === 'OWNER') {
+          throw new ConflictException('飞书导入成员尚未绑定本地登录身份，不能被设为企业所有者。');
+        }
+        if (
+          directoryManaged &&
+          (request.displayName !== undefined ||
+            request.orgUnitId !== undefined ||
+            request.title !== undefined ||
+            request.status !== undefined)
+        ) {
+          throw new ConflictException('该成员的姓名、部门、职位和在职状态由飞书通讯录管理。');
+        }
 
-      const employment = current.employments[0];
-      if (
-        (request.orgUnitId !== undefined || request.title !== undefined) &&
-        employment === undefined
-      ) {
-        throw new ConflictException('The member has no employment to update.');
-      }
-      if (
-        employment !== undefined &&
-        (request.orgUnitId !== undefined ||
-          request.title !== undefined ||
-          request.status !== undefined)
-      ) {
-        const targetOrgUnitId = request.orgUnitId ?? employment.orgUnitId;
-        if (request.orgUnitId !== undefined) {
-          await this.requireActiveOrgUnit(
+        this.access.assertCanManageMember(principal, current.role);
+        if (request.role !== undefined) this.access.assertCanAssignRole(principal, request.role);
+        await this.assertOwnerContinuity(transaction, principal, current.role, request);
+        const accountDisabled = request.status !== undefined && request.status !== 'ACTIVE';
+        if (requestedEmail !== undefined || accountDisabled) {
+          await lockMemberPasswordFlow(transaction, principal.tenantId, current.id);
+        }
+        if (requestedEmail !== undefined) {
+          assertRealLoginEmail(requestedEmail);
+          await this.assertMemberEmailAvailable(
             transaction,
             principal.tenantId,
-            organization.id,
-            request.orgUnitId,
+            current.id,
+            requestedEmail,
           );
         }
-        const resultingTitle = request.title ?? employment.position?.name;
-        const positionId =
-          resultingTitle === undefined
-            ? employment.positionId
-            : await this.upsertMemberPosition(
-                transaction,
-                principal.tenantId,
-                organization.id,
-                current.id,
-                targetOrgUnitId,
-                resultingTitle,
-              );
-        await transaction.employment.update({
-          where: { id: employment.id },
+
+        const currentEmployments =
+          requestedEmail === undefined
+            ? []
+            : await transaction.employment.findMany({
+                where: {
+                  tenantId: principal.tenantId,
+                  userId: current.id,
+                  status: { not: 'TERMINATED' },
+                },
+                select: { workEmail: true },
+              });
+        const previousEmail = current.employments[0]?.workEmail ?? current.email;
+        const emailChanged =
+          requestedEmail !== undefined &&
+          (normalizeLoginEmail(current.email) !== requestedEmail ||
+            normalizeLoginEmail(previousEmail) !== requestedEmail ||
+            currentEmployments.some(
+              ({ workEmail }) =>
+                workEmail === null || normalizeLoginEmail(workEmail) !== requestedEmail,
+            ));
+
+        await transaction.user.update({
+          where: { id: current.id },
           data: {
-            ...(request.orgUnitId === undefined ? {} : { orgUnitId: request.orgUnitId }),
-            ...(positionId === employment.positionId ? {} : { positionId }),
-            ...(request.status === undefined
+            ...(requestedEmail === undefined
               ? {}
-              : { status: request.status === 'ACTIVE' ? 'ACTIVE' : 'SUSPENDED' }),
+              : { email: requestedEmail, emailNormalized: requestedEmail }),
+            ...(request.displayName === undefined ? {} : { displayName: request.displayName }),
+            ...(request.role === undefined ? {} : { role: request.role }),
+            ...(request.status === undefined ? {} : { status: request.status }),
           },
         });
-      }
 
-      await recordAdminAudit(transaction, principal, 'admin.member.updated', 'user', current.id, {
-        previousRole: current.role,
-        role: request.role ?? current.role,
-        previousStatus: current.status,
-        status: request.status ?? current.status,
+        if (requestedEmail !== undefined) {
+          const updatedEmployments = await transaction.employment.updateMany({
+            where: {
+              tenantId: principal.tenantId,
+              userId: current.id,
+              status: { not: 'TERMINATED' },
+            },
+            data: {
+              workEmail: requestedEmail,
+              ...(directoryManaged ? { workEmailOverridden: true } : {}),
+            },
+          });
+          if (directoryManaged && updatedEmployments.count === 0) {
+            throw new ConflictException(
+              'The Feishu directory member has no active employment for a login email.',
+            );
+          }
+        }
+
+        if (accountDisabled || emailChanged) {
+          const revokedAt = new Date();
+          await transaction.authSession.updateMany({
+            where: {
+              tenantId: principal.tenantId,
+              userId: current.id,
+              revokedAt: null,
+            },
+            data: { revokedAt },
+          });
+          await transaction.authActionToken.updateMany({
+            where: {
+              tenantId: principal.tenantId,
+              userId: current.id,
+              consumedAt: null,
+              revokedAt: null,
+            },
+            data: { revokedAt },
+          });
+        }
+
+        const employment = current.employments[0];
+        if (
+          (request.orgUnitId !== undefined || request.title !== undefined) &&
+          employment === undefined
+        ) {
+          throw new ConflictException('The member has no employment to update.');
+        }
+        if (
+          employment !== undefined &&
+          (request.orgUnitId !== undefined ||
+            request.title !== undefined ||
+            request.status !== undefined)
+        ) {
+          const targetOrgUnitId = request.orgUnitId ?? employment.orgUnitId;
+          if (request.orgUnitId !== undefined) {
+            await this.requireActiveOrgUnit(
+              transaction,
+              principal.tenantId,
+              organization.id,
+              request.orgUnitId,
+            );
+          }
+          const resultingTitle = request.title ?? employment.position?.name;
+          const positionId =
+            resultingTitle === undefined
+              ? employment.positionId
+              : await this.upsertMemberPosition(
+                  transaction,
+                  principal.tenantId,
+                  organization.id,
+                  current.id,
+                  targetOrgUnitId,
+                  resultingTitle,
+                );
+          await transaction.employment.update({
+            where: { id: employment.id },
+            data: {
+              ...(request.orgUnitId === undefined ? {} : { orgUnitId: request.orgUnitId }),
+              ...(positionId === employment.positionId ? {} : { positionId }),
+              ...(request.status === undefined
+                ? {}
+                : { status: request.status === 'ACTIVE' ? 'ACTIVE' : 'SUSPENDED' }),
+            },
+          });
+        }
+
+        await recordAdminAudit(transaction, principal, 'admin.member.updated', 'user', current.id, {
+          previousRole: current.role,
+          role: request.role ?? current.role,
+          previousStatus: current.status,
+          status: request.status ?? current.status,
+          ...(requestedEmail === undefined
+            ? {}
+            : {
+                previousEmail,
+                email: requestedEmail,
+                emailSource: directoryManaged ? 'LOCAL_OVERRIDE' : 'LOCAL',
+              }),
+        });
+        return this.findMember(transaction, principal.tenantId, organization.id, current.id);
       });
-      return this.findMember(transaction, principal.tenantId, organization.id, current.id);
-    });
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw memberEmailConflict();
+      }
+      throw error;
+    }
   }
 
   async resetMemberPassword(
@@ -545,12 +614,7 @@ export class OrganizationAdminService {
       if (member === null) throw memberNotFound();
       this.access.assertCanManageMember(principal, member.role);
 
-      await transaction.$queryRaw`
-        WITH password_flow_lock AS (
-          SELECT pg_advisory_xact_lock(hashtextextended(${passwordFlowLockKey(principal.tenantId, member.id)}, 0))
-        )
-        SELECT 1::integer AS locked FROM password_flow_lock
-      `;
+      await lockMemberPasswordFlow(transaction, principal.tenantId, member.id);
       const credential = await transaction.passwordCredential.updateMany({
         where: { tenantId: principal.tenantId, userId: member.id },
         data: {
@@ -664,6 +728,34 @@ export class OrganizationAdminService {
     return position.id;
   }
 
+  private async assertMemberEmailAvailable(
+    transaction: Prisma.TransactionClient,
+    tenantId: string,
+    memberId: string,
+    email: string,
+  ): Promise<void> {
+    const [userConflictCount, employmentConflictCount] = await Promise.all([
+      transaction.user.count({
+        where: {
+          tenantId,
+          id: { not: memberId },
+          emailNormalized: email,
+        },
+      }),
+      transaction.employment.count({
+        where: {
+          tenantId,
+          userId: { not: memberId },
+          status: { not: 'TERMINATED' },
+          workEmail: { equals: email, mode: 'insensitive' },
+        },
+      }),
+    ]);
+    if (userConflictCount > 0 || employmentConflictCount > 0) {
+      throw memberEmailConflict();
+    }
+  }
+
   private async assertOwnerContinuity(
     transaction: Prisma.TransactionClient,
     principal: AdminPrincipal,
@@ -738,6 +830,33 @@ function orgUnitNotFound(): NotFoundException {
 
 function memberNotFound(): NotFoundException {
   return new NotFoundException('The member was not found.');
+}
+
+function memberEmailConflict(): ConflictException {
+  return new ConflictException('That login email is already used by another member.');
+}
+
+function normalizeLoginEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+function assertRealLoginEmail(email: string): void {
+  if (email.endsWith('@external.invalid')) {
+    throw new BadRequestException('A real login email is required.');
+  }
+}
+
+async function lockMemberPasswordFlow(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  userId: string,
+): Promise<void> {
+  await transaction.$queryRaw`
+    WITH password_flow_lock AS (
+      SELECT pg_advisory_xact_lock(hashtextextended(${passwordFlowLockKey(tenantId, userId)}, 0))
+    )
+    SELECT 1::integer AS locked FROM password_flow_lock
+  `;
 }
 
 function isUniqueConflict(error: unknown): boolean {

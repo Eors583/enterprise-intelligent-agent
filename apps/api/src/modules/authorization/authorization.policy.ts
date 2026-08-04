@@ -26,6 +26,9 @@ const EMPLOYEE_ACTIONS = new Set([
   'conversation.list',
   'conversation.message.create',
   'conversation.read',
+  'conversation.search',
+  'conversation.state.update',
+  'conversation.group.manage',
   'knowledge.retrieve',
   'tenant.read',
 ]);

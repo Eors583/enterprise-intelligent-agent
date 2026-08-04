@@ -180,6 +180,8 @@ describe('RoleAssignmentAdminService', () => {
   });
 
   it('validates delegation lineage and persists the source assignment', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
     const templateId = assignmentRecord().agentInstance.version.template.id;
     const sourceAssignmentId = '00000000-0000-7000-8000-000000000031';
     const transaction = {

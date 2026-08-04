@@ -1,6 +1,7 @@
 import {
   authSessionResponseSchema,
   browserAuthSessionResponseSchema,
+  canAccessAdminConsole,
   type BrowserAuthSessionResponse,
 } from '@enterprise/contracts';
 
@@ -55,5 +56,5 @@ export function subscribeSession(listener: Listener): () => void {
 }
 
 export function isSessionRoleAllowed(session: AdminBrowserSession): boolean {
-  return ['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN', 'MEMBER'].includes(session.account.role);
+  return canAccessAdminConsole(session.account.role);
 }

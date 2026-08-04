@@ -1,7 +1,8 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type {
   CreateEvidenceRequest,
+  CreateEvidenceGuidedRequest,
   CreateMetricDefinitionRequest,
   CreateObjectiveRequest,
   CreateProcessDefinitionRequest,
@@ -94,6 +95,14 @@ export class EvidenceAdminService {
         })
       ).map(mapEvidence),
     }));
+  }
+
+  async createGuidedEvidence(
+    request: CreateEvidenceGuidedRequest,
+    suppliedKey?: string,
+  ): Promise<Evidence> {
+    const principal = this.access.requireDirectoryWrite();
+    return this.createEvidence(buildGuidedEvidenceRequest(request, principal.userId), suppliedKey);
   }
 
   async createEvidence(request: CreateEvidenceRequest, suppliedKey?: string): Promise<Evidence> {
@@ -303,6 +312,68 @@ function mapOwner(record: {
   throw new Error('Business owner columns violate the exactly-one invariant.');
 }
 
+export function buildGuidedEvidenceRequest(
+  request: CreateEvidenceGuidedRequest,
+  currentUserId: string,
+): CreateEvidenceRequest {
+  const canonical = JSON.stringify({
+    observedAt: request.observedAt,
+    retentionDays: request.retentionDays,
+    sourceName: request.sourceName,
+    sourceType: request.sourceType,
+    sourceUri: request.sourceUri,
+    summary: request.summary,
+    trustLevel: request.trustLevel,
+  });
+  const contentHash = createHash('sha256').update(canonical, 'utf8').digest('hex');
+  const effectiveFrom = request.observedAt;
+  const effectiveTo =
+    request.retentionDays === null
+      ? null
+      : new Date(Date.parse(request.observedAt) + request.retentionDays * 86_400_000).toISOString();
+
+  return {
+    code: `EVIDENCE.${contentHash.slice(0, 20).toUpperCase()}`,
+    sourceType: request.sourceType,
+    sourceSystem: evidenceSourceSystem(request.sourceType),
+    sourceRecordId: request.sourceName,
+    sourceVersion: '1',
+    sourceUri: request.sourceUri,
+    observedAt: request.observedAt,
+    contentHashAlgorithm: 'SHA256',
+    contentHash,
+    trustLevel: request.trustLevel,
+    confidence: evidenceConfidence(request.trustLevel),
+    summary: request.summary,
+    verifiedBy: null,
+    verifiedAt: null,
+    owner: { type: 'USER', id: currentUserId },
+    effectiveFrom,
+    effectiveTo,
+    permissionLabels: [],
+  };
+}
+
+function evidenceSourceSystem(sourceType: CreateEvidenceGuidedRequest['sourceType']): string {
+  return {
+    BUSINESS_SYSTEM: 'SYSTEM.BUSINESS',
+    DOCUMENT: 'SYSTEM.DOCUMENT',
+    HUMAN_ATTESTATION: 'SYSTEM.ATTESTATION',
+    AGENT_RUN: 'SYSTEM.AGENT_RUN',
+    METRIC: 'SYSTEM.METRIC',
+    PROCESS_EVENT: 'SYSTEM.PROCESS',
+  }[sourceType];
+}
+
+function evidenceConfidence(trustLevel: CreateEvidenceGuidedRequest['trustLevel']): number {
+  return {
+    HIGH: 0.85,
+    MEDIUM: 0.65,
+    LOW: 0.35,
+    UNVERIFIED: 0.5,
+  }[trustLevel];
+}
+
 async function lockEntity(
   transaction: Prisma.TransactionClient,
   table: string,
@@ -318,6 +389,7 @@ async function lockEntity(
     'process_definitions',
     'process_versions',
     'tasks',
+    'evidence',
   ]);
   if (!allowed.has(table)) throw new Error('Unsupported semantic entity lock.');
   await transaction.$queryRawUnsafe(

@@ -148,6 +148,7 @@ describe('RoleBlueprintAdminService', () => {
           .mockResolvedValueOnce(published),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
+      agentInstance: { updateMany: vi.fn().mockResolvedValue({ count: 4 }) },
       auditEvent: { create: vi.fn().mockResolvedValue({}) },
     };
     const evaluations = evaluationService();
@@ -176,6 +177,13 @@ describe('RoleBlueprintAdminService', () => {
         data: expect.objectContaining({ status: 'RETIRED', retiredById: REVIEWER_ID }),
       }),
     );
+    expect(transaction.agentInstance.updateMany).toHaveBeenCalledWith({
+      where: {
+        tenantId: TENANT_ID,
+        version: { is: { templateId: BLUEPRINT_ID } },
+      },
+      data: { versionId: VERSION_ID },
+    });
     expect(transaction.agentVersion.updateMany).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({
@@ -402,7 +410,7 @@ describe('RoleBlueprintAdminService', () => {
       systemPrompt: 'Execute this governed enterprise role safely.',
       modelPolicy: {},
       toolPolicy: {},
-      knowledgeScope: {},
+      knowledgeScope: { knowledgeBaseIds: [] },
       changeSummary: 'Capture blueprint revision seven.',
     });
 
@@ -412,6 +420,35 @@ describe('RoleBlueprintAdminService', () => {
         blueprintRevision: 7,
       }),
     });
+  });
+
+  it('rejects inactive or cross-tenant knowledge selections before creating a draft', async () => {
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      agentTemplate: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: BLUEPRINT_ID,
+          ...roleDefinitionSnapshot(),
+          revision: 7,
+        }),
+      },
+      knowledgeBase: { findMany: vi.fn().mockResolvedValue([]) },
+      agentVersion: { findFirst: vi.fn(), create: vi.fn() },
+    };
+    const service = createService(transaction, AUTHOR_ID);
+
+    await expect(
+      service.createDraft(BLUEPRINT_ID, {
+        systemPrompt: 'Execute this governed enterprise role safely.',
+        modelPolicy: {},
+        toolPolicy: {},
+        knowledgeScope: {
+          knowledgeBaseIds: ['00000000-0000-7000-8000-000000000109'],
+        },
+        changeSummary: 'Attempt an invalid knowledge binding.',
+      }),
+    ).rejects.toBeInstanceOf(ConflictException);
+    expect(transaction.agentVersion.create).not.toHaveBeenCalled();
   });
 
   it('returns only assignment candidates that satisfy both maker-checker boundaries', async () => {

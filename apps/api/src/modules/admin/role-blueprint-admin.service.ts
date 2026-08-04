@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Inject,
@@ -22,7 +23,7 @@ import type {
   UpdateRoleBlueprintRequest,
   UpdateRoleVersionDraftRequest,
 } from '@enterprise/contracts';
-import { roleDefinitionSnapshotSchema } from '@enterprise/contracts';
+import { roleDefinitionSnapshotSchema, roleKnowledgeScopeSchema } from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
 
 import { AdminPrismaService } from '../../database/admin-prisma.service.js';
@@ -208,6 +209,11 @@ export class RoleBlueprintAdminService {
       });
       if (blueprint === null) throw blueprintNotFound();
       const roleDefinitionSnapshot = snapshotRoleDefinition(blueprint);
+      const knowledgeScope = await validatedKnowledgeScope(
+        transaction,
+        principal.tenantId,
+        request.knowledgeScope,
+      );
       const latest = await transaction.agentVersion.findFirst({
         where: { tenantId: principal.tenantId, templateId: blueprintId },
         select: { version: true },
@@ -223,7 +229,7 @@ export class RoleBlueprintAdminService {
           systemPrompt: request.systemPrompt,
           modelPolicy: jsonObject(request.modelPolicy),
           toolPolicy: jsonObject(request.toolPolicy),
-          knowledgeScope: jsonObject(request.knowledgeScope),
+          knowledgeScope,
           roleDefinitionSnapshot: jsonValue(roleDefinitionSnapshot),
           blueprintRevision: blueprint.revision,
           changeSummary: request.changeSummary,
@@ -248,6 +254,10 @@ export class RoleBlueprintAdminService {
         throw new ConflictException('Only a draft Role Version can be edited.');
       }
       assertVersionRevision(current, request.expectedRevision);
+      const knowledgeScope =
+        request.knowledgeScope === undefined
+          ? undefined
+          : await validatedKnowledgeScope(transaction, principal.tenantId, request.knowledgeScope);
       const updated = await transaction.agentVersion.updateMany({
         where: {
           tenantId: principal.tenantId,
@@ -264,9 +274,7 @@ export class RoleBlueprintAdminService {
           ...(request.toolPolicy === undefined
             ? {}
             : { toolPolicy: jsonObject(request.toolPolicy) }),
-          ...(request.knowledgeScope === undefined
-            ? {}
-            : { knowledgeScope: jsonObject(request.knowledgeScope) }),
+          ...(knowledgeScope === undefined ? {} : { knowledgeScope }),
           ...(request.changeSummary === undefined ? {} : { changeSummary: request.changeSummary }),
           reviewStatus: 'NOT_SUBMITTED',
           reviewRequestedAt: null,
@@ -299,6 +307,11 @@ export class RoleBlueprintAdminService {
         throw new ConflictException('Only a draft Role Version can be submitted for review.');
       }
       assertVersionRevision(current, request.expectedRevision);
+      await validatedKnowledgeScope(
+        transaction,
+        principal.tenantId,
+        jsonRecord(current.knowledgeScope),
+      );
       const now = new Date();
       const updated = await transaction.agentVersion.updateMany({
         where: versionCas(principal.tenantId, blueprintId, versionId, request.expectedRevision),
@@ -396,6 +409,11 @@ export class RoleBlueprintAdminService {
         throw new ConflictException('Only an approved Role Version can be published.');
       }
       assertVersionRevision(current, request.expectedRevision);
+      await validatedKnowledgeScope(
+        transaction,
+        principal.tenantId,
+        jsonRecord(current.knowledgeScope),
+      );
       const now = new Date();
       await retirePublishedVersions(transaction, principal, blueprintId, now, versionId);
       const updated = await transaction.agentVersion.updateMany({
@@ -414,7 +432,22 @@ export class RoleBlueprintAdminService {
       });
       if (updated.count !== 1) throw staleVersion();
       const version = await findVersion(transaction, principal.tenantId, blueprintId, versionId);
+      const rolledOut = await transaction.agentInstance.updateMany({
+        where: {
+          tenantId: principal.tenantId,
+          version: { is: { templateId: blueprintId } },
+        },
+        data: { versionId },
+      });
       await auditVersion(transaction, principal, 'admin.role_version.published', version);
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.role_version.rollout_completed',
+        'agent_version',
+        version.id,
+        { agentInstanceCount: rolledOut.count },
+      );
       return mapVersion(version);
     });
   }
@@ -692,7 +725,7 @@ function mapVersion(version: VersionRecord): RoleVersion {
     systemPrompt: version.systemPrompt,
     modelPolicy: jsonRecord(version.modelPolicy),
     toolPolicy: jsonRecord(version.toolPolicy),
-    knowledgeScope: jsonRecord(version.knowledgeScope),
+    knowledgeScope: parseKnowledgeScope(version.knowledgeScope),
     roleDefinitionSnapshot: parseRoleDefinitionSnapshot(version.roleDefinitionSnapshot),
     blueprintRevision: version.blueprintRevision,
     changeSummary: version.changeSummary,
@@ -741,6 +774,38 @@ function jsonObject(value: Record<string, unknown>): Prisma.InputJsonObject {
   return jsonValue(value) as Prisma.InputJsonObject;
 }
 
+async function validatedKnowledgeScope(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  value: Record<string, unknown>,
+): Promise<Prisma.InputJsonObject> {
+  const scope = jsonObject(value);
+  const rawIds = value.knowledgeBaseIds;
+  if (rawIds === undefined) return { ...scope, knowledgeBaseIds: [] };
+  if (
+    !Array.isArray(rawIds) ||
+    rawIds.length > 50 ||
+    rawIds.some((id) => typeof id !== 'string' || !UUID_PATTERN.test(id))
+  ) {
+    throw new BadRequestException('Knowledge scope must contain valid knowledge base selections.');
+  }
+  const knowledgeBaseIds = [...new Set(rawIds)].sort();
+  if (knowledgeBaseIds.length > 0) {
+    const active = await transaction.knowledgeBase.findMany({
+      where: { tenantId, id: { in: knowledgeBaseIds }, status: 'ACTIVE' },
+      select: { id: true },
+    });
+    if (active.length !== knowledgeBaseIds.length) {
+      throw new ConflictException(
+        'Knowledge scope contains a missing, inactive, or cross-tenant knowledge base.',
+      );
+    }
+  }
+  return { ...scope, knowledgeBaseIds };
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
 function jsonRecord(value: Prisma.JsonValue): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
   return JSON.parse(JSON.stringify(value)) as Record<string, unknown>;
@@ -751,6 +816,17 @@ function parseRoleDefinitionSnapshot(
 ): RoleVersion['roleDefinitionSnapshot'] {
   const parsed = roleDefinitionSnapshotSchema.safeParse(jsonRecord(value));
   return parsed.success ? parsed.data : null;
+}
+
+function parseKnowledgeScope(
+  value: Prisma.JsonValue,
+): Record<string, unknown> & { knowledgeBaseIds: string[] } {
+  const parsed = roleKnowledgeScopeSchema.safeParse(jsonRecord(value));
+  if (!parsed.success) return { knowledgeBaseIds: [] };
+  return {
+    ...parsed.data,
+    knowledgeBaseIds: parsed.data.knowledgeBaseIds ?? [],
+  };
 }
 
 function jsonArray(value: Prisma.JsonValue): unknown[] {

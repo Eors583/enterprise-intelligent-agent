@@ -137,6 +137,8 @@ export class MemberInvitationService {
             userId: user.id,
             purpose: 'MEMBER_INVITATION',
             tokenHash: opaque.hash,
+            deliveryTargetEmail: request.email,
+            deliveryTargetEvidence: 'ISSUED',
             deliveryStatus: 'PENDING',
             expiresAt,
             createdById: principal.userId,
@@ -182,13 +184,13 @@ export class MemberInvitationService {
         where: {
           id: memberId,
           tenantId: principal.tenantId,
-          status: { in: ['ACTIVE', 'INACTIVE'] },
+          status: 'ACTIVE',
           directoryBindings: { some: { integration: { provider: 'FEISHU' } } },
         },
         include: {
           passwordCredential: true,
           employments: {
-            where: { status: { not: 'TERMINATED' }, workEmail: { not: null } },
+            where: { status: 'ACTIVE', workEmail: { not: null } },
             orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
             select: { workEmail: true },
           },
@@ -221,6 +223,8 @@ export class MemberInvitationService {
           userId: member.id,
           purpose: 'MEMBER_INVITATION',
           tokenHash: opaque.hash,
+          deliveryTargetEmail: deliveryEmail,
+          deliveryTargetEvidence: 'ISSUED',
           deliveryStatus: 'PENDING',
           expiresAt,
           createdById: principal.userId,
@@ -266,7 +270,7 @@ export class MemberInvitationService {
           employments: {
             where: { status: { not: 'TERMINATED' }, workEmail: { not: null } },
             orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
-            select: { workEmail: true },
+            select: { workEmail: true, status: true },
           },
           authActionTokens: {
             where: { purpose: 'MEMBER_INVITATION' },
@@ -284,6 +288,15 @@ export class MemberInvitationService {
       if (latest.consumedAt !== null) {
         throw new ConflictException('This invitation has already been accepted.');
       }
+      if (member.directoryBindings.length > 0 && member.status !== 'ACTIVE') {
+        throw new ConflictException('An inactive directory member cannot be invited.');
+      }
+      const deliveryEmail =
+        member.directoryBindings.length === 0
+          ? member.email
+          : requireSingleWorkEmail(
+              member.employments.filter((employment) => employment.status === 'ACTIVE'),
+            );
 
       await transaction.authActionToken.updateMany({
         where: {
@@ -301,6 +314,8 @@ export class MemberInvitationService {
           userId: member.id,
           purpose: 'MEMBER_INVITATION',
           tokenHash: opaque.hash,
+          deliveryTargetEmail: deliveryEmail,
+          deliveryTargetEvidence: 'ISSUED',
           deliveryStatus: 'PENDING',
           expiresAt,
           createdById: principal.userId,
@@ -322,10 +337,7 @@ export class MemberInvitationService {
       return {
         invitation,
         tenantName: tenant.name,
-        deliveryEmail:
-          member.directoryBindings.length === 0
-            ? member.email
-            : requireSingleWorkEmail(member.employments),
+        deliveryEmail,
       };
     });
 
@@ -403,7 +415,9 @@ function mapInvitation(record: InvitationRecord, now: Date): MemberInvitation {
   return {
     id: record.id,
     memberId: record.userId,
-    email: record.user.email,
+    email: record.deliveryTargetEmail,
+    deliveryTargetEvidence:
+      record.deliveryTargetEvidence === 'LEGACY_INFERRED' ? 'LEGACY_INFERRED' : 'ISSUED',
     displayName: record.user.displayName,
     status:
       record.consumedAt !== null
@@ -484,5 +498,11 @@ function requireSingleWorkEmail(
       'A Feishu directory member requires exactly one active work email before invitation.',
     );
   }
-  return emails[0]!;
+  const email = emails[0]!;
+  if (email.toLowerCase().endsWith('@external.invalid')) {
+    throw new ConflictException(
+      'Set a real login email for this Feishu directory member before sending an invitation.',
+    );
+  }
+  return email;
 }

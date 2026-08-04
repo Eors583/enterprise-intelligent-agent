@@ -247,6 +247,31 @@ describe('KnowledgeRetrievalService', () => {
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
   });
 
+  it('falls back to hybrid RRF when the cross-encoder filters every valid vector candidate', async () => {
+    const transaction = accessibleTransaction();
+    transaction.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { ...candidate('chunk-a', 'document-a', 0, 0), semantic_score: 0.9 },
+      ]);
+    const semantic = semanticClient({ rerankEnabled: true });
+    semantic.rerank.mockResolvedValue({
+      model: 'local-reranker',
+      results: [{ id: 'chunk-a', relevanceScore: 0.01 }],
+    });
+    const service = createService(transaction, semantic);
+
+    const result = await service.search(searchInput());
+
+    expect(result).toMatchObject({
+      mode: 'HYBRID',
+      reranker: 'RRF',
+      rerankerModel: null,
+      degradedReason: 'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK',
+    });
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
+  });
+
   it('does not embed a confidential query and degrades to lexical retrieval', async () => {
     const transaction = accessibleTransaction();
     transaction.$queryRaw.mockResolvedValueOnce([candidate('chunk-a', 'document-a', 6, 0.9)]);

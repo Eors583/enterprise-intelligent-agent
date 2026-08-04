@@ -9,6 +9,7 @@ import { useEffect, useId, useState, type FormEvent } from 'react';
 
 import {
   useCreateTaskCollaboration,
+  useEmployeeTaskExecution,
   useSubmitTaskCollaborationCommand,
   useSubmitTaskCorrectionFeedback,
   useTaskCollaborationCandidates,
@@ -34,6 +35,68 @@ import {
 import { formatWorkbenchDate, shortBusinessId } from './workbench-view';
 
 export type WorkbenchTaskMode = 'overview' | 'execution' | 'collaboration' | 'correction' | 'tools';
+export type CollaborationOutputTemplate =
+  'document' | 'table' | 'proposal' | 'approval' | 'checklist';
+
+export const COLLABORATION_OUTPUT_TEMPLATES: ReadonlyArray<{
+  readonly id: CollaborationOutputTemplate;
+  readonly label: string;
+}> = [
+  { id: 'document', label: '文档' },
+  { id: 'table', label: '表格' },
+  { id: 'proposal', label: '方案' },
+  { id: 'approval', label: '审批结果' },
+  { id: 'checklist', label: '清单' },
+];
+
+export function collaborationOutputSchema(
+  template: CollaborationOutputTemplate,
+): Record<string, unknown> {
+  const schemas: Record<CollaborationOutputTemplate, Record<string, unknown>> = {
+    document: {
+      type: 'object',
+      properties: { title: { type: 'string' }, content: { type: 'string' } },
+      required: ['title', 'content'],
+    },
+    table: {
+      type: 'object',
+      properties: {
+        columns: { type: 'array', items: { type: 'string' } },
+        rows: { type: 'array', items: { type: 'object' } },
+      },
+      required: ['columns', 'rows'],
+    },
+    proposal: {
+      type: 'object',
+      properties: {
+        objective: { type: 'string' },
+        approach: { type: 'string' },
+        risks: { type: 'array', items: { type: 'string' } },
+      },
+      required: ['objective', 'approach'],
+    },
+    approval: {
+      type: 'object',
+      properties: { decision: { type: 'string' }, comment: { type: 'string' } },
+      required: ['decision', 'comment'],
+    },
+    checklist: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { item: { type: 'string' }, completed: { type: 'boolean' } },
+            required: ['item', 'completed'],
+          },
+        },
+      },
+      required: ['items'],
+    },
+  };
+  return schemas[template];
+}
 
 export function WorkbenchTaskModeTabs({
   active,
@@ -152,10 +215,7 @@ export function TaskCollaborationPanel({ taskId }: { taskId: string }): React.JS
                 <span>{collaboration.status.slice(0, 1)}</span>
                 <span>
                   <strong>{collaboration.commonGoal}</strong>
-                  <small>
-                    {collaborationStatusLabel(collaboration.status)} · r{collaboration.revision}
-                  </small>
-                  <code>{shortBusinessId(collaboration.correlationId)}</code>
+                  <small>{collaborationStatusLabel(collaboration.status)}</small>
                 </span>
               </button>
             ))}
@@ -285,16 +345,6 @@ function CollaborationDetail({
           )}
         </div>
       </header>
-      <IdentityTrace
-        entries={[
-          ['Correlation ID', response.collaboration.correlationId],
-          ['Collaboration ID', response.collaboration.id],
-          ['Objective', response.collaboration.objectiveId],
-          ['Task', response.collaboration.taskId],
-          ['Requester role', response.collaboration.requesterRoleAssignmentId],
-          ['Revision', `r${response.collaboration.revision}`],
-        ]}
-      />
       <div className="collaboration-message-list">
         {response.messages.length > 0 ? (
           response.messages.map((message) => (
@@ -302,24 +352,45 @@ function CollaborationDetail({
               <header>
                 <span>{collaborationMessageLabel(message.type)}</span>
                 <strong>{formatWorkbenchDate(message.occurredAt)}</strong>
-                <code>r{message.revision}</code>
               </header>
-              <IdentityTrace
-                entries={[
-                  ['Message ID', message.id],
-                  ['Correlation ID', message.correlationId],
-                  ['Causation ID', message.causationId],
-                  ['Sender role', message.senderRoleAssignmentId],
-                ]}
-                compact
-              />
-              <pre>{JSON.stringify(message.payload, null, 2)}</pre>
+              <details className="interaction-advanced-details">
+                <summary>高级详情</summary>
+                <IdentityTrace
+                  entries={[
+                    ['Message ID', message.id],
+                    ['Correlation ID', message.correlationId],
+                    ['Causation ID', message.causationId],
+                    ['Sender role', message.senderRoleAssignmentId],
+                    ['Revision', `r${message.revision}`],
+                  ]}
+                  compact
+                />
+                <div className="interaction-business-message">
+                  {collaborationBusinessText(message.payload).map((item) => (
+                    <p key={item}>{item}</p>
+                  ))}
+                  <small>其余流程与校验信息已由系统安全保存。</small>
+                </div>
+              </details>
             </article>
           ))
         ) : (
           <p className="interaction-empty-copy">该协同详情没有服务端返回的协议消息。</p>
         )}
       </div>
+      <details className="interaction-advanced-details">
+        <summary>协同追踪详情</summary>
+        <IdentityTrace
+          entries={[
+            ['Correlation ID', response.collaboration.correlationId],
+            ['Collaboration ID', response.collaboration.id],
+            ['Objective', response.collaboration.objectiveId],
+            ['Task', response.collaboration.taskId],
+            ['Requester role', response.collaboration.requesterRoleAssignmentId],
+            ['Revision', `r${response.collaboration.revision}`],
+          ]}
+        />
+      </details>
     </article>
   );
 }
@@ -342,17 +413,7 @@ function CreateCollaborationDialog({
   const [commonGoal, setCommonGoal] = useState('');
   const [requestedInput, setRequestedInput] = useState('');
   const [dueAt, setDueAt] = useState('');
-  const [expectedOutputSchema, setExpectedOutputSchema] = useState(
-    JSON.stringify(
-      {
-        type: 'object',
-        properties: { summary: { type: 'string' } },
-        required: ['summary'],
-      },
-      null,
-      2,
-    ),
-  );
+  const [outputTemplate, setOutputTemplate] = useState<CollaborationOutputTemplate>('document');
   const [error, setError] = useState<string | null>(null);
   const [idempotencyKey] = useState(() => `desktop-collaboration:create:${crypto.randomUUID()}`);
 
@@ -361,7 +422,6 @@ function CreateCollaborationDialog({
     if (first && !actingRoleAssignmentId) setActingRoleAssignmentId(first.roleAssignmentId);
   }, [actingRoleAssignmentId, candidates.data?.items]);
 
-  const parsedSchema = parseJsonObject(expectedOutputSchema);
   const dueAtDate = dueAt ? new Date(dueAt) : null;
   const canSubmit =
     !mutation.isPending &&
@@ -370,14 +430,13 @@ function CreateCollaborationDialog({
     background.trim().length > 0 &&
     commonGoal.trim().length > 0 &&
     requestedInput.trim().length > 0 &&
-    parsedSchema !== null &&
     dueAtDate !== null &&
     !Number.isNaN(dueAtDate.getTime()) &&
     dueAtDate.getTime() > Date.now();
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
-    if (!canSubmit || dueAtDate === null || parsedSchema === null) return;
+    if (!canSubmit || dueAtDate === null) return;
     setError(null);
     const input: CreateCollaborationRequest = {
       actingRoleAssignmentId,
@@ -385,7 +444,7 @@ function CreateCollaborationDialog({
       background,
       commonGoal,
       requestedInput,
-      expectedOutputSchema: parsedSchema,
+      expectedOutputSchema: collaborationOutputSchema(outputTemplate),
       dueAt: dueAtDate.toISOString(),
       contextRefs: [],
       idempotencyKey,
@@ -517,20 +576,21 @@ function CreateCollaborationDialog({
             />
           </label>
           <label>
-            <span>期望输出 JSON Schema</span>
-            <textarea
-              rows={7}
-              spellCheck={false}
-              value={expectedOutputSchema}
+            <span>期望成果形式</span>
+            <select
+              value={outputTemplate}
               disabled={mutation.isPending}
-              onChange={(event) => setExpectedOutputSchema(event.target.value)}
-            />
+              onChange={(event) =>
+                setOutputTemplate(event.target.value as CollaborationOutputTemplate)
+              }
+            >
+              {COLLABORATION_OUTPUT_TEMPLATES.map((template) => (
+                <option key={template.id} value={template.id}>
+                  {template.label}
+                </option>
+              ))}
+            </select>
           </label>
-          {expectedOutputSchema && parsedSchema === null ? (
-            <div className="interaction-operation-error" role="alert">
-              期望输出必须是有效且非空的 JSON 对象。
-            </div>
-          ) : null}
           {error ? (
             <div className="interaction-operation-error" role="alert">
               {error}
@@ -563,19 +623,49 @@ function CollaborationCommandDialog({
 }): React.JSX.Element {
   const titleId = useId();
   const mutation = useSubmitTaskCollaborationCommand(taskId, collaboration.id);
-  const [payloadSource, setPayloadSource] = useState(() =>
-    JSON.stringify(defaultCollaborationPayload(action, collaboration), null, 2),
-  );
+  const execution = useEmployeeTaskExecution(taskId);
+  const candidates = useTaskCollaborationCandidates(taskId);
   const [error, setError] = useState<string | null>(null);
+  const [selectedRecordId, setSelectedRecordId] = useState('');
+  const [selectedEvidenceIds, setSelectedEvidenceIds] = useState<string[]>([]);
+  const [summary, setSummary] = useState('');
+  const [secondaryText, setSecondaryText] = useState('');
+  const [escalationReason, setEscalationReason] = useState<
+    'CONFLICT' | 'TIMEOUT' | 'PERMISSION' | 'RESOURCE' | 'QUALITY' | 'OTHER'
+  >('OTHER');
   const [idempotencyKey] = useState(
     () => `desktop-collaboration:${action.toLowerCase()}:${crypto.randomUUID()}`,
   );
-  const payload = parseJsonObject(payloadSource);
-  const canSubmit = !mutation.isPending && payload !== null;
+  const deliverables =
+    execution.data?.deliverables.filter(
+      (item) =>
+        item.status === 'SUBMITTED' && item.artifactUri !== null && item.contentHash !== null,
+    ) ?? [];
+  const evidence = execution.data?.evidence.filter((item) => item.status === 'ACTIVE') ?? [];
+  const acceptanceRequests =
+    execution.data?.acceptanceRequests.filter(
+      (item) => item.acceptanceId !== null && item.acceptanceVersion !== null,
+    ) ?? [];
+  const payload = collaborationCommandPayload({
+    action,
+    collaboration,
+    selectedRecordId,
+    selectedEvidenceIds,
+    summary,
+    secondaryText,
+    escalationReason,
+    deliverables,
+    evidence,
+    acceptanceRequests,
+  });
+  const directoryPending =
+    (['DELIVER', 'ACCEPT', 'ESCALATE'] as CollaborationCommandAction[]).includes(action) &&
+    (execution.isPending || (action === 'ESCALATE' && candidates.isPending));
+  const canSubmit = !mutation.isPending && !directoryPending && payload !== null;
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
-    if (!canSubmit || payload === null) return;
+    if (!canSubmit) return;
     setError(null);
     const input = {
       type: action,
@@ -606,7 +696,7 @@ function CollaborationCommandDialog({
       >
         <header>
           <div>
-            <p className="eyebrow">Revision-bound command</p>
+            <p className="eyebrow">受控协同操作</p>
             <h2 id={titleId}>{collaborationCommandLabel(action)}</h2>
           </div>
           <button
@@ -619,24 +709,119 @@ function CollaborationCommandDialog({
           </button>
         </header>
         <form onSubmit={(event) => void submit(event)}>
-          <p>
-            当前 revision：<code>r{collaboration.revision}</code>。系统只会在服务端确认新 revision
-            和目标状态后显示成功。
-          </p>
-          <label>
-            <span>{collaborationCommandLabel(action)}结构化负载</span>
-            <textarea
-              autoFocus
-              rows={12}
-              spellCheck={false}
-              value={payloadSource}
-              disabled={mutation.isPending}
-              onChange={(event) => setPayloadSource(event.target.value)}
-            />
-          </label>
-          {payloadSource && payload === null ? (
+          <p>请选择真实业务记录并填写业务说明；系统会自动带出内部标识、版本和校验信息。</p>
+          {action === 'DELIVER' ? (
+            <>
+              <label>
+                <span>本次交付物</span>
+                <select
+                  value={selectedRecordId}
+                  onChange={(event) => setSelectedRecordId(event.target.value)}
+                >
+                  <option value="">请选择已提交交付物</option>
+                  {deliverables.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <EvidenceChecklist
+                evidence={evidence}
+                selectedIds={selectedEvidenceIds}
+                onChange={setSelectedEvidenceIds}
+              />
+              <BusinessTextArea label="交付摘要" value={summary} onChange={setSummary} />
+            </>
+          ) : null}
+          {action === 'ACCEPT' ? (
+            <>
+              <label>
+                <span>验收记录</span>
+                <select
+                  value={selectedRecordId}
+                  onChange={(event) => setSelectedRecordId(event.target.value)}
+                >
+                  <option value="">请选择已形成结论的验收记录</option>
+                  {acceptanceRequests.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.reason}（{item.status}）
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <BusinessTextArea label="验收意见" value={summary} onChange={setSummary} />
+            </>
+          ) : null}
+          {action === 'REJECT' ? (
+            <>
+              <BusinessTextArea label="不符合项" value={summary} onChange={setSummary} />
+              <BusinessTextArea
+                label="需要修改的内容"
+                value={secondaryText}
+                onChange={setSecondaryText}
+              />
+            </>
+          ) : null}
+          {action === 'ESCALATE' ? (
+            <>
+              <label>
+                <span>请求决策的负责人</span>
+                <select
+                  value={selectedRecordId}
+                  onChange={(event) => setSelectedRecordId(event.target.value)}
+                >
+                  <option value="">请选择负责人</option>
+                  {candidates.data?.items.map((candidate) => (
+                    <option key={candidate.roleAssignmentId} value={candidate.roleAssignmentId}>
+                      {candidate.userName} · {candidate.roleName} · {candidate.orgUnitName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>升级原因</span>
+                <select
+                  value={escalationReason}
+                  onChange={(event) =>
+                    setEscalationReason(event.target.value as typeof escalationReason)
+                  }
+                >
+                  <option value="CONFLICT">存在分歧</option>
+                  <option value="TIMEOUT">即将或已经超时</option>
+                  <option value="PERMISSION">缺少权限</option>
+                  <option value="RESOURCE">缺少资源</option>
+                  <option value="QUALITY">质量不达标</option>
+                  <option value="OTHER">其他</option>
+                </select>
+              </label>
+              <BusinessTextArea label="影响说明" value={summary} onChange={setSummary} />
+              <BusinessTextArea
+                label="需要负责人决定的事项"
+                value={secondaryText}
+                onChange={setSecondaryText}
+              />
+              <EvidenceChecklist
+                evidence={evidence}
+                selectedIds={selectedEvidenceIds}
+                onChange={setSelectedEvidenceIds}
+              />
+            </>
+          ) : null}
+          {action === 'CANCEL' ? (
+            <>
+              <BusinessTextArea label="取消原因" value={summary} onChange={setSummary} />
+              <BusinessTextArea
+                label="取消影响"
+                value={secondaryText}
+                onChange={setSecondaryText}
+              />
+            </>
+          ) : null}
+          {directoryPending ? <p>正在读取当前任务可选择的业务记录…</p> : null}
+          {!directoryPending && payload === null ? (
             <div className="interaction-operation-error" role="alert">
-              命令负载必须是有效 JSON 对象；字段会再次经过共享契约校验。
+              请完成必填业务信息并选择真实关联记录；系统不会使用占位数据提交。
             </div>
           ) : null}
           {error ? (
@@ -658,75 +843,146 @@ function CollaborationCommandDialog({
   );
 }
 
-function parseJsonObject(source: string): Record<string, unknown> | null {
-  try {
-    const value: unknown = JSON.parse(source);
-    return value !== null && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function defaultCollaborationPayload(
-  action: CollaborationCommandAction,
-  collaboration: Collaboration,
-): Record<string, unknown> {
-  switch (action) {
+function collaborationCommandPayload(input: {
+  action: CollaborationCommandAction;
+  collaboration: Collaboration;
+  selectedRecordId: string;
+  selectedEvidenceIds: string[];
+  summary: string;
+  secondaryText: string;
+  escalationReason: 'CONFLICT' | 'TIMEOUT' | 'PERMISSION' | 'RESOURCE' | 'QUALITY' | 'OTHER';
+  deliverables: NonNullable<ReturnType<typeof useEmployeeTaskExecution>['data']>['deliverables'];
+  evidence: NonNullable<ReturnType<typeof useEmployeeTaskExecution>['data']>['evidence'];
+  acceptanceRequests: NonNullable<
+    ReturnType<typeof useEmployeeTaskExecution>['data']
+  >['acceptanceRequests'];
+}): Record<string, unknown> | null {
+  const summary = input.summary.trim();
+  const secondaryText = input.secondaryText.trim();
+  const evidenceRefs = input.selectedEvidenceIds.flatMap((id) => {
+    const evidence = input.evidence.find((item) => item.id === id);
+    return evidence
+      ? [{ evidenceId: evidence.id, version: evidence.version, contentHash: evidence.contentHash }]
+      : [];
+  });
+  switch (input.action) {
     case 'COMMIT':
       return {
-        committedDueAt: collaboration.dueAt,
-        outputSchema: collaboration.expectedOutputSchema,
+        committedDueAt: input.collaboration.dueAt,
+        outputSchema: input.collaboration.expectedOutputSchema,
         conditions: [],
       };
-    case 'DELIVER':
+    case 'DELIVER': {
+      const deliverable = input.deliverables.find((item) => item.id === input.selectedRecordId);
+      if (!deliverable || evidenceRefs.length === 0 || summary.length === 0) return null;
       return {
-        deliverableId: '00000000-0000-7000-8000-000000000000',
-        deliverableVersion: 1,
-        evidenceRefs: [
-          {
-            evidenceId: '00000000-0000-7000-8000-000000000000',
-            version: 1,
-            contentHash: null,
-          },
-        ],
-        summary: '请替换占位 ID 并填写真实交付摘要。',
+        deliverableId: deliverable.id,
+        deliverableVersion: deliverable.version,
+        evidenceRefs,
+        summary,
       };
-    case 'ACCEPT':
+    }
+    case 'ACCEPT': {
+      const request = input.acceptanceRequests.find(
+        (item) => item.id === input.selectedRecordId && item.acceptanceId !== null,
+      );
+      if (!request?.acceptanceId || !request.acceptanceVersion || summary.length === 0) return null;
       return {
-        acceptanceId: '00000000-0000-7000-8000-000000000000',
-        acceptanceVersion: 1,
-        comment: '请替换占位 ID 并填写验收结论。',
+        acceptanceId: request.acceptanceId,
+        acceptanceVersion: request.acceptanceVersion,
+        comment: summary,
       };
+    }
     case 'REJECT':
+      if (summary.length === 0 || secondaryText.length === 0) return null;
       return {
         acceptanceId: null,
         acceptanceVersion: null,
-        nonConformities: ['请描述不符合项。'],
-        requiredChanges: ['请描述必须修改的内容。'],
+        nonConformities: [summary],
+        requiredChanges: [secondaryText],
       };
     case 'ESCALATE':
+      if (
+        input.selectedRecordId.length === 0 ||
+        summary.length === 0 ||
+        secondaryText.length === 0 ||
+        evidenceRefs.length === 0
+      ) {
+        return null;
+      }
       return {
-        decisionRoleAssignmentId: '00000000-0000-7000-8000-000000000000',
-        reason: 'OTHER',
-        impact: '请描述影响。',
-        requestedDecision: '请描述需要的决策。',
-        evidenceRefs: [
-          {
-            evidenceId: '00000000-0000-7000-8000-000000000000',
-            version: 1,
-            contentHash: null,
-          },
-        ],
+        decisionRoleAssignmentId: input.selectedRecordId,
+        reason: input.escalationReason,
+        impact: summary,
+        requestedDecision: secondaryText,
+        evidenceRefs,
       };
     case 'CANCEL':
+      if (summary.length === 0 || secondaryText.length === 0) return null;
       return {
-        reason: '请填写取消原因。',
-        impact: '请填写取消影响。',
+        reason: summary,
+        impact: secondaryText,
         compensationActions: [],
       };
   }
+}
+
+function BusinessTextArea({
+  label,
+  value,
+  onChange,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}): React.JSX.Element {
+  return (
+    <label>
+      <span>{label}</span>
+      <textarea rows={3} value={value} onChange={(event) => onChange(event.target.value)} />
+    </label>
+  );
+}
+
+function EvidenceChecklist({
+  evidence,
+  selectedIds,
+  onChange,
+}: {
+  evidence: NonNullable<ReturnType<typeof useEmployeeTaskExecution>['data']>['evidence'];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
+}): React.JSX.Element {
+  return (
+    <fieldset>
+      <legend>关联可信证据</legend>
+      {evidence.length === 0 ? <p>当前任务还没有可选择的可信证据。</p> : null}
+      {evidence.map((item) => (
+        <label key={item.id}>
+          <input
+            type="checkbox"
+            checked={selectedIds.includes(item.id)}
+            onChange={(event) =>
+              onChange(
+                event.target.checked
+                  ? [...new Set([...selectedIds, item.id])]
+                  : selectedIds.filter((id) => id !== item.id),
+              )
+            }
+          />
+          <span>{item.summary}</span>
+        </label>
+      ))}
+    </fieldset>
+  );
+}
+
+function collaborationBusinessText(payload: unknown): string[] {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return [];
+  const record = payload as Record<string, unknown>;
+  return ['background', 'commonGoal', 'requestedInput', 'summary', 'reason', 'comment']
+    .map((key) => record[key])
+    .filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
 }
 
 export function TaskCorrectionPanel({ taskId }: { taskId: string }): React.JSX.Element {
@@ -793,7 +1049,7 @@ export function TaskCorrectionPanel({ taskId }: { taskId: string }): React.JSX.E
         <div>
           <p className="eyebrow">Correction feedback loop</p>
           <h2>纠偏闭环</h2>
-          <p>事件、依据、影响、建议和基于 revision 的人工反馈。</p>
+          <p>汇总事件、依据、影响与建议，并基于当前版本提交人工反馈。</p>
         </div>
         <button type="button" disabled={list.isFetching} onClick={() => void list.refetch()}>
           {list.isFetching ? '刷新中…' : '刷新'}
@@ -815,10 +1071,8 @@ export function TaskCorrectionPanel({ taskId }: { taskId: string }): React.JSX.E
               <span>
                 <strong>{correction.trigger}</strong>
                 <small>
-                  {correctionStatusLabel(correction.status)} · {correction.severity} · r
-                  {correction.revision}
+                  {correctionStatusLabel(correction.status)} · {correction.severity}
                 </small>
-                <code>{shortBusinessId(correction.correlationId)}</code>
               </span>
             </button>
           ))}
@@ -866,16 +1120,6 @@ function CorrectionDetail({
           {correction.severity} · {Math.round(correction.confidence * 100)}%
         </span>
       </header>
-      <IdentityTrace
-        entries={[
-          ['Correlation ID', correction.correlationId],
-          ['Correction ID', correction.id],
-          ['Objective', correction.objectiveId],
-          ['Task', correction.taskId],
-          ['Process Instance', correction.processInstanceId],
-          ['Revision', `r${correction.revision}`],
-        ]}
-      />
       <div className="correction-finding-grid">
         <section>
           <strong>规则发现</strong>
@@ -900,17 +1144,30 @@ function CorrectionDetail({
           {correction.modelFinding}
         </p>
       ) : null}
-      <section className="correction-evidence-list">
-        <header>
-          <strong>依据</strong>
-          <span>{correction.evidenceRefs.length}</span>
-        </header>
-        {correction.evidenceRefs.map((reference) => (
-          <code key={`${reference.evidenceId}:${reference.version}`}>
-            {shortBusinessId(reference.evidenceId)} · v{reference.version}
-          </code>
-        ))}
-      </section>
+      <details className="interaction-advanced-details">
+        <summary>高级详情与追踪依据</summary>
+        <IdentityTrace
+          entries={[
+            ['Correlation ID', correction.correlationId],
+            ['Correction ID', correction.id],
+            ['Objective', correction.objectiveId],
+            ['Task', correction.taskId],
+            ['Process Instance', correction.processInstanceId],
+            ['Revision', `r${correction.revision}`],
+          ]}
+        />
+        <section className="correction-evidence-list">
+          <header>
+            <strong>依据</strong>
+            <span>{correction.evidenceRefs.length}</span>
+          </header>
+          {correction.evidenceRefs.map((reference) => (
+            <code key={`${reference.evidenceId}:${reference.version}`}>
+              {shortBusinessId(reference.evidenceId)} · v{reference.version}
+            </code>
+          ))}
+        </section>
+      </details>
       <footer className="correction-actions">
         {actions.length > 0 ? (
           actions.map((action) => (
@@ -943,15 +1200,16 @@ function CorrectionFeedbackDialog({
 }): React.JSX.Element {
   const titleId = useId();
   const mutation = useSubmitTaskCorrectionFeedback(taskId);
+  const execution = useEmployeeTaskExecution(taskId);
   const [comment, setComment] = useState('');
-  const [evidenceSource, setEvidenceSource] = useState('');
+  const [evidenceIds, setEvidenceIds] = useState<string[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [idempotencyKey] = useState(() => `desktop-correction:${crypto.randomUUID()}`);
   const evidenceRequired = correctionActionRequiresEvidence(action);
-  const evidenceIds = evidenceSource
-    .split(/[\s,]+/)
-    .map((value) => value.trim())
-    .filter(Boolean);
+  const trustedEvidence =
+    execution.data?.evidence.filter(
+      (evidence) => evidence.status === 'ACTIVE' && evidence.trustLevel === 'VERIFIED',
+    ) ?? [];
   const canSubmit =
     !mutation.isPending &&
     comment.trim().length > 0 &&
@@ -992,7 +1250,7 @@ function CorrectionFeedbackDialog({
       >
         <header>
           <div>
-            <p className="eyebrow">Revision-bound feedback</p>
+            <p className="eyebrow">受控反馈</p>
             <h2 id={titleId}>{correctionActionLabel(action)}</h2>
           </div>
           <button
@@ -1005,9 +1263,6 @@ function CorrectionFeedbackDialog({
           </button>
         </header>
         <form onSubmit={(event) => void submit(event)}>
-          <p>
-            当前 revision：<code>r{correction.revision}</code>
-          </p>
           <label>
             <span>反馈说明</span>
             <textarea
@@ -1018,16 +1273,31 @@ function CorrectionFeedbackDialog({
               onChange={(event) => setComment(event.target.value)}
             />
           </label>
-          <label>
-            <span>证据 ID{evidenceRequired ? '（必填）' : '（可选）'}</span>
-            <textarea
-              rows={3}
-              value={evidenceSource}
-              disabled={mutation.isPending}
-              placeholder="多个 UUID 使用换行或逗号分隔"
-              onChange={(event) => setEvidenceSource(event.target.value)}
-            />
-          </label>
+          <fieldset disabled={mutation.isPending || execution.isPending}>
+            <legend>选择当前任务可信依据{evidenceRequired ? '（必选）' : '（可选）'}</legend>
+            {trustedEvidence.length > 0 ? (
+              trustedEvidence.map((evidence) => (
+                <label key={evidence.id}>
+                  <input
+                    type="checkbox"
+                    checked={evidenceIds.includes(evidence.id)}
+                    onChange={(event) =>
+                      setEvidenceIds((current) =>
+                        event.target.checked
+                          ? [...new Set([...current, evidence.id])]
+                          : current.filter((id) => id !== evidence.id),
+                      )
+                    }
+                  />
+                  <span>
+                    {evidence.summary} · {evidence.sourceType}
+                  </span>
+                </label>
+              ))
+            ) : (
+              <p>当前任务暂无已核验且有效的可信依据。</p>
+            )}
+          </fieldset>
           {error ? (
             <div className="interaction-operation-error" role="alert">
               {error}

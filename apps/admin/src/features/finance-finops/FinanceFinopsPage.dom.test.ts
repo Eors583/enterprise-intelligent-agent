@@ -4,14 +4,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderInTestDom } from '@/test/dom-test-utils';
 
-const { loadFinopsDashboard } = vi.hoisted(() => ({
+const { loadFinopsDashboard, createFinopsBudget } = vi.hoisted(() => ({
   loadFinopsDashboard: vi.fn(),
+  createFinopsBudget: vi.fn(),
 }));
+
+const { listEvidence } = vi.hoisted(() => ({ listEvidence: vi.fn() }));
 
 vi.mock('./api', () => ({
   loadFinopsDashboard,
   acknowledgeFinopsAlert: vi.fn(),
-  createFinopsBudget: vi.fn(),
+  createFinopsBudget,
   createFinopsBudgetEvent: vi.fn(),
   createFinopsPriceSnapshot: vi.fn(),
   recordFinopsCost: vi.fn(),
@@ -25,7 +28,9 @@ vi.mock('./api', () => ({
   reviewFinopsRoiFormula: vi.fn(),
 }));
 
-import { FinanceFinopsPage } from './FinanceFinopsPage';
+vi.mock('@/features/business-semantics/api', () => ({ listEvidence }));
+
+import { FinanceFinopsPage, finopsCode } from './FinanceFinopsPage';
 
 const TENANT_ID = '00000000-0000-4000-8000-000000000001';
 const USER_ID = '00000000-0000-4000-8000-000000000002';
@@ -113,6 +118,10 @@ describe('FinanceFinopsPage', () => {
   beforeEach(() => {
     loadFinopsDashboard.mockReset();
     loadFinopsDashboard.mockResolvedValue(DASHBOARD);
+    listEvidence.mockReset();
+    listEvidence.mockResolvedValue([]);
+    createFinopsBudget.mockReset();
+    createFinopsBudget.mockResolvedValue(DASHBOARD.budgets[0]);
   });
 
   it('loads real backend state and exposes all six FIN-001 views', async () => {
@@ -168,5 +177,116 @@ describe('FinanceFinopsPage', () => {
     } finally {
       await dom.cleanup();
     }
+  });
+
+  it('generates technical price and cost provenance without editable technical fields', async () => {
+    const dom = await renderInTestDom(
+      createElement(FinanceFinopsPage, {
+        currentUserId: USER_ID,
+        tenantId: TENANT_ID,
+      }),
+    );
+    try {
+      await dom.flush();
+      const advancedImports = [
+        ...dom.container.querySelectorAll('details.finops-advanced-import'),
+      ] as HTMLDetailsElement[];
+      expect(advancedImports).toHaveLength(0);
+      for (const name of [
+        'sourceSystem',
+        'sourceRecordId',
+        'sourceRecordVersion',
+        'sourceContentHash',
+        'evidenceId',
+        'evidenceVersion',
+      ]) {
+        const fields = [...dom.container.querySelectorAll(`[name="${name}"]`)];
+        expect(fields).toHaveLength(0);
+      }
+      expect(dom.container.querySelector('input[name="code"]')).toBeNull();
+      expect(dom.container.querySelector('input[name="codeOverride"]')).toBeNull();
+      expect(dom.container.textContent).toContain('系统将自动生成价格代码');
+      expect(dom.container.textContent).toContain('系统生成');
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('inherits tenant scope and uses governed selectors for budget settlement references', async () => {
+    const dom = await renderInTestDom(
+      createElement(FinanceFinopsPage, {
+        currentUserId: USER_ID,
+        tenantId: TENANT_ID,
+      }),
+    );
+    try {
+      await dom.flush();
+      const budgetTab = [...dom.container.querySelectorAll('.finops-tabs button')].find(
+        (button) => button.textContent === '预算',
+      );
+      await dom.click(budgetTab!);
+      expect(dom.container.textContent).toContain('预算范围自动继承当前企业');
+      expect(dom.container.querySelector('input[name="scopeId"]')).toBeNull();
+      expect(dom.container.querySelector('input[name="code"]')).toBeNull();
+      expect(dom.container.textContent).toContain('其他业务范围需先接入受治理对象目录');
+
+      const eventType = dom.container.querySelector(
+        'select[name="type"]',
+      ) as HTMLSelectElement | null;
+      await dom.change(eventType!, 'SETTLEMENT');
+      expect(dom.container.querySelector('input[name="reservationEventId"]')).toBeNull();
+      expect(dom.container.querySelector('input[name="costEntryId"]')).toBeNull();
+      expect(dom.container.querySelector('select[name="reservationEventId"]')).not.toBeNull();
+      expect(dom.container.querySelector('select[name="costEntryId"]')).not.toBeNull();
+      expect(dom.container.textContent).toContain('当前 dashboard 未返回可识别的预留事件');
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('keeps the budget wire compatible while deriving tenant scope and code', async () => {
+    const dom = await renderInTestDom(
+      createElement(FinanceFinopsPage, {
+        currentUserId: USER_ID,
+        tenantId: TENANT_ID,
+      }),
+    );
+    try {
+      await dom.flush();
+      const budgetTab = [...dom.container.querySelectorAll('.finops-tabs button')].find(
+        (button) => button.textContent === '预算',
+      );
+      await dom.click(budgetTab!);
+      const budgetForm = dom.container.querySelector('.finops-card .finops-form');
+      const limit = budgetForm?.querySelector('input[name="limitAmount"]');
+      const threshold = budgetForm?.querySelector('input[name="alertThresholdRatio"]');
+      const start = budgetForm?.querySelector('input[name="periodStart"]');
+      const end = budgetForm?.querySelector('input[name="periodEnd"]');
+      (budgetForm as HTMLFormElement).reset = vi.fn();
+      await dom.change(limit as HTMLInputElement, '3000');
+      await dom.change(threshold as HTMLInputElement, '0.8');
+      await dom.change(start as HTMLInputElement, '2026-08-01');
+      await dom.change(end as HTMLInputElement, '2026-09-01');
+      await dom.submit(budgetForm as HTMLFormElement);
+      await dom.flush();
+      expect(createFinopsBudget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'BUDGET.TENANT.CNY.2026.08',
+          scopeType: 'TENANT',
+          scopeId: TENANT_ID,
+          scopeVersion: null,
+          limitAmount: '3000',
+        }),
+      );
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('generates stable business codes without exposing raw identifiers', () => {
+    expect(finopsCode('price', 'MODEL', 'Open AI', 'gpt-5.4 enterprise')).toBe(
+      'PRICE.MODEL.OPEN.AI.GPT.5.4.ENTERPRISE',
+    );
+    expect(finopsCode('budget', 'tenant', 'CNY', '2026-07')).toBe('BUDGET.TENANT.CNY.2026.07');
   });
 });

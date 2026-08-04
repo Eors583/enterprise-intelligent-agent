@@ -65,14 +65,22 @@ export class EmployeeInsightsService {
     const principal = this.identity.current();
     const now = new Date();
     await this.requireTaskGrant(request.sourceTaskId, now);
+    const sources = await this.insights.experienceSources(principal, request.sourceTaskId, now);
+    if (sources === null) {
+      throw new ForbiddenException(
+        'Experience contribution requires a current authorized Task source.',
+      );
+    }
     const actor = await this.authorization.resolveExperienceActor({
       principal,
       taskId: request.sourceTaskId,
       action: 'CONTRIBUTE',
       now,
     });
-    const governedRequest: CreateExperienceCandidateRequest = {
+    const governedRequest: CreateExperienceCandidateRequest & { rawInputHash: string } = {
       ...request,
+      permissionLabels: sources.task.permissionLabels,
+      sensitivity: minimumEmployeeExperienceSensitivity(request.sensitivity),
       rawInputHash: sha256(request.candidateSummary),
     };
     const candidate = unwrapRuntimeMutation(
@@ -134,6 +142,12 @@ export class EmployeeInsightsService {
       );
     }
   }
+}
+
+function minimumEmployeeExperienceSensitivity(
+  requested: 'PUBLIC' | 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED',
+): 'INTERNAL' | 'CONFIDENTIAL' | 'RESTRICTED' {
+  return requested === 'PUBLIC' ? 'INTERNAL' : requested;
 }
 
 function toEmployeeExperience(candidate: ExperienceCandidate): EmployeeExperienceCandidate {

@@ -4,6 +4,7 @@ import {
   acceptanceSchema,
   bscPerspectiveSchema,
   businessSemanticTraceResponseSchema,
+  createEvidenceGuidedRequestSchema,
   createEvidenceRequestSchema,
   createObjectiveRelationRequestSchema,
   createTaskDependencyRequestSchema,
@@ -256,6 +257,38 @@ describe('business semantics contracts', () => {
         permissionLabels: ['internal.strategy', 'INTERNAL.STRATEGY'],
       }),
     ).toThrow();
+  });
+
+  it('accepts a business-facing Evidence command without technical identity or hash fields', () => {
+    const parsed = createEvidenceGuidedRequestSchema.parse({
+      sourceType: 'DOCUMENT',
+      sourceName: '2026 年客户服务复盘',
+      sourceUri: 'https://knowledge.example.local/reviews/2026-customer-service',
+      observedAt: NOW,
+      summary: '复盘确认客户响应时间缩短并给出可追溯的原始记录。',
+      trustLevel: 'MEDIUM',
+      retentionDays: 365,
+    });
+
+    expect(parsed).toEqual({
+      sourceType: 'DOCUMENT',
+      sourceName: '2026 年客户服务复盘',
+      sourceUri: 'https://knowledge.example.local/reviews/2026-customer-service',
+      observedAt: NOW,
+      summary: '复盘确认客户响应时间缩短并给出可追溯的原始记录。',
+      trustLevel: 'MEDIUM',
+      retentionDays: 365,
+    });
+    expect(
+      createEvidenceGuidedRequestSchema.safeParse({ ...parsed, trustLevel: 'VERIFIED' }).success,
+    ).toBe(false);
+    expect(
+      createEvidenceGuidedRequestSchema.safeParse({
+        ...parsed,
+        contentHash: HASH,
+        owner,
+      }).success,
+    ).toBe(false);
   });
 
   it('rejects metric observations with reversed periods, premature observation times, or no evidence', () => {

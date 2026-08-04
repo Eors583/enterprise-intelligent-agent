@@ -26,11 +26,14 @@ import type {
   DesktopAgentRunStreamPayload,
   DesktopAgentRunStreamRequest,
   DesktopAuthState,
+  DesktopImRealtimePayload,
+  DesktopImRealtimeRequest,
   DesktopLoginResult,
   DesktopPasswordChangeResult,
 } from '../shared/desktop-api';
 import { AccountStore } from './account-store';
 import { consumeAgentRunSse } from './agent-run-sse';
+import { runImRealtime } from './im-realtime';
 
 const MAX_REQUEST_BYTES = 2_100_000;
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -41,6 +44,7 @@ const BUSINESS_ROUTES: ReadonlyArray<{
   methods: ReadonlySet<DesktopApiRequest['method']>;
 }> = [
   { pattern: /^\/api\/v1\/bootstrap$/, methods: new Set(['GET']) },
+  { pattern: /^\/api\/v1\/im\/session$/, methods: new Set(['GET']) },
   { pattern: /^\/api\/v1\/role-assignments\/me$/, methods: new Set(['GET']) },
   { pattern: /^\/api\/v1\/workbench\/objectives$/, methods: new Set(['GET']) },
   { pattern: /^\/api\/v1\/workbench\/tasks$/, methods: new Set(['GET']) },
@@ -112,10 +116,29 @@ const BUSINESS_ROUTES: ReadonlyArray<{
     pattern: new RegExp(`^/api/v1/workbench/tool-invocations/${UUID}/actions$`),
     methods: new Set(['POST']),
   },
-  { pattern: /^\/api\/v1\/conversations$/, methods: new Set(['GET', 'POST']) },
   {
-    pattern: new RegExp(`^/api/v1/conversations/${UUID}/messages$`),
+    pattern: /^\/api\/v1\/conversations(?:\?[A-Za-z0-9%+._~=&-]{1,2000})?$/,
     methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: new RegExp(
+      `^/api/v1/conversations/${UUID}/messages(?:\\?[A-Za-z0-9%+._~=&-]{1,2000})?$`,
+    ),
+    methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: new RegExp(
+      `^/api/v1/conversations/${UUID}/messages/search\\?[A-Za-z0-9%+._~=&-]{1,2000}$`,
+    ),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/conversations/${UUID}/read$`),
+    methods: new Set(['POST']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/conversations/${UUID}/(?:state|group|group/members)$`),
+    methods: new Set(['PATCH']),
   },
   {
     pattern: new RegExp(`^/api/v1/conversations/${UUID}/runs/${UUID}/(?:cancel|retry)$`),
@@ -403,6 +426,34 @@ export class DesktopAuthManager {
       emit({ kind: 'state', state: 'reconnecting', cursor });
       await abortableDelay(reconnectDelayMs, signal);
     }
+  }
+
+  async streamImRealtime(
+    request: DesktopImRealtimeRequest,
+    emit: (payload: DesktopImRealtimePayload) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!UUID_PATTERN.test(request.expectedSessionId)) {
+      throw new Error('Invalid realtime messaging subscription.');
+    }
+    const requestGeneration = this.generation;
+    await runImRealtime({
+      signal,
+      emit,
+      loadSession: async () => {
+        this.requireExpectedSession(request.expectedSessionId);
+        if (requestGeneration !== this.generation) throw staleAccountError();
+        const response = await this.apiRequest({
+          path: '/api/v1/im/session',
+          method: 'GET',
+          expectedSessionId: request.expectedSessionId,
+        });
+        if (response.status < 200 || response.status >= 300) {
+          throw new AuthHttpError(response.status, responseMessage(response.body));
+        }
+        return response.body;
+      },
+    });
   }
 
   private async openAgentRunStreamAttempt(

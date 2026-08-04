@@ -1889,10 +1889,18 @@ WITH expected(constraint_name, constraint_definition) AS (
     ('auth_action_tokens_expiry_check', 'CHECK (expires_at > created_at)'),
     ('auth_action_tokens_terminal_check', 'CHECK (consumed_at IS NULL OR revoked_at IS NULL)'),
     ('auth_action_tokens_consumed_at_check', 'CHECK (consumed_at IS NULL OR consumed_at >= created_at)'),
-    ('auth_action_tokens_revoked_at_check', 'CHECK (revoked_at IS NULL OR revoked_at >= created_at)')
+    ('auth_action_tokens_revoked_at_check', 'CHECK (revoked_at IS NULL OR revoked_at >= created_at)'),
+    ('auth_action_tokens_delivery_target_evidence_check',
+      'CHECK (delivery_target_evidence::text = ANY (ARRAY[''ISSUED''::character varying, ''LEGACY_INFERRED''::character varying]))')
 )
 SELECT
-  (SELECT count(*) FROM expected) = 7
+  (SELECT count(*) FROM expected) = 8
+  AND (
+    SELECT count(*)
+    FROM pg_constraint constraint_definition
+    WHERE constraint_definition.conrelid = 'public.auth_action_tokens'::regclass
+      AND constraint_definition.contype = 'c'
+  ) = 8
   AND NOT EXISTS (
     SELECT 1
     FROM expected expected_constraint
@@ -1913,6 +1921,133 @@ SELECT
           ''
         ) = expected_constraint.constraint_definition
     )
+  );
+'@
+}
+
+function Get-EnterpriseAuthActionTokenDeliveryTargetIntegritySql {
+  @'
+WITH function_definition AS (
+  SELECT
+    procedure_definition.oid,
+    procedure_definition.proowner,
+    procedure_definition.proacl,
+    procedure_definition.prosecdef,
+    procedure_definition.proleakproof,
+    procedure_definition.provolatile,
+    procedure_definition.proparallel,
+    ARRAY(
+      SELECT setting
+      FROM unnest(COALESCE(procedure_definition.proconfig, ARRAY[]::text[])) setting
+      ORDER BY setting
+    ) AS configuration,
+    pg_get_function_result(procedure_definition.oid) AS result_type,
+    procedure_language.lanname::text AS language_name,
+    pg_get_functiondef(procedure_definition.oid) AS definition,
+    lower(
+      regexp_replace(
+        pg_get_functiondef(procedure_definition.oid),
+        '[[:space:]\"]',
+        '',
+        'g'
+      )
+    ) AS compact_definition
+  FROM pg_proc procedure_definition
+  JOIN pg_namespace procedure_schema
+    ON procedure_schema.oid = procedure_definition.pronamespace
+  JOIN pg_language procedure_language
+    ON procedure_language.oid = procedure_definition.prolang
+  WHERE procedure_schema.nspname = 'public'
+    AND procedure_definition.proname = 'enforce_auth_action_token_delivery_target_immutable'
+    AND procedure_definition.prokind = 'f'
+    AND procedure_definition.pronargs = 0
+), non_owner_function_acl AS (
+  SELECT
+    COALESCE(grantee_role.rolname, 'PUBLIC')::text AS grantee,
+    function_acl.privilege_type::text AS privilege_type,
+    function_acl.is_grantable
+  FROM function_definition definition
+  CROSS JOIN LATERAL aclexplode(
+    COALESCE(definition.proacl, acldefault('f', definition.proowner))
+  ) function_acl
+  LEFT JOIN pg_roles grantee_role ON grantee_role.oid = function_acl.grantee
+  WHERE function_acl.grantee <> definition.proowner
+), trigger_definition AS (
+  SELECT
+    trigger_catalog.tgenabled,
+    trigger_catalog.tgtype::integer AS trigger_type,
+    trigger_catalog.tgfoid,
+    trigger_catalog.tgattr::smallint[] AS update_columns,
+    pg_get_triggerdef(trigger_catalog.oid, true) AS definition
+  FROM pg_trigger trigger_catalog
+  WHERE trigger_catalog.tgrelid = 'public.auth_action_tokens'::regclass
+    AND trigger_catalog.tgname = 'auth_action_tokens_delivery_target_immutable'
+    AND NOT trigger_catalog.tgisinternal
+)
+SELECT
+  (SELECT count(*) FROM function_definition) = 1
+  AND EXISTS (
+    SELECT 1
+    FROM function_definition definition
+    WHERE NOT definition.prosecdef
+      AND NOT definition.proleakproof
+      AND definition.provolatile = 'v'
+      AND definition.proparallel = 'u'
+      AND definition.configuration = ARRAY['search_path=pg_catalog, public']::text[]
+      AND definition.result_type = 'trigger'
+      AND definition.language_name = 'plpgsql'
+      AND definition.proacl IS NOT NULL
+      AND position(
+        'new.delivery_target_emailisdistinctfromold.delivery_target_email'
+        IN definition.compact_definition
+      ) > 0
+      AND position(
+        'new.delivery_target_evidenceisdistinctfromold.delivery_target_evidence'
+        IN definition.compact_definition
+      ) > 0
+      AND position(
+        'raiseexception''authactiontokendeliverytargetisimmutable'''
+        IN definition.compact_definition
+      ) > 0
+      AND position('errcode=''23514''' IN definition.compact_definition) > 0
+      AND position('returnnew' IN definition.compact_definition) > 0
+      AND regexp_count(definition.definition, '\mRAISE\s+EXCEPTION\M', 1, 'i') = 1
+      AND position('execute' IN definition.compact_definition) = 0
+  )
+  AND NOT EXISTS (SELECT 1 FROM non_owner_function_acl)
+  AND (
+    SELECT count(*)
+    FROM pg_trigger trigger_catalog
+    WHERE trigger_catalog.tgrelid = 'public.auth_action_tokens'::regclass
+      AND NOT trigger_catalog.tgisinternal
+  ) = 1
+  AND EXISTS (
+    SELECT 1
+    FROM trigger_definition actual
+    WHERE actual.tgenabled = 'O'
+      AND actual.trigger_type = 19
+      AND actual.tgfoid =
+        'public.enforce_auth_action_token_delivery_target_immutable()'::regprocedure
+      AND actual.update_columns = ARRAY[
+        (
+          SELECT attribute_definition.attnum
+          FROM pg_attribute attribute_definition
+          WHERE attribute_definition.attrelid = 'public.auth_action_tokens'::regclass
+            AND attribute_definition.attname = 'delivery_target_email'
+            AND attribute_definition.attnum > 0
+            AND NOT attribute_definition.attisdropped
+        ),
+        (
+          SELECT attribute_definition.attnum
+          FROM pg_attribute attribute_definition
+          WHERE attribute_definition.attrelid = 'public.auth_action_tokens'::regclass
+            AND attribute_definition.attname = 'delivery_target_evidence'
+            AND attribute_definition.attnum > 0
+            AND NOT attribute_definition.attisdropped
+        )
+      ]::smallint[]
+      AND actual.definition =
+        'CREATE TRIGGER auth_action_tokens_delivery_target_immutable BEFORE UPDATE OF delivery_target_email, delivery_target_evidence ON auth_action_tokens FOR EACH ROW EXECUTE FUNCTION enforce_auth_action_token_delivery_target_immutable()'
   );
 '@
 }

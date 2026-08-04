@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import {
   Inject,
   Injectable,
@@ -75,8 +77,17 @@ export class ToolGatewayService {
 
   async createDefinition(request: CreateToolDefinitionRequest): Promise<ToolDefinition> {
     const principal = this.administrator();
+    const keyWasGenerated = request.key === undefined;
+    const normalizedRequest = {
+      ...request,
+      key: request.key ?? stableToolDefinitionKey(request.name),
+    };
     return unwrapRuntimeMutation(
-      await this.repository.createDefinition({ principal, request }),
+      await this.repository.createDefinition({
+        principal,
+        request: normalizedRequest,
+        keyWasGenerated,
+      }),
       'Tool Definition',
     );
   }
@@ -215,4 +226,21 @@ export class ToolGatewayService {
       );
     }
   }
+}
+
+export function stableToolDefinitionKey(name: string): string {
+  const normalized = name
+    .normalize('NFKD')
+    .replace(/\p{Mark}+/gu, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-+|-+$/gu, '');
+  const readable = normalized.length > 0 ? normalized : `tool-${shortStableHash(name)}`;
+  const prefixed = /^[a-z]/u.test(readable) ? readable : `tool-${readable}`;
+  const padded = prefixed.length >= 3 ? prefixed : `${prefixed}-tool`;
+  return padded.slice(0, 100).replace(/[-.]+$/u, '');
+}
+
+function shortStableHash(value: string): string {
+  return createHash('sha256').update(value.trim(), 'utf8').digest('hex').slice(0, 12);
 }

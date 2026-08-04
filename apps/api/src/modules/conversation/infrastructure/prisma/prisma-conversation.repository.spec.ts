@@ -157,6 +157,47 @@ describe('Conversation Agent Run stream capability', () => {
 });
 
 describe('Role Agent Run snapshot creation', () => {
+  it('stores a human response target and does not create an Agent Run', async () => {
+    const fixture = conversationRunFixture(true);
+    const responseTarget = {
+      type: 'human' as const,
+      userId: '00000000-0000-7000-8000-000000000399',
+    };
+
+    await fixture.repository.createUserMessage({ ...fixture.input, responseTarget });
+
+    expect(fixture.transaction.message.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        responseTargetType: 'HUMAN',
+        responseTargetId: responseTarget.userId,
+      }),
+    });
+    expect(fixture.transaction.agentRun.create).not.toHaveBeenCalled();
+    expect(fixture.transaction.outboxEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        payload: expect.objectContaining({ responseTarget }),
+      }),
+    });
+  });
+
+  it('creates an Agent Run only for the explicitly selected Agent participant', async () => {
+    const fixture = conversationRunFixture(true);
+    const responseTarget = {
+      type: 'agent' as const,
+      agentId: '00000000-0000-7000-8000-000000000305',
+    };
+
+    await fixture.repository.createUserMessage({ ...fixture.input, responseTarget });
+
+    expect(fixture.transaction.message.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        responseTargetType: 'AGENT',
+        responseTargetId: responseTarget.agentId,
+      }),
+    });
+    expect(fixture.transaction.agentRun.create).toHaveBeenCalledTimes(1);
+  });
+
   it('copies the effective Assignment and immutable role/prompt evidence into the Run snapshot', async () => {
     const fixture = conversationRunFixture(true);
 
@@ -313,6 +354,9 @@ function conversationRunFixture(
           },
         },
       ]),
+    },
+    employment: {
+      findMany: vi.fn().mockResolvedValue([]),
     },
     agentRun: {
       findFirst: vi.fn().mockResolvedValue(null),

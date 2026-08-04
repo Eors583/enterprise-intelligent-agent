@@ -2,6 +2,7 @@ import {
   acceptanceSchema,
   createAcceptanceRequestSchema,
   createDeliverableRequestSchema,
+  createEvidenceGuidedRequestSchema,
   createEvidenceLinkRequestSchema,
   createEvidenceRequestSchema,
   createMetricDefinitionRequestSchema,
@@ -54,6 +55,7 @@ import {
   type Acceptance,
   type CreateAcceptanceRequest,
   type CreateDeliverableRequest,
+  type CreateEvidenceGuidedRequest,
   type CreateEvidenceLinkRequest,
   type CreateEvidenceRequest,
   type CreateMetricDefinitionRequest,
@@ -574,6 +576,14 @@ export function createEvidence(input: CreateEvidenceRequest): Promise<Evidence> 
   return request(`${ROOT}/evidence`, {
     method: 'POST',
     body: createEvidenceRequestSchema.parse(input),
+    schema: evidenceSchema,
+  });
+}
+
+export function createGuidedEvidence(input: CreateEvidenceGuidedRequest): Promise<Evidence> {
+  return request(`${ROOT}/evidence/guided`, {
+    method: 'POST',
+    body: createEvidenceGuidedRequestSchema.parse(input),
     schema: evidenceSchema,
   });
 }

@@ -181,7 +181,7 @@ function ExperienceCard({
         <span className={`experience-status status-${candidate.status.toLowerCase()}`}>
           {experienceStatusLabel(candidate.status)}
         </span>
-        <small>r{candidate.revision}</small>
+        <small>{formatDate(candidate.updatedAt)}</small>
       </header>
       <h2>{candidate.title}</h2>
       <p>{experienceStageSummary(candidate)}</p>
@@ -214,10 +214,6 @@ function ExperienceCard({
           </dd>
         </div>
       </dl>
-      <footer>
-        <code>{shortId(candidate.source.taskId)}</code>
-        <time>{formatDate(candidate.updatedAt)}</time>
-      </footer>
     </article>
   );
 }
@@ -254,10 +250,8 @@ function CreateExperienceDialog({
       sourceDeliverableIds: [...selectedDeliverables],
       sourceEvidenceIds: [...selectedEvidence],
       candidateSummary,
-      permissionLabels: splitLabels(String(values.get('permissionLabels') ?? '')),
-      sensitivity: String(
-        values.get('sensitivity'),
-      ) as EmployeeCreateExperienceRequest['sensitivity'],
+      permissionLabels: tasks.find((task) => task.id === taskId)?.permissionLabels ?? [],
+      sensitivity: 'INTERNAL',
       idempotencyKey: nextIdempotencyKey(),
     };
     try {
@@ -374,21 +368,9 @@ function CreateExperienceDialog({
               </div>
             ) : null}
           </div>
-          <label>
-            <span>敏感级别</span>
-            <select name="sensitivity" defaultValue="INTERNAL">
-              <option value="PUBLIC">公开</option>
-              <option value="INTERNAL">内部</option>
-              <option value="CONFIDENTIAL">机密</option>
-              <option value="RESTRICTED">受限</option>
-            </select>
-          </label>
-          <label>
-            <span>权限标签（逗号分隔）</span>
-            <input name="permissionLabels" maxLength={500} />
-          </label>
           <div className="experience-submit-note wide">
-            提交后先进入脱敏与独立审核；员工本人不能自行审核、验证或发布。
+            权限范围自动继承来源任务和已验证证据，敏感级别由服务端复核。提交后先进入脱敏与独立审核；
+            员工本人不能自行审核、验证或发布。
           </div>
           {formError || create.isError ? (
             <p className="experience-form-error wide" role="alert">
@@ -644,25 +626,10 @@ function toggled(values: ReadonlySet<string>, id: string, checked: boolean): Set
   return next;
 }
 
-function splitLabels(value: string): string[] {
-  return [
-    ...new Set(
-      value
-        .split(/[,，]/u)
-        .map((label) => label.trim())
-        .filter(Boolean),
-    ),
-  ].slice(0, 100);
-}
-
 let idempotencySequence = 0;
 function nextIdempotencyKey(): string {
   idempotencySequence += 1;
   return `employee-experience-${Date.now().toString(36)}-${idempotencySequence}`;
-}
-
-function shortId(value: string): string {
-  return `${value.slice(0, 8)}…${value.slice(-4)}`;
 }
 
 function formatDate(value: string): string {

@@ -111,10 +111,16 @@ export class PeopleOrganizationService {
         assertPeopleReplay(replay, identity.requestHash);
         return mapCompetencyDefinition(replay);
       }
+      const code = await resolveCompetencyCode(
+        transaction,
+        principal.tenantId,
+        request.name,
+        request.code,
+      );
       const created = await transaction.competencyDefinition.create({
         data: {
           tenantId: principal.tenantId,
-          code: request.code,
+          code,
           name: request.name,
           category: request.category,
           description: request.description,
@@ -945,6 +951,12 @@ export class PeopleOrganizationService {
         assertPeopleReplay(replay, identity.requestHash);
         return this.mapTriangleTeam(transaction, replay.id);
       }
+      const code = await resolveTriangleTeamCode(
+        transaction,
+        principal.tenantId,
+        request.name,
+        request.code,
+      );
       const roleAssignmentIds = [
         request.customerRoleAssignmentId,
         request.solutionRoleAssignmentId,
@@ -991,7 +1003,7 @@ export class PeopleOrganizationService {
       const created = await transaction.triangleTeam.create({
         data: {
           tenantId: principal.tenantId,
-          code: request.code,
+          code,
           name: request.name,
           objectiveId: request.objectiveId,
           objectiveVersion: request.objectiveVersion,
@@ -1669,6 +1681,66 @@ export class PeopleOrganizationService {
       updatedAt: proposal.updatedAt.toISOString(),
     };
   }
+}
+
+async function resolveCompetencyCode(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  name: string,
+  explicitCode: string | undefined,
+): Promise<string> {
+  if (explicitCode !== undefined) return explicitCode;
+  await lockPeopleKey(transaction, tenantId, 'competency-code-keyspace', 'global');
+  const base = generatedPeopleCode('COMPETENCY', name);
+  for (let ordinal = 1; ordinal <= 10_000; ordinal += 1) {
+    const candidate = suffixedPeopleCode(base, ordinal);
+    const existing = await transaction.competencyDefinition.findFirst({
+      where: { tenantId, code: candidate },
+      select: { id: true },
+    });
+    if (existing === null) return candidate;
+  }
+  throw new ConflictException('No available competency code could be allocated.');
+}
+
+async function resolveTriangleTeamCode(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  name: string,
+  explicitCode: string | undefined,
+): Promise<string> {
+  if (explicitCode !== undefined) return explicitCode;
+  await lockPeopleKey(transaction, tenantId, 'triangle-team-code-keyspace', 'global');
+  const base = generatedPeopleCode('TEAM', name);
+  for (let ordinal = 1; ordinal <= 10_000; ordinal += 1) {
+    const candidate = suffixedPeopleCode(base, ordinal);
+    const existing = await transaction.triangleTeam.findFirst({
+      where: { tenantId, code: candidate },
+      select: { id: true },
+    });
+    if (existing === null) return candidate;
+  }
+  throw new ConflictException('No available triangle team code could be allocated.');
+}
+
+export function generatedPeopleCode(prefix: string, name: string): string {
+  const readable = name
+    .normalize('NFKD')
+    .replace(/\p{Mark}+/gu, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, '.')
+    .replace(/^\.+|\.+$/gu, '');
+  const fallback = [...name.trim()]
+    .map((character) => character.codePointAt(0)?.toString(36).toUpperCase() ?? '')
+    .filter(Boolean)
+    .join('.');
+  return `${prefix}.${readable || fallback || 'UNTITLED'}`.slice(0, 100);
+}
+
+function suffixedPeopleCode(base: string, ordinal: number): string {
+  if (ordinal === 1) return base;
+  const suffix = `-${ordinal}`;
+  return `${base.slice(0, 100 - suffix.length).replace(/[.-]+$/u, '')}${suffix}`;
 }
 
 function mapCompetencyDefinition(row: {

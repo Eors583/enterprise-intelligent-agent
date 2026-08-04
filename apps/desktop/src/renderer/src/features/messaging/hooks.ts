@@ -6,18 +6,24 @@ import type {
   CreateMessageRequest,
   Message,
   MessageListResponse,
+  UpdateConversationStateRequest,
   UpsertAnswerFeedbackRequest,
 } from '@enterprise/contracts';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import {
   cancelAgentRun,
+  changeGroupMembers,
   createDirectConversation,
   getAnswerFeedback,
   listConversations,
   listMessages,
+  markConversationRead,
+  renameGroupConversation,
   retryAgentRun,
+  searchConversationMessages,
   sendTextMessage,
+  updateConversationState,
   upsertAnswerFeedback,
 } from './api';
 import { getExpectedDesktopSessionId } from '../../shared/api/client';
@@ -50,6 +56,7 @@ export function useConversations(enabled = true) {
 
 export function useConversationMessages(conversationId: string | null, enabled = true) {
   const activity = useWindowActivity();
+  const queryClient = useQueryClient();
   const queryEnabled = enabled && conversationId !== null;
   const query = useQuery({
     queryKey: conversationQueryKeys.messages(conversationId ?? 'none'),
@@ -59,7 +66,130 @@ export function useConversationMessages(conversationId: string | null, enabled =
     ...messagingSyncOptions('messages', activity, queryEnabled),
   });
   useImmediateRefetchOnFocus(activity, queryEnabled, query.refetch);
+  const latestMessageId = query.data?.items.at(-1)?.id;
+  const markedReadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      activity !== 'focused' ||
+      conversationId === null ||
+      latestMessageId === undefined ||
+      markedReadRef.current === `${conversationId}:${latestMessageId}`
+    ) {
+      return;
+    }
+    markedReadRef.current = `${conversationId}:${latestMessageId}`;
+    void markConversationRead(conversationId, latestMessageId)
+      .then(() => queryClient.invalidateQueries({ queryKey: conversationQueryKeys.all }))
+      .catch(() => {
+        markedReadRef.current = null;
+      });
+  }, [activity, conversationId, latestMessageId, queryClient]);
   return query;
+}
+
+export function useLoadOlderMessages(conversationId: string | null) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (before: string) =>
+      listMessages(conversationId!, undefined, undefined, { before, limit: 50 }),
+    onSuccess: (older) => {
+      if (conversationId === null) return;
+      queryClient.setQueryData<MessageListResponse>(
+        conversationQueryKeys.messages(conversationId),
+        (current = { items: [], runs: [] }) => ({
+          ...current,
+          items: [
+            ...older.items,
+            ...current.items.filter(
+              (message) => !older.items.some((olderMessage) => olderMessage.id === message.id),
+            ),
+          ],
+          runs: [
+            ...older.runs,
+            ...current.runs.filter((run) => !older.runs.some((olderRun) => olderRun.id === run.id)),
+          ],
+          nextCursor: older.nextCursor ?? null,
+          hasMore: older.hasMore ?? false,
+        }),
+      );
+    },
+  });
+}
+
+export function useConversationSearch(conversationId: string | null) {
+  return useMutation({
+    mutationFn: (query: string) => searchConversationMessages(conversationId!, query),
+  });
+}
+
+export function useConversationStateActions() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      conversationId,
+      request,
+    }: {
+      conversationId: string;
+      request: UpdateConversationStateRequest;
+    }) => updateConversationState(conversationId, request),
+    onSuccess: (conversation) => {
+      queryClient.setQueryData<Conversation[]>(conversationQueryKeys.all, (current = []) =>
+        current.map((item) => (item.id === conversation.id ? conversation : item)),
+      );
+      void queryClient.invalidateQueries({ queryKey: conversationQueryKeys.all });
+    },
+  });
+}
+
+export function useGroupActions(conversationId: string | null) {
+  const queryClient = useQueryClient();
+  const commit = (conversation: Conversation): void => {
+    queryClient.setQueryData<Conversation[]>(conversationQueryKeys.all, (current = []) =>
+      current.map((item) => (item.id === conversation.id ? conversation : item)),
+    );
+  };
+  const rename = useMutation({
+    mutationFn: (title: string) => renameGroupConversation(conversationId!, { title }),
+    onSuccess: commit,
+  });
+  const members = useMutation({
+    mutationFn: (request: Parameters<typeof changeGroupMembers>[1]) =>
+      changeGroupMembers(conversationId!, request),
+    onSuccess: commit,
+  });
+  return { rename, members };
+}
+
+/**
+ * WuKongIM supplies low-latency wake-ups while PostgreSQL remains the trusted
+ * read model. Every notification causes a contract-validated API refresh;
+ * payload data from the transport is never rendered as authoritative content.
+ */
+export function useImRealtimeSync(enabled = true): void {
+  const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const expectedSessionId = getExpectedDesktopSessionId();
+    if (
+      expectedSessionId === null ||
+      typeof window.enterpriseDesktop?.subscribeImRealtime !== 'function'
+    ) {
+      return undefined;
+    }
+    return window.enterpriseDesktop.subscribeImRealtime({ expectedSessionId }, (update) => {
+      if (update.kind !== 'message') return;
+      void queryClient.invalidateQueries({ queryKey: conversationQueryKeys.all, exact: true });
+      if (update.conversationId !== null) {
+        void queryClient.invalidateQueries({
+          queryKey: conversationQueryKeys.messages(update.conversationId),
+          exact: true,
+        });
+      } else {
+        void queryClient.invalidateQueries({ queryKey: ['conversations'] });
+      }
+    });
+  }, [enabled, queryClient]);
 }
 
 export function useCreateDirectConversation() {

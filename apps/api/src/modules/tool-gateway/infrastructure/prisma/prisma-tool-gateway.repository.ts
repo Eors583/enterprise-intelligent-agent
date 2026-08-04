@@ -254,26 +254,43 @@ export class PrismaToolGatewayRepository extends ToolGatewayRepository {
         input.principal.userId,
         'enterprise_agent_admin',
         async (transaction) => {
-          const existing = await transaction.$queryRaw<ToolDefinitionRow[]>`
+          const ownerUserId = input.request.ownerUserId ?? input.principal.userId;
+          await transaction.$queryRaw`
+            SELECT pg_advisory_xact_lock(
+              hashtextextended(
+                ${`tool-definition-key:${input.principal.tenantId}`},
+                0
+              )
+            )
+          `;
+          const candidates = await transaction.$queryRaw<ToolDefinitionRow[]>`
             SELECT *
             FROM public."tool_definitions"
             WHERE "tenant_id" = ${input.principal.tenantId}::uuid
-              AND "key" = ${input.request.key}
-            LIMIT 1
+              AND (
+                "key" = ${input.request.key}
+                OR (
+                  ${input.keyWasGenerated}
+                  AND "key" LIKE ${`${input.request.key}-%`}
+                )
+              )
+            ORDER BY "created_at" ASC, "id" ASC
           `;
-          const prior = existing[0];
-          const ownerUserId = input.request.ownerUserId ?? input.principal.userId;
-          if (prior !== undefined) {
-            const matches =
-              prior.name === input.request.name &&
-              prior.description === input.request.description &&
-              prior.owner_user_id === ownerUserId &&
-              runtimeHash(stringArray(prior.permission_labels)) ===
-                runtimeHash(input.request.permissionLabels);
-            return matches
-              ? { kind: 'IDEMPOTENT_REPLAY', value: mapToolDefinitionRow(prior) }
-              : { kind: 'IDEMPOTENCY_CONFLICT' };
+          const replay = candidates.find((candidate) =>
+            definitionRequestMatches(candidate, input.request, ownerUserId),
+          );
+          if (replay !== undefined) {
+            return { kind: 'IDEMPOTENT_REPLAY', value: mapToolDefinitionRow(replay) };
           }
+          if (!input.keyWasGenerated && candidates.length > 0) {
+            return { kind: 'IDEMPOTENCY_CONFLICT' };
+          }
+          const definitionKey = input.keyWasGenerated
+            ? nextGeneratedDefinitionKey(
+                input.request.key,
+                new Set(candidates.map((candidate) => candidate.key)),
+              )
+            : input.request.key;
           const id = randomUUID();
           const createdRows = await transaction.$queryRaw<ToolDefinitionRow[]>(Prisma.sql`
             INSERT INTO public."tool_definitions" (
@@ -282,7 +299,7 @@ export class PrismaToolGatewayRepository extends ToolGatewayRepository {
             ) VALUES (
               ${id}::uuid,
               ${input.principal.tenantId}::uuid,
-              ${input.request.key},
+              ${definitionKey},
               ${input.request.name},
               ${input.request.description},
               ${ownerUserId}::uuid,
@@ -299,7 +316,8 @@ export class PrismaToolGatewayRepository extends ToolGatewayRepository {
             eventType: 'ToolDefinition.Created',
             payload: {
               toolDefinitionId: id,
-              key: input.request.key,
+              key: definitionKey,
+              keySource: input.keyWasGenerated ? 'SERVER_GENERATED' : 'EXPLICIT',
               idempotencyKey: input.request.idempotencyKey,
             },
             occurredAt: created.created_at,
@@ -1988,6 +2006,30 @@ function initialCommand(decision: ToolInvocationPolicyDecision): ToolInvocationC
   if (decision.reasonCode === 'CONFIRMATION_REQUIRED') return 'REQUEST_CONFIRMATION';
   if (decision.reasonCode === 'APPROVAL_REQUIRED') return 'REQUEST_APPROVAL';
   return null;
+}
+
+function definitionRequestMatches(
+  candidate: ToolDefinitionRow,
+  request: CreateToolDefinitionInput['request'],
+  ownerUserId: string,
+): boolean {
+  return (
+    candidate.name === request.name &&
+    candidate.description === request.description &&
+    candidate.owner_user_id === ownerUserId &&
+    runtimeHash(stringArray(candidate.permission_labels)) === runtimeHash(request.permissionLabels)
+  );
+}
+
+function nextGeneratedDefinitionKey(baseKey: string, occupiedKeys: ReadonlySet<string>): string {
+  if (!occupiedKeys.has(baseKey)) return baseKey;
+  for (let suffixNumber = 2; suffixNumber <= 10_000; suffixNumber += 1) {
+    const suffix = `-${suffixNumber}`;
+    const stem = baseKey.slice(0, 100 - suffix.length).replace(/[-.]+$/u, '');
+    const candidate = `${stem}${suffix}`;
+    if (!occupiedKeys.has(candidate)) return candidate;
+  }
+  throw new Error('Unable to allocate a unique server-generated Tool Definition key.');
 }
 
 function policyProof(

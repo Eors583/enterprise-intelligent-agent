@@ -97,6 +97,75 @@ describe('EmployeeTaskExecutionService fail-closed boundaries', () => {
 
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
+
+  it('applies the same task-state boundary to the simplified business submission command', async () => {
+    const evidenceId = '00000000-0000-7000-8000-000000000007';
+    const deliverableId = '00000000-0000-7000-8000-000000000006';
+    const transaction = {
+      ...authorizationTransaction(taskRecord({ status: 'READY' })),
+      deliverable: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: deliverableId,
+          tenantId,
+          taskId,
+          ownerUserId: null,
+          ownerRoleAssignmentId: assignmentId,
+          ownerRoleTemplateId: null,
+          ownerOrgUnitId: null,
+          permissionLabels: [],
+        }),
+      },
+      evidenceLink: {
+        findMany: vi.fn().mockResolvedValue([{ evidenceId }]),
+      },
+    };
+    const prisma = prismaMock(transaction);
+    const service = createService(prisma, policyMock());
+
+    await expect(
+      service.submitDeliverableCommand(taskId, deliverableId, {
+        roleAssignmentId: assignmentId,
+        businessDescription: '交付资料已整理完成。',
+        sourceType: 'DOCUMENT',
+        sourceUri: 'https://documents.example.test/result',
+        evidenceIds: [evidenceId],
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('rejects a simplified submission when the deliverable does not resolve inside the task', async () => {
+    const evidenceId = '00000000-0000-7000-8000-000000000007';
+    const deliverableId = '00000000-0000-7000-8000-000000000006';
+    const transaction = {
+      ...authorizationTransaction(taskRecord({ status: 'IN_PROGRESS' })),
+      deliverable: {
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
+      evidenceLink: {
+        findMany: vi.fn(),
+      },
+    };
+    const prisma = prismaMock(transaction);
+    const service = createService(prisma, policyMock());
+
+    await expect(
+      service.submitDeliverableCommand(taskId, deliverableId, {
+        roleAssignmentId: assignmentId,
+        businessDescription: '尝试引用其他任务的交付物。',
+        sourceType: 'HUMAN_ATTESTATION',
+        sourceUri: null,
+        evidenceIds: [evidenceId],
+      }),
+    ).rejects.toMatchObject({ status: 404 });
+
+    expect(transaction.deliverable.findFirst).toHaveBeenCalledWith({
+      where: { tenantId, id: deliverableId, taskId },
+    });
+    expect(transaction.evidenceLink.findMany).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
 });
 
 function createService(

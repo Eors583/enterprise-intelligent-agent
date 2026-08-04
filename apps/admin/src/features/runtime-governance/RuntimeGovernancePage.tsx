@@ -812,13 +812,20 @@ function RuntimeCommandDialog(props: RuntimeCommandDialogProps): ReactNode {
         {failureCommand ? (
           <>
             <label>
-              <span>失败代码</span>
-              <input
+              <span>失败类型</span>
+              <select
                 value={failureCode}
                 disabled={submitting}
                 required
                 onChange={(event) => setFailureCode(event.target.value)}
-              />
+              >
+                <option value="">请选择</option>
+                <option value="BUSINESS_VALIDATION_FAILED">业务校验未通过</option>
+                <option value="DEPENDENCY_UNAVAILABLE">依赖服务不可用</option>
+                <option value="PERMISSION_DENIED">权限不足</option>
+                <option value="TIMEOUT">处理超时</option>
+                <option value="UNEXPECTED_FAILURE">其他异常</option>
+              </select>
             </label>
             <label>
               <span>失败详情</span>

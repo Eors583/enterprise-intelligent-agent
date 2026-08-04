@@ -7,6 +7,7 @@ import type {
 import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react';
 
 import { messageFromError } from '@/api/client';
+import { TagInput } from '@/components/EntityPicker';
 import { EmptyState, ErrorState, LoadingPanel, Notice, StatusPill } from '@/components/ui';
 import {
   closeBreakGlassReview,
@@ -29,6 +30,9 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [providerDisplayName, setProviderDisplayName] = useState('');
+  const [oidcScopes, setOidcScopes] = useState<string[]>(['openid', 'profile', 'email']);
+  const [allowedEmailDomains, setAllowedEmailDomains] = useState<string[]>([]);
 
   const load = useCallback(async (): Promise<void> => {
     setError(null);
@@ -53,27 +57,20 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
   const saveProvider = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const key = String(form.get('key') ?? '')
-      .trim()
-      .toLowerCase();
+    const key = providerKey(providerDisplayName);
     const current = providers?.find((provider) => provider.key === key);
     const secret = String(form.get('clientSecret') ?? '');
     const input: OidcProviderInput = {
       key,
-      displayName: String(form.get('displayName') ?? ''),
+      displayName: providerDisplayName,
       issuer: String(form.get('issuer') ?? ''),
       discoveryUrl: String(form.get('discoveryUrl') ?? ''),
       clientId: String(form.get('clientId') ?? ''),
       ...(secret === '' ? {} : { clientSecret: secret }),
-      scopes: String(form.get('scopes') ?? 'openid profile email')
-        .split(/\s+/)
-        .filter(Boolean),
+      scopes: oidcScopes,
       jitMode: String(form.get('jitMode') ?? 'EXISTING_USERS_ONLY') as OidcProviderInput['jitMode'],
       allowVerifiedEmailLinking: form.get('allowVerifiedEmailLinking') === 'on',
-      allowedEmailDomains: String(form.get('allowedEmailDomains') ?? '')
-        .split(',')
-        .map((domain) => domain.trim().toLowerCase())
-        .filter(Boolean),
+      allowedEmailDomains: allowedEmailDomains.map((domain) => domain.toLowerCase()),
       clockSkewSeconds: 60,
       expectedRevision: current?.revision ?? 0,
       idempotencyKey: crypto.randomUUID(),
@@ -83,6 +80,9 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
       'OIDC 配置已保存为草稿；发布前必须完成实时发现/JWKS 验证和异人审批。',
     );
     event.currentTarget.reset();
+    setProviderDisplayName('');
+    setOidcScopes(['openid', 'profile', 'email']);
+    setAllowedEmailDomains([]);
   };
 
   const savePolicy = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -294,12 +294,13 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
           <form className="form-stack" onSubmit={(event) => void saveProvider(event)}>
             <div className="form-grid two">
               <label>
-                <span>标识</span>
-                <input name="key" required placeholder="work-sso" />
-              </label>
-              <label>
                 <span>显示名称</span>
-                <input name="displayName" required />
+                <input
+                  name="displayName"
+                  required
+                  value={providerDisplayName}
+                  onChange={(event) => setProviderDisplayName(event.target.value)}
+                />
               </label>
             </div>
             <label>
@@ -318,10 +319,33 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
               <span>Client secret（更新时留空表示保留）</span>
               <input name="clientSecret" type="password" autoComplete="new-password" />
             </label>
-            <label>
-              <span>Scopes</span>
-              <input name="scopes" defaultValue="openid profile email" />
-            </label>
+            <fieldset>
+              <legend>登录授权范围</legend>
+              {(
+                [
+                  ['openid', '基础身份（必选）'],
+                  ['profile', '姓名和头像'],
+                  ['email', '邮箱'],
+                  ['groups', '用户组'],
+                ] as const
+              ).map(([value, label]) => (
+                <label className="checkbox-row" key={value}>
+                  <input
+                    type="checkbox"
+                    checked={oidcScopes.includes(value)}
+                    disabled={value === 'openid'}
+                    onChange={(event) =>
+                      setOidcScopes((current) =>
+                        event.target.checked
+                          ? [...new Set([...current, value])]
+                          : current.filter((scope) => scope !== value),
+                      )
+                    }
+                  />
+                  <span>{label}</span>
+                </label>
+              ))}
+            </fieldset>
             <label>
               <span>JIT</span>
               <select name="jitMode" defaultValue="EXISTING_USERS_ONLY">
@@ -331,8 +355,13 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
               </select>
             </label>
             <label>
-              <span>允许邮箱域（逗号分隔）</span>
-              <input name="allowedEmailDomains" />
+              <span>允许登录的邮箱域</span>
+              <TagInput
+                value={allowedEmailDomains}
+                onChange={setAllowedEmailDomains}
+                ariaLabel="允许登录的邮箱域"
+                placeholder="输入域名后按回车，例如 example.com"
+              />
             </label>
             <label className="checkbox-row">
               <input name="allowVerifiedEmailLinking" type="checkbox" />
@@ -491,4 +520,14 @@ export function IdentityGovernancePage({ currentUserId }: { currentUserId: strin
       </article>
     </section>
   );
+}
+
+function providerKey(displayName: string): string {
+  const slug = displayName
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, '-')
+    .replace(/^-|-$/gu, '')
+    .slice(0, 40);
+  return slug || `identity-${crypto.randomUUID().slice(0, 8)}`;
 }

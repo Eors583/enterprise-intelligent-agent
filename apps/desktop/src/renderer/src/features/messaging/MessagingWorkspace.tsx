@@ -5,6 +5,7 @@ import type {
   CreateMessageRequest,
   KnowledgeCitationDetail,
   Message,
+  MessageResponseTarget,
   TextMessageContent,
 } from '@enterprise/contracts';
 import {
@@ -24,7 +25,11 @@ import {
   useAgentRunActions,
   useAgentRunStream,
   useAnswerFeedback,
+  useConversationSearch,
   useConversationMessages,
+  useConversationStateActions,
+  useImRealtimeSync,
+  useLoadOlderMessages,
   useSendTextMessage,
   useUpsertAnswerFeedback,
 } from './hooks';
@@ -41,7 +46,9 @@ interface MessagingSidebarProps {
   currentUserId: string;
   onSelect: (conversationId: string) => void;
   onRetry: () => Promise<unknown>;
-  onCreateAgentPair: (agentIds: [string, string], turnLimit: number) => Promise<void>;
+  onStartConversation?: (() => void) | undefined;
+  enableAgentPairCollaboration?: boolean | undefined;
+  onCreateAgentPair?: (agentIds: [string, string], turnLimit: number) => Promise<void>;
 }
 
 export function MessagingSidebar({
@@ -55,11 +62,25 @@ export function MessagingSidebar({
   currentUserId,
   onSelect,
   onRetry,
+  onStartConversation,
+  enableAgentPairCollaboration = false,
   onCreateAgentPair,
 }: MessagingSidebarProps): React.JSX.Element {
   const [isManualRefreshing, setIsManualRefreshing] = useState(false);
   const [isAgentPairDialogOpen, setIsAgentPairDialogOpen] = useState(false);
+  const [conversationFilter, setConversationFilter] = useState('');
   const hasCachedConversations = conversations !== undefined;
+  const normalizedConversationFilter = conversationFilter.trim().toLocaleLowerCase('zh-CN');
+  const visibleConversations = conversations?.filter(
+    (conversation) =>
+      normalizedConversationFilter.length === 0 ||
+      conversationTitle(conversation, currentUserId)
+        .toLocaleLowerCase('zh-CN')
+        .includes(normalizedConversationFilter) ||
+      conversation.participants.some((participant) =>
+        participant.name.toLocaleLowerCase('zh-CN').includes(normalizedConversationFilter),
+      ),
+  );
 
   async function refreshConversations(): Promise<void> {
     if (isManualRefreshing) return;
@@ -104,29 +125,52 @@ export function MessagingSidebar({
             >
               {isManualRefreshing ? '…' : '↻'}
             </button>
+            {onStartConversation && (
+              <button
+                type="button"
+                className="new-conversation-button"
+                onClick={onStartConversation}
+              >
+                ＋ 新建
+              </button>
+            )}
           </header>
 
-          <div className="agent-collaboration-launch">
-            <button
-              type="button"
-              disabled={agents.length < 2}
-              title={
-                agents.length < 2 ? '至少需要两个已通过运行就绪检查的智能体' : '创建智能体协作会话'
-              }
-              onClick={() => setIsAgentPairDialogOpen(true)}
-            >
-              <span className="agent-pair-mark" aria-hidden="true">
-                AI
-              </span>
-              <span>
-                <strong>智能体协作</strong>
-                <small>
-                  {agents.length < 2 ? '运行可用智能体不足 2 个' : '选择两个智能体受控协作'}
-                </small>
-              </span>
-              <i aria-hidden="true">＋</i>
-            </button>
-          </div>
+          <label className="conversation-filter">
+            <span aria-hidden="true">⌕</span>
+            <input
+              type="search"
+              value={conversationFilter}
+              placeholder="搜索会话或成员"
+              onChange={(event) => setConversationFilter(event.target.value)}
+            />
+          </label>
+
+          {enableAgentPairCollaboration && onCreateAgentPair && (
+            <div className="agent-collaboration-launch">
+              <button
+                type="button"
+                disabled={agents.length < 2}
+                title={
+                  agents.length < 2
+                    ? '至少需要两个已通过运行就绪检查的智能体'
+                    : '创建智能体协作会话'
+                }
+                onClick={() => setIsAgentPairDialogOpen(true)}
+              >
+                <span className="agent-pair-mark" aria-hidden="true">
+                  AI
+                </span>
+                <span>
+                  <strong>智能体协作</strong>
+                  <small>
+                    {agents.length < 2 ? '运行可用智能体不足 2 个' : '选择两个智能体受控协作'}
+                  </small>
+                </span>
+                <i aria-hidden="true">＋</i>
+              </button>
+            </div>
+          )}
 
           <div className="conversation-list" aria-live="polite">
             {isLoading && <ConversationListSkeleton />}
@@ -140,18 +184,19 @@ export function MessagingSidebar({
             {isError && hasCachedConversations && (
               <SyncWarning error={error} onRetry={() => void refreshConversations()} />
             )}
-            {!isLoading && hasCachedConversations && conversations?.length === 0 && (
+            {!isLoading && hasCachedConversations && visibleConversations?.length === 0 && (
               <div className="conversation-list-empty">
                 <span aria-hidden="true">◇</span>
                 <strong>还没有会话</strong>
-                <p>从通讯录选择成员，再联系本人或其智能体。</p>
+                <p>从通讯录选择成员，进入本人和其智能体共用的会话。</p>
               </div>
             )}
             {!isLoading &&
               hasCachedConversations &&
-              conversations?.map((conversation) => {
+              visibleConversations?.map((conversation) => {
                 const isAgent = conversationHasAgent(conversation);
                 const isAgentPair = conversationHasAgentPair(conversation);
+                const isShared = conversationHasSharedMemberAgent(conversation, currentUserId);
                 return (
                   <button
                     type="button"
@@ -171,25 +216,38 @@ export function MessagingSidebar({
                         {isAgent && (
                           <i className="conversation-ai-badge">{isAgentPair ? 'AI × 2' : 'AI'}</i>
                         )}
+                        {conversation.pinnedAt ? <i className="conversation-pin">置顶</i> : null}
                       </span>
                       <small>
-                        {isAgentPair
-                          ? '智能体协作 · 受控轮次'
-                          : isAgent
-                            ? '智能体会话'
-                            : '真人会话'}
+                        {conversation.type === 'group'
+                          ? `群聊 · ${conversation.participants.filter((participant) => participant.type === 'user').length} 位成员`
+                          : isAgentPair
+                            ? '智能体协作 · 受控轮次'
+                            : isShared
+                              ? '成员与智能体共享'
+                              : isAgent
+                                ? '智能体会话'
+                                : '真人会话'}
                       </small>
                     </span>
                     <time dateTime={conversation.lastMessageAt ?? conversation.updatedAt}>
                       {compactTime(conversation.lastMessageAt ?? conversation.updatedAt)}
                     </time>
+                    {(conversation.unreadCount ?? 0) > 0 ? (
+                      <span
+                        className="conversation-unread"
+                        aria-label={`${conversation.unreadCount} 条未读`}
+                      >
+                        {Math.min(conversation.unreadCount ?? 0, 99)}
+                      </span>
+                    ) : null}
                   </button>
                 );
               })}
           </div>
         </section>
       </aside>
-      {isAgentPairDialogOpen && (
+      {enableAgentPairCollaboration && onCreateAgentPair && isAgentPairDialogOpen && (
         <AgentPairDialog
           agents={agents}
           onClose={() => setIsAgentPairDialogOpen(false)}
@@ -374,19 +432,28 @@ function AgentSummary({
 interface ConversationWorkspaceProps {
   conversation: Conversation | null;
   currentUserId: string;
+  preferredResponseTargetKind?: 'human' | 'agent' | null;
 }
 
 export function ConversationWorkspace({
   conversation,
   currentUserId,
+  preferredResponseTargetKind = null,
 }: ConversationWorkspaceProps): React.JSX.Element {
+  useImRealtimeSync();
   const conversationId = conversation?.id ?? null;
   const messages = useConversationMessages(conversationId, conversation !== null);
+  const loadOlder = useLoadOlderMessages(conversationId);
+  const searchMessages = useConversationSearch(conversationId);
+  const stateActions = useConversationStateActions();
   const sendMessage = useSendTextMessage(conversationId);
   const runActions = useAgentRunActions(conversationId);
   const [composer, dispatch] = useReducer(composerReducer, initialComposerState);
   const [isManualRefreshing, setIsManualRefreshing] = useState(false);
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+  const [responseTargetKind, setResponseTargetKind] = useState<'human' | 'agent'>('human');
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const retryGateRef = useRef(new RunActionGate());
   const listEndRef = useRef<HTMLDivElement | null>(null);
   const activeRun = [...(messages.data?.runs ?? [])]
@@ -401,6 +468,22 @@ export function ConversationWorkspace({
     setRetryingRunId(null);
     runActions.retry.reset();
   }, [conversationId]);
+
+  useEffect(() => {
+    if (conversation === null || conversationHasAgentPair(conversation)) return;
+    const targets = conversationResponseTargets(conversation, currentUserId);
+    if (preferredResponseTargetKind === 'agent' && targets.agent !== undefined) {
+      setResponseTargetKind('agent');
+      return;
+    }
+    if (preferredResponseTargetKind === 'human' && targets.human !== undefined) {
+      setResponseTargetKind('human');
+      return;
+    }
+    setResponseTargetKind(
+      targets.human === undefined && targets.agent !== undefined ? 'agent' : 'human',
+    );
+  }, [conversation, currentUserId, preferredResponseTargetKind]);
 
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ block: 'end' });
@@ -418,12 +501,20 @@ export function ConversationWorkspace({
     );
   }
 
-  const isAgentConversation = conversationHasAgent(conversation);
-  const isAgentPair = conversationHasAgentPair(conversation);
+  const activeConversation = conversation;
+
+  const isAgentConversation = conversationHasAgent(activeConversation);
+  const isAgentPair = conversationHasAgentPair(activeConversation);
+  const isGroup = activeConversation.type === 'group';
+  const responseTargets = conversationResponseTargets(activeConversation, currentUserId);
+  const isSharedMemberAgentConversation =
+    !isAgentPair && responseTargets.human !== undefined && responseTargets.agent !== undefined;
   const latestMessage = messages.data?.items.at(-1);
   const latestRun = messages.data?.runs.at(-1);
   const failedRun =
-    latestRun && ['FAILED', 'UNKNOWN', 'CANCELLED'].includes(latestRun.status)
+    latestRun &&
+    latestMessage?.id === latestRun.inputMessageId &&
+    ['FAILED', 'UNKNOWN', 'CANCELLED'].includes(latestRun.status)
       ? latestRun
       : undefined;
   const awaitingAgentReply =
@@ -443,6 +534,11 @@ export function ConversationWorkspace({
     runSend({
       clientMessageId: createClientMessageId(),
       content: { type: 'text', text },
+      ...(isAgentPair || (isGroup && responseTargetKind === 'human')
+        ? {}
+        : {
+            responseTarget: selectedResponseTarget(responseTargetKind, responseTargets),
+          }),
     });
   }
 
@@ -454,6 +550,37 @@ export function ConversationWorkspace({
     } finally {
       setIsManualRefreshing(false);
     }
+  }
+
+  function togglePinned(): void {
+    stateActions.mutate({
+      conversationId: activeConversation.id,
+      request: { pinned: activeConversation.pinnedAt == null },
+    });
+  }
+
+  function toggleMuted(): void {
+    const isMuted =
+      activeConversation.mutedUntil != null &&
+      new Date(activeConversation.mutedUntil).getTime() > Date.now();
+    stateActions.mutate({
+      conversationId: activeConversation.id,
+      request: {
+        mutedUntil: isMuted
+          ? null
+          : new Date(Date.now() + 365 * 24 * 60 * 60 * 1_000).toISOString(),
+      },
+    });
+  }
+
+  function archiveConversation(): void {
+    stateActions.mutate({ conversationId: activeConversation.id, request: { archived: true } });
+  }
+
+  function runMessageSearch(event: FormEvent<HTMLFormElement>): void {
+    event.preventDefault();
+    const query = messageSearchQuery.trim();
+    if (query.length > 0) searchMessages.mutate(query);
   }
 
   function retryFailedRun(runId: string): void {
@@ -473,7 +600,7 @@ export function ConversationWorkspace({
   return (
     <section
       className="conversation-workspace"
-      aria-label={conversationTitle(conversation, currentUserId)}
+      aria-label={conversationTitle(activeConversation, currentUserId)}
     >
       <header className="conversation-header">
         <ConversationAvatar conversation={conversation} currentUserId={currentUserId} large />
@@ -481,10 +608,35 @@ export function ConversationWorkspace({
           <div>
             <h1>{conversationTitle(conversation, currentUserId)}</h1>
             <span className={isAgentConversation ? 'identity-badge agent' : 'identity-badge human'}>
-              {isAgentPair ? '智能体协作' : isAgentConversation ? 'AI 智能体' : '真人'}
+              {isGroup
+                ? '群聊'
+                : isAgentPair
+                  ? '智能体协作'
+                  : isSharedMemberAgentConversation
+                    ? '成员与智能体共享'
+                    : isAgentConversation
+                      ? (responseTargets.agent?.name ?? 'AI 智能体')
+                      : '真人'}
             </span>
           </div>
           <p>{participantDescription(conversation, currentUserId)}</p>
+        </div>
+        <div className="conversation-header-actions">
+          <button type="button" onClick={() => setIsSearchOpen((current) => !current)}>
+            搜索
+          </button>
+          <button type="button" disabled={stateActions.isPending} onClick={togglePinned}>
+            {conversation.pinnedAt == null ? '置顶' : '取消置顶'}
+          </button>
+          <button type="button" disabled={stateActions.isPending} onClick={toggleMuted}>
+            {conversation.mutedUntil != null &&
+            new Date(conversation.mutedUntil).getTime() > Date.now()
+              ? '取消免打扰'
+              : '免打扰'}
+          </button>
+          <button type="button" disabled={stateActions.isPending} onClick={archiveConversation}>
+            归档
+          </button>
         </div>
         <button
           type="button"
@@ -496,17 +648,63 @@ export function ConversationWorkspace({
         </button>
       </header>
 
+      {isSearchOpen ? (
+        <section className="conversation-message-search" aria-label="搜索当前会话">
+          <form onSubmit={runMessageSearch}>
+            <input
+              type="search"
+              value={messageSearchQuery}
+              maxLength={200}
+              placeholder="搜索消息内容"
+              onChange={(event) => setMessageSearchQuery(event.target.value)}
+            />
+            <button type="submit" disabled={searchMessages.isPending || !messageSearchQuery.trim()}>
+              {searchMessages.isPending ? '搜索中…' : '搜索'}
+            </button>
+          </form>
+          {searchMessages.isError ? (
+            <p role="alert">{readableError(searchMessages.error)}</p>
+          ) : null}
+          {searchMessages.data ? (
+            <div className="conversation-message-search-results">
+              {searchMessages.data.items.length === 0 ? (
+                <p>没有找到相关消息。</p>
+              ) : (
+                searchMessages.data.items.map((message) => (
+                  <article key={message.id}>
+                    <strong>{message.sender.name}</strong>
+                    <p>{message.content.text}</p>
+                    <time dateTime={message.createdAt}>{fullTime(message.createdAt)}</time>
+                  </article>
+                ))
+              )}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
       {isAgentConversation && (
         <div className="conversation-ai-disclosure" role="note">
-          <strong>{isAgentPair ? '受控轮次' : 'AI 身份提示'}</strong>
+          <strong>{isAgentPair ? '受控轮次' : '共享会话'}</strong>
           {isAgentPair
             ? '你是当前协作的观察者。发送主题后，两个智能体会由服务端按设定轮次交替讨论；桌面端只展示服务端实际返回的内容。'
-            : '当前会话对象包含智能体。回答只会展示服务端实际返回的消息，桌面端不会伪造 AI 回复；重要决定请向成员本人确认。'}
+            : `${responseTargets.agent?.name ?? '该成员的智能体'}和成员本人共用此窗口。你可以选择由谁回应；无论选择哪一方，成员本人都能收到并查看消息，也可以随时接管回复。`}
         </div>
       )}
 
       <div className="message-timeline" aria-live="polite" aria-busy={messages.isPending}>
         {messages.isPending && <MessageTimelineSkeleton />}
+        {messages.data?.hasMore && messages.data.nextCursor ? (
+          <button
+            type="button"
+            className="load-older-messages"
+            disabled={loadOlder.isPending}
+            onClick={() => loadOlder.mutate(messages.data!.nextCursor!)}
+          >
+            {loadOlder.isPending ? '正在加载…' : '加载更早消息'}
+          </button>
+        ) : null}
+        {loadOlder.isError ? <p role="alert">{readableError(loadOlder.error)}</p> : null}
         {messages.isError && messages.data === undefined && (
           <InlineFailure
             title="消息加载失败"
@@ -534,6 +732,8 @@ export function ConversationWorkspace({
               key={message.id}
               message={message}
               isCurrentUser={message.sender.type === 'user' && message.sender.id === currentUserId}
+              senderDisplayName={messageSenderDisplayName(message, conversation)}
+              responseTargetName={messageResponseTargetName(message.responseTarget, conversation)}
             />
           ))}
         {sendMessage.isPending && (
@@ -543,7 +743,11 @@ export function ConversationWorkspace({
         )}
         {awaitingAgentReply && runStream.content.length > 0 ? (
           <AgentRunStreamingBubble
-            agentName={activeRun?.agentName ?? 'AI'}
+            agentName={
+              conversationAgentDisplayName(conversation, activeRun?.agentId) ??
+              activeRun?.agentName ??
+              'AI'
+            }
             content={runStream.content}
             phase={runStream.phase}
           />
@@ -560,7 +764,9 @@ export function ConversationWorkspace({
         {awaitingAgentReply ? (
           <div className="agent-run-status-detail">
             <span>
-              {activeRun?.agentName} · {activeRun?.status}
+              {conversationAgentDisplayName(conversation, activeRun?.agentId) ??
+                activeRun?.agentName}{' '}
+              · {activeRun?.status}
             </span>
             <span className="agent-run-stream-state" data-stream-state={runStream.phase}>
               {activeRun.streamMode === 'terminal_only' && runStream.content.length === 0
@@ -600,6 +806,36 @@ export function ConversationWorkspace({
             </button>
           </div>
         )}
+        {!isAgentPair &&
+        (responseTargets.human !== undefined || responseTargets.agent !== undefined) ? (
+          <div className="response-target-switch" role="group" aria-label="选择回应方">
+            {responseTargets.human !== undefined ? (
+              <button
+                type="button"
+                className={responseTargetKind === 'human' ? 'selected' : undefined}
+                aria-pressed={responseTargetKind === 'human'}
+                disabled={sendMessage.isPending}
+                onClick={() => setResponseTargetKind('human')}
+              >
+                <span aria-hidden="true">人</span>
+                {isGroup ? '发送到群聊' : `发给 ${responseTargets.human.name}`}
+              </button>
+            ) : null}
+            {responseTargets.agent !== undefined ? (
+              <button
+                type="button"
+                className={responseTargetKind === 'agent' ? 'selected agent' : 'agent'}
+                aria-pressed={responseTargetKind === 'agent'}
+                disabled={sendMessage.isPending}
+                onClick={() => setResponseTargetKind('agent')}
+              >
+                <span aria-hidden="true">AI</span>
+                询问 {responseTargets.agent.name}
+              </button>
+            ) : null}
+            {isSharedMemberAgentConversation ? <small>消息对成员本人始终可见</small> : null}
+          </div>
+        ) : null}
         <textarea
           value={composer.draft}
           maxLength={20_000}
@@ -609,14 +845,16 @@ export function ConversationWorkspace({
             isAgentPair
               ? '发起智能体协作主题'
               : isAgentConversation
-                ? '向智能体发送消息'
+                ? `向${responseTargetKind === 'agent' ? (responseTargets.agent?.name ?? '智能体') : (responseTargets.human?.name ?? '成员')}发送消息`
                 : '向成员发送消息'
           }
           placeholder={
             isAgentPair
               ? '输入希望两个智能体协作讨论的主题…'
               : isAgentConversation
-                ? '向 AI 智能体发送消息…'
+                ? responseTargetKind === 'agent'
+                  ? `询问 ${responseTargets.agent?.name ?? '智能体'}…`
+                  : `给 ${responseTargets.human?.name ?? '成员'} 发消息…`
                 : '输入消息…'
           }
           onChange={(event) => dispatch({ type: 'draftChanged', value: event.target.value })}
@@ -693,9 +931,13 @@ export function AgentRunStreamingBubble({
 function MessageBubble({
   message,
   isCurrentUser,
+  senderDisplayName,
+  responseTargetName,
 }: {
   message: Message;
   isCurrentUser: boolean;
+  senderDisplayName: string;
+  responseTargetName: string | null;
 }): React.JSX.Element {
   const isAgent = message.sender.type === 'agent';
   return (
@@ -709,11 +951,14 @@ function MessageBubble({
       )}
       <div className="message-entry-body">
         <div className="message-meta">
-          <strong>{isCurrentUser ? '我' : message.sender.name}</strong>
+          <strong>{isCurrentUser ? '我' : senderDisplayName}</strong>
           <span className={isAgent ? 'sender-type agent' : 'sender-type human'}>
             {isAgent ? 'AI 智能体' : '真人'}
           </span>
           <time dateTime={message.createdAt}>{fullTime(message.createdAt)}</time>
+          {responseTargetName !== null ? (
+            <span className="message-response-target">发给 {responseTargetName}</span>
+          ) : null}
         </div>
         <p>{message.content.text}</p>
         {message.content.citations && message.content.citations.length > 0 ? (
@@ -732,6 +977,65 @@ function MessageBubble({
         {isAgent ? <AnswerFeedbackControls messageId={message.id} /> : null}
       </div>
     </article>
+  );
+}
+
+interface ConversationResponseTargets {
+  readonly human: Conversation['participants'][number] | undefined;
+  readonly agent: Conversation['participants'][number] | undefined;
+}
+
+function conversationResponseTargets(
+  conversation: Conversation,
+  currentUserId: string,
+): ConversationResponseTargets {
+  return {
+    human: conversation.participants.find(
+      (participant) => participant.type === 'user' && participant.id !== currentUserId,
+    ),
+    agent: conversation.participants.find((participant) => participant.type === 'agent'),
+  };
+}
+
+function selectedResponseTarget(
+  kind: 'human' | 'agent',
+  targets: ConversationResponseTargets,
+): MessageResponseTarget {
+  if (kind === 'agent' && targets.agent !== undefined) {
+    return { type: 'agent', agentId: targets.agent.id };
+  }
+  if (targets.human !== undefined) return { type: 'human', userId: targets.human.id };
+  if (targets.agent !== undefined) return { type: 'agent', agentId: targets.agent.id };
+  throw new Error('当前会话没有可回应的成员或智能体。');
+}
+
+function messageResponseTargetName(
+  target: MessageResponseTarget | null | undefined,
+  conversation: Conversation,
+): string | null {
+  if (target === null || target === undefined) return null;
+  const id = target.type === 'human' ? target.userId : target.agentId;
+  return (
+    conversation.participants.find(
+      (participant) => participant.type === target.type && participant.id === id,
+    )?.name ?? null
+  );
+}
+
+function messageSenderDisplayName(message: Message, conversation: Conversation): string {
+  if (message.sender.type !== 'agent') return message.sender.name;
+  return conversationAgentDisplayName(conversation, message.sender.id) ?? message.sender.name;
+}
+
+function conversationAgentDisplayName(
+  conversation: Conversation,
+  agentId: string | undefined,
+): string | null {
+  if (agentId === undefined) return null;
+  return (
+    conversation.participants.find(
+      (participant) => participant.type === 'agent' && participant.id === agentId,
+    )?.name ?? null
   );
 }
 
@@ -1210,6 +1514,18 @@ export function conversationHasAgent(conversation: Conversation): boolean {
 export function conversationHasAgentPair(conversation: Conversation): boolean {
   return (
     conversation.participants.filter((participant) => participant.type === 'agent').length >= 2
+  );
+}
+
+export function conversationHasSharedMemberAgent(
+  conversation: Conversation,
+  currentUserId: string,
+): boolean {
+  return (
+    conversation.participants.some((participant) => participant.type === 'agent') &&
+    conversation.participants.some(
+      (participant) => participant.type === 'user' && participant.id !== currentUserId,
+    )
   );
 }
 

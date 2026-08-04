@@ -1,19 +1,17 @@
 import type {
   AiEvaluationCase,
-  AiEvaluationJudgeType,
-  AiEvaluationMetric,
   AiEvaluationReadiness,
   AiEvaluationRun,
   AiEvaluationRunner,
-  AiEvaluationSubjectType,
+  Evidence,
 } from '@enterprise/contracts';
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 
 import { messageFromError } from '@/api/client';
-import { Spinner, StatusPill } from '@/components/ui';
+import { Notice, Spinner, StatusPill } from '@/components/ui';
+import { listEvidence } from '@/features/business-semantics/api';
 
 import {
-  createEvaluationRunner,
   createEvaluationRun,
   listEvaluationCases,
   loadEvaluationReadiness,
@@ -22,12 +20,12 @@ import {
   verifyEvaluationRun,
 } from './api';
 import {
-  EVALUATION_METRICS,
-  parseTextList,
-  parseUuidList,
-  runStatusLabel,
-  SUBJECT_TYPES,
-} from './view';
+  createRunRequestFromSelection,
+  deriveEvaluationRunChoices,
+  parseRunnerResultPackage,
+  type ParsedRunnerResultPackage,
+} from './run-governance';
+import { runStatusLabel } from './view';
 
 export function RunGovernancePanel({
   runs,
@@ -46,51 +44,69 @@ export function RunGovernancePanel({
   const [resultRunId, setResultRunId] = useState('');
   const [verifyRunId, setVerifyRunId] = useState('');
   const [readiness, setReadiness] = useState<AiEvaluationReadiness | null>(null);
+  const [evidence, setEvidence] = useState<readonly Evidence[]>([]);
+  const choices = deriveEvaluationRunChoices(runs);
+  const [datasetVersionId, setDatasetVersionId] = useState(choices.datasetVersionIds[0] ?? '');
+  const [subjectChoiceKey, setSubjectChoiceKey] = useState('');
+  const [runnerId, setRunnerId] = useState(runners[0]?.id ?? '');
+  const availableSubjects = choices.subjects.filter(
+    (subject) => subject.datasetVersionId === datasetVersionId,
+  );
+  const selectedSubject =
+    availableSubjects.find((subject) => subject.key === subjectChoiceKey) ?? null;
+  const selectedRunner = runners.find((runner) => runner.id === runnerId) ?? null;
+  const verifiedEvidence = evidence.filter(
+    (item) => item.status === 'ACTIVE' && item.trustLevel === 'VERIFIED',
+  );
 
-  const createRunner = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    setBusyId('runner');
-    try {
-      const created = await createEvaluationRunner({
-        name: text(data, 'name'),
-        attestationKeyFingerprint: text(data, 'attestationKeyFingerprint'),
-        allowedEvidenceOrigins: parseTextList(text(data, 'allowedEvidenceOrigins')),
-        idempotencyKey: crypto.randomUUID(),
+  useEffect(() => {
+    const controller = new AbortController();
+    void listEvidence(controller.signal)
+      .then(setEvidence)
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) {
+          onError(`验证证据目录加载失败：${messageFromError(caught)}`);
+        }
       });
-      form.reset();
-      reload();
-      onNotice(`签名 Runner“${created.name}”已注册；凭据和私钥不会进入管理端。`);
-    } catch (caught) {
-      onError(messageFromError(caught));
-    } finally {
-      setBusyId(null);
-    }
-  };
+    return () => controller.abort();
+  }, [onError]);
 
-  const createRun = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+  useEffect(() => {
+    setDatasetVersionId((current) =>
+      choices.datasetVersionIds.includes(current) ? current : (choices.datasetVersionIds[0] ?? ''),
+    );
+  }, [choices.datasetVersionIds]);
+
+  useEffect(() => {
+    setSubjectChoiceKey((current) =>
+      availableSubjects.some((subject) => subject.key === current)
+        ? current
+        : (availableSubjects[0]?.key ?? ''),
+    );
+  }, [availableSubjects]);
+
+  useEffect(() => {
+    setRunnerId((current) =>
+      runners.some((runner) => runner.id === current) ? current : (runners[0]?.id ?? ''),
+    );
+  }, [runners]);
+
+  const createRunFromSelection = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
-    const form = event.currentTarget;
-    const data = new FormData(form);
-    const runner = runners.find(({ id }) => id === text(data, 'runnerId'));
-    if (!runner) {
-      onError('请选择已注册且处于 ACTIVE 状态的 Runner。');
+    if (!selectedRunner || !selectedSubject) {
+      onError('缺少真实数据集、发布对象或 ACTIVE Runner，无法创建可信 Run。');
       return;
     }
+    const idempotencyKey = crypto.randomUUID();
     setBusyId('run');
     try {
-      const created = await createEvaluationRun({
-        datasetVersionId: text(data, 'datasetVersionId'),
-        subjectType: text(data, 'subjectType') as AiEvaluationSubjectType,
-        subjectId: text(data, 'subjectId'),
-        subjectVersion: Number(text(data, 'subjectVersion')),
-        subjectSnapshotHash: text(data, 'subjectSnapshotHash'),
-        runnerId: runner.id,
-        runnerName: runner.name,
-        externalRunId: text(data, 'externalRunId'),
-        idempotencyKey: crypto.randomUUID(),
-      });
+      const created = await createEvaluationRun(
+        createRunRequestFromSelection({
+          subject: selectedSubject,
+          runner: selectedRunner,
+          idempotencyKey,
+        }),
+      );
       reload();
       onNotice(`Run ${created.id} 已创建并绑定不可变快照；尚未产生任何评测结果。`);
     } catch (caught) {
@@ -126,7 +142,7 @@ export function RunGovernancePanel({
       await verifyEvaluationRun(run.id, {
         decision: text(data, 'decision') as 'PASS' | 'FAIL',
         expectedRevision: run.revision,
-        evidenceIds: parseUuidList(text(data, 'evidenceIds'), '验证证据'),
+        evidenceIds: data.getAll('evidenceIds').map(String),
         reason: text(data, 'reason'),
         idempotencyKey: crypto.randomUUID(),
       });
@@ -171,90 +187,99 @@ export function RunGovernancePanel({
       </header>
 
       <div className="evaluation-two-column">
-        <details className="card evaluation-disclosure">
-          <summary>注册签名 Runner</summary>
-          <form className="evaluation-form" onSubmit={(event) => void createRunner(event)}>
-            <label>
-              Runner 名称
-              <input name="name" required />
-            </label>
-            <label>
-              公钥指纹（SHA-256）
-              <input name="attestationKeyFingerprint" required minLength={64} maxLength={64} />
-            </label>
-            <label>
-              证据来源 HTTPS Origin
-              <textarea
-                name="allowedEvidenceOrigins"
-                required
-                rows={2}
-                placeholder="https://evidence.example.com/"
-              />
-            </label>
-            <button className="button primary" type="submit" disabled={busyId !== null}>
-              注册 Runner
-            </button>
-          </form>
-        </details>
+        <article className="card evaluation-form">
+          <h3>评测执行服务</h3>
+          <Notice tone={runners.length > 0 ? 'success' : 'info'}>
+            {runners.length > 0
+              ? `已接入 ${runners.length} 个可用执行服务。签名、密钥和证据来源由连接器自动维护。`
+              : '尚未接入评测执行服务。当前版本不提供连接器管理页面，请由部署管理员在服务端完成配置。'}
+          </Notice>
+        </article>
 
-        <details className="card evaluation-disclosure" open={runs.length === 0}>
-          <summary>创建 Run</summary>
-          <form className="evaluation-form" onSubmit={(event) => void createRun(event)}>
-            <div className="evaluation-two-column">
-              <label>
-                已发布数据集版本 ID
-                <input name="datasetVersionId" required />
-              </label>
-              <label>
-                Runner
-                <select name="runnerId" required>
-                  <option value="">请选择</option>
-                  {runners.map((runner) => (
-                    <option key={runner.id} value={runner.id}>
-                      {runner.name} · {runner.id}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                发布对象类型
-                <select name="subjectType" defaultValue="AGENT_VERSION">
-                  {SUBJECT_TYPES.map((subject) => (
-                    <option key={subject.value} value={subject.value}>
-                      {subject.label}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                发布对象 ID
-                <input name="subjectId" required />
-              </label>
-              <label>
-                对象版本号
-                <input name="subjectVersion" type="number" min="1" defaultValue="1" required />
-              </label>
-              <label>
-                外部 Run ID
-                <input name="externalRunId" required />
-              </label>
-            </div>
-            <label>
-              当前对象快照 SHA-256
-              <input name="subjectSnapshotHash" required minLength={64} maxLength={64} />
-            </label>
-            <p className="evaluation-help">
-              服务端会重新计算当前可信快照；输入不一致时创建失败，不会以客户端哈希为准。
+        <article className="card evaluation-form">
+          <h3>创建可信 Run</h3>
+          <p className="evaluation-help">
+            普通路径只复用当前页面真实 Run 中已经绑定的数据集与发布对象快照；Runner
+            名称自动取自已注册记录，外部关联号由本次请求生成。
+          </p>
+          {choices.datasetVersionIds.length === 0 ? (
+            <p className="field-error">
+              当前页面没有可复用的数据集或发布对象，已阻断创建。请先完成数据集发布和对象测试，
+              系统会自动绑定其版本与快照。
             </p>
+          ) : null}
+          {runners.length === 0 ? (
+            <p className="field-error">
+              当前没有可用评测执行服务，请由部署管理员在服务端完成配置。
+            </p>
+          ) : null}
+          <form
+            className="evaluation-form"
+            onSubmit={(event) => void createRunFromSelection(event)}
+          >
+            <label>
+              已发布数据集
+              <select
+                name="datasetChoice"
+                required
+                value={datasetVersionId}
+                onChange={(event) => setDatasetVersionId(event.target.value)}
+              >
+                <option value="">请选择</option>
+                {choices.datasetVersionIds.map((id) => (
+                  <option key={id} value={id}>
+                    {id} · 来自现有 Run
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              Runner
+              <select
+                name="runnerChoice"
+                required
+                value={runnerId}
+                onChange={(event) => setRunnerId(event.target.value)}
+              >
+                <option value="">请选择</option>
+                {runners.map((runner) => (
+                  <option key={runner.id} value={runner.id}>
+                    {runner.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              发布对象
+              <select
+                name="subjectChoice"
+                required
+                value={subjectChoiceKey}
+                onChange={(event) => setSubjectChoiceKey(event.target.value)}
+              >
+                <option value="">请选择</option>
+                {availableSubjects.map((subject) => (
+                  <option key={subject.key} value={subject.key}>
+                    {subject.subjectType} · {subject.subjectId} · v{subject.subjectVersion}
+                  </option>
+                ))}
+              </select>
+            </label>
+            {selectedSubject ? (
+              <p className="evaluation-help">
+                已从真实记录绑定对象版本 v{selectedSubject.subjectVersion} 与快照{' '}
+                <code>{selectedSubject.subjectSnapshotHash.slice(0, 12)}…</code>
+              </p>
+            ) : null}
             <button
               className="button primary"
               type="submit"
-              disabled={busyId !== null || runners.length === 0}
+              disabled={busyId !== null || selectedRunner === null || selectedSubject === null}
             >
-              创建 Run
+              选择完成并创建 Run
             </button>
           </form>
-        </details>
+        </article>
       </div>
 
       <article className="card evaluation-table-card">
@@ -390,14 +415,34 @@ export function RunGovernancePanel({
             <textarea name="reason" required rows={2} />
           </label>
           <label>
-            已验证证据 ID
-            <textarea name="evidenceIds" required rows={2} />
+            已验证证据
+            <select
+              name="evidenceIds"
+              required
+              multiple
+              size={Math.min(6, Math.max(3, verifiedEvidence.length))}
+            >
+              {verifiedEvidence.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.summary || item.code} · {item.sourceSystem}
+                </option>
+              ))}
+            </select>
           </label>
+          {verifiedEvidence.length === 0 ? (
+            <p className="field-error">
+              当前没有可选择的已验证证据，请先在经营主链登记并验证证据。
+            </p>
+          ) : null}
           <div className="evaluation-actions">
             <button className="button secondary" type="button" onClick={() => setVerifyRunId('')}>
               取消
             </button>
-            <button className="button primary" type="submit" disabled={busyId !== null}>
+            <button
+              className="button primary"
+              type="submit"
+              disabled={busyId !== null || verifiedEvidence.length === 0}
+            >
               提交验证
             </button>
           </div>
@@ -442,6 +487,9 @@ function RunResultSubmission({
   const [cases, setCases] = useState<readonly AiEvaluationCase[]>([]);
   const [complete, setComplete] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [resultPackage, setResultPackage] = useState<ParsedRunnerResultPackage | null>(null);
+  const [packageError, setPackageError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   useEffect(() => {
     if (!run) return;
@@ -464,66 +512,43 @@ function RunResultSubmission({
 
   if (!run) return null;
 
-  const submit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
-    event.preventDefault();
-    if (!complete) return;
-    const data = new FormData(event.currentTarget);
+  const uploadResultPackage = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
+    const file = event.target.files?.[0];
+    setResultPackage(null);
+    setPackageError(null);
+    if (!file) return;
     try {
-      const metric = text(data, 'metric') as AiEvaluationMetric;
-      const direction = text(data, 'direction') as 'AT_LEAST' | 'AT_MOST' | 'ZERO';
-      const threshold = Number(text(data, 'threshold'));
-      const value = Number(text(data, 'value'));
-      const sampleCount = Number(text(data, 'sampleCount'));
-      const minimumSampleCount = Number(text(data, 'minimumSampleCount'));
+      const parsed = parseRunnerResultPackage(await file.text(), run, cases);
+      setResultPackage(parsed);
+    } catch (caught) {
+      setPackageError(messageFromError(caught));
+    }
+  };
+
+  const submitResultPackage = async (): Promise<void> => {
+    if (!complete || !resultPackage) return;
+    setSubmitting(true);
+    try {
       await submitEvaluationRun(run.id, {
         expectedRevision: run.revision,
-        caseResults: cases.map((testCase) => ({
-          caseId: testCase.id,
-          judgeType: text(data, `${testCase.id}:judgeType`) as AiEvaluationJudgeType,
-          passed: data.get(`${testCase.id}:passed`) === 'on',
-          score: Number(text(data, `${testCase.id}:score`)),
-          actualBehaviorHash: text(data, `${testCase.id}:actualBehaviorHash`),
-          evidenceIds: parseUuidList(
-            text(data, `${testCase.id}:evidenceIds`),
-            `${testCase.caseKey} 结果证据`,
-          ),
-          detail: text(data, `${testCase.id}:detail`),
-        })),
-        metrics: [
-          {
-            metric,
-            numerator: Number(text(data, 'numerator')),
-            denominator: Number(text(data, 'denominator')),
-            value,
-            threshold,
-            direction,
-            sampleCount,
-            minimumSampleCount,
-            passed:
-              sampleCount >= minimumSampleCount &&
-              (direction === 'AT_LEAST'
-                ? value >= threshold
-                : direction === 'AT_MOST'
-                  ? value <= threshold
-                  : value === 0 && threshold === 0),
-            evidenceIds: parseUuidList(text(data, 'metricEvidenceIds'), '指标证据'),
-          },
-        ],
-        evidenceBundleUri: text(data, 'evidenceBundleUri'),
-        evidenceBundleHash: text(data, 'evidenceBundleHash'),
-        runnerAttestation: text(data, 'runnerAttestation'),
+        ...resultPackage.payload,
         idempotencyKey: crypto.randomUUID(),
       });
       onSaved();
     } catch (caught) {
       onError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
     }
   };
 
   return (
-    <form className="card evaluation-form" onSubmit={(event) => void submit(event)}>
+    <section className="card evaluation-form">
       <h3>提交完整签名结果</h3>
-      <p>该入口只提交真实 Runner 产物。系统不会替你生成哈希、证据 ID、分数或签名声明。</p>
+      <p>
+        上传真实 Runner 导出的 JSON 结果包，管理端只解析、校验当前
+        Run/Runner/对象快照绑定并预览，不生成哈希、证据、指标或签名。
+      </p>
       {loading ? <Spinner label="正在读取密封用例…" /> : null}
       {!loading && !complete ? (
         <p className="field-error">
@@ -531,125 +556,73 @@ function RunResultSubmission({
           API 分页读取并完整提交。
         </p>
       ) : null}
-      {cases.map((testCase) => (
-        <fieldset key={testCase.id}>
-          <legend>
-            {testCase.caseKey} · {testCase.category}
-          </legend>
-          <div className="evaluation-three-column">
-            <label>
-              判定方式
-              <select name={`${testCase.id}:judgeType`} defaultValue="EXTERNAL_RUNNER">
-                <option value="EXTERNAL_RUNNER">外部 Runner</option>
-                <option value="SIGNED_CODE">签名代码</option>
-                <option value="DETERMINISTIC_RULE">确定性规则</option>
-                <option value="HUMAN">人工</option>
-              </select>
-            </label>
-            <label>
-              分数
-              <input
-                name={`${testCase.id}:score`}
-                type="number"
-                min="0"
-                max="1"
-                step="0.01"
-                required
-              />
-            </label>
-            <label className="evaluation-inline-check">
-              <input name={`${testCase.id}:passed`} type="checkbox" />
-              用例通过
-            </label>
-          </div>
-          <label>
-            实际行为 SHA-256
-            <input
-              name={`${testCase.id}:actualBehaviorHash`}
-              minLength={64}
-              maxLength={64}
-              required
-            />
-          </label>
-          <label>
-            用例结果证据 ID
-            <textarea name={`${testCase.id}:evidenceIds`} required rows={2} />
-          </label>
-          <label>
-            判定详情
-            <textarea name={`${testCase.id}:detail`} required rows={2} />
-          </label>
-        </fieldset>
-      ))}
-      <div className="evaluation-three-column">
-        <label>
-          聚合指标
-          <select name="metric" defaultValue="FACTUAL_ACCURACY">
-            {EVALUATION_METRICS.map((metric) => (
-              <option key={metric.value} value={metric.value}>
-                {metric.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          方向
-          <select name="direction" defaultValue="AT_LEAST">
-            <option value="AT_LEAST">至少</option>
-            <option value="AT_MOST">至多</option>
-            <option value="ZERO">必须为零</option>
-          </select>
-        </label>
-        <label>
-          阈值
-          <input name="threshold" type="number" min="0" step="0.01" required />
-        </label>
-        <label>
-          分子
-          <input name="numerator" type="number" min="0" step="0.01" required />
-        </label>
-        <label>
-          分母
-          <input name="denominator" type="number" min="0" step="0.01" required />
-        </label>
-        <label>
-          指标值
-          <input name="value" type="number" min="0" step="0.01" required />
-        </label>
-        <label>
-          样本数
-          <input name="sampleCount" type="number" min="0" required />
-        </label>
-        <label>
-          最小样本数
-          <input name="minimumSampleCount" type="number" min="1" required />
-        </label>
-      </div>
       <label>
-        指标证据 ID
-        <textarea name="metricEvidenceIds" required rows={2} />
+        Runner JSON 结果包
+        <input
+          name="runnerResultPackage"
+          type="file"
+          accept="application/json,.json"
+          disabled={!complete || submitting}
+          onChange={(event) => void uploadResultPackage(event)}
+        />
       </label>
-      <label>
-        证据包 HTTPS URI
-        <input name="evidenceBundleUri" type="url" required />
-      </label>
-      <label>
-        证据包 SHA-256
-        <input name="evidenceBundleHash" minLength={64} maxLength={64} required />
-      </label>
-      <label>
-        Runner 签名声明
-        <textarea name="runnerAttestation" required rows={3} />
-      </label>
+      <p className="evaluation-help">
+        支持 Runtime 原生 snake_case 签名信封或管理端 camelCase
+        结果包。预览只验证结构与当前记录绑定；签名真实性仍由可信 Runtime/服务端验证。
+      </p>
+      {packageError ? <p className="field-error">{packageError}</p> : null}
+      {resultPackage ? (
+        <article className="evaluation-readiness ready" aria-label="Runner 结果包预览">
+          <header>
+            <h4>结果包待确认</h4>
+            <strong>{resultPackage.preview.algorithm}</strong>
+          </header>
+          <dl>
+            <div>
+              <dt>用例 / 行为哈希</dt>
+              <dd>
+                {resultPackage.preview.caseCount} / {resultPackage.preview.caseHashCount}
+              </dd>
+            </div>
+            <div>
+              <dt>指标</dt>
+              <dd>
+                {resultPackage.preview.metricCount} · {resultPackage.preview.metricNames.join('、')}
+              </dd>
+            </div>
+            <div>
+              <dt>唯一证据</dt>
+              <dd>{resultPackage.preview.evidenceIdCount}</dd>
+            </div>
+            <div>
+              <dt>签名指纹</dt>
+              <dd>{resultPackage.preview.keyFingerprint}</dd>
+            </div>
+            <div>
+              <dt>证据包</dt>
+              <dd>{resultPackage.preview.evidenceBundleUri}</dd>
+            </div>
+            <div>
+              <dt>证据包哈希</dt>
+              <dd>{resultPackage.preview.evidenceBundleHash}</dd>
+            </div>
+          </dl>
+        </article>
+      ) : null}
       <div className="evaluation-actions">
         <button className="button secondary" type="button" onClick={onClose}>
           取消
         </button>
-        <button className="button primary" type="submit" disabled={!complete}>
-          提交真实结果
+        <button
+          className="button primary"
+          type="button"
+          disabled={!complete || resultPackage === null || submitting}
+          onClick={() => void submitResultPackage()}
+        >
+          {submitting ? '提交中…' : '确认并提交 Runner 结果包'}
         </button>
       </div>
-    </form>
+    </section>
   );
 }
 

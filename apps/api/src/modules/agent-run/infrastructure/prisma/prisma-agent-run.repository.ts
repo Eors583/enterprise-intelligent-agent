@@ -1236,6 +1236,21 @@ async function validateQueuedRun(
     return { errorCode: 'AGENT_NOT_PARTICIPANT' };
   }
   if (run.agent.status !== 'ONLINE') return { errorCode: 'AGENT_NOT_ONLINE' };
+  if (run.agent.kind === 'DEPARTMENT') {
+    if (run.agent.orgUnitId === null) return { errorCode: 'AGENT_DEPARTMENT_INVALID' };
+    const activeDepartmentEmployment = await transaction.employment.findFirst({
+      where: {
+        tenantId: run.tenantId,
+        userId: run.requesterUserId,
+        orgUnitId: run.agent.orgUnitId,
+        status: 'ACTIVE',
+      },
+      select: { id: true },
+    });
+    if (activeDepartmentEmployment === null) {
+      return { errorCode: 'AGENT_DEPARTMENT_ACCESS_DENIED' };
+    }
+  }
   const assignmentRequired =
     hasRoleAgentAssignmentMarker(run.agent.settings) || run.agent._count.roleAssignments > 0;
   let assignment: AuthorizationAssignment | null = null;
@@ -1981,6 +1996,10 @@ async function enqueueNextRelayRun(
       policySnapshot: buildAgentRunPolicySnapshot({
         agentVersion: nextAgent.version,
         roleAssignment: nextAgent.roleAssignments[0] ?? null,
+        knowledgeScopeOverride: effectiveAgentKnowledgeScope(
+          nextAgent.settings,
+          nextAgent.version.knowledgeScope,
+        ),
         extra: { relay: true },
       }),
     },
@@ -2144,11 +2163,37 @@ function readAgentVisibility(settings: Prisma.JsonValue): 'tenant' | 'owner' {
     typeof settings === 'object' &&
     settings !== null &&
     !Array.isArray(settings) &&
-    settings.visibility === 'tenant'
+    (settings.visibility === 'tenant' || settings.visibility === 'department')
   ) {
     return 'tenant';
   }
   return 'owner';
+}
+
+function effectiveAgentKnowledgeScope(
+  settings: Prisma.JsonValue,
+  versionScope: Prisma.JsonValue,
+): Prisma.JsonValue {
+  if (
+    typeof settings !== 'object' ||
+    settings === null ||
+    Array.isArray(settings) ||
+    !Array.isArray(settings.knowledgeBaseIdsOverride)
+  ) {
+    return versionScope;
+  }
+  const knowledgeBaseIds = [
+    ...new Set(
+      settings.knowledgeBaseIdsOverride.filter((id): id is string => typeof id === 'string'),
+    ),
+  ]
+    .sort()
+    .slice(0, 50);
+  const base =
+    typeof versionScope === 'object' && versionScope !== null && !Array.isArray(versionScope)
+      ? (JSON.parse(JSON.stringify(versionScope)) as Prisma.JsonObject)
+      : {};
+  return { ...base, knowledgeBaseIds };
 }
 
 function readAuthorizationOrganizationScope(

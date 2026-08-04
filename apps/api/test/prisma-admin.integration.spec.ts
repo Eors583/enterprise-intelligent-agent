@@ -32,6 +32,9 @@ const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantSlug = 'admin-http-integration';
 const ownerEmail = 'owner@admin-http.integration';
 const memberEmail = 'member@admin-http.integration';
+const importedRemoteEmail = 'alice.remote@admin-http.integration';
+const importedLoginEmail = 'alice.login@admin-http.integration';
+const importedChangedEmail = 'alice.changed@admin-http.integration';
 const password = 'IntegrationPassword!2026';
 const legacySharedImportedPassword = '1234567890';
 const activatedImportedPassword = 'AliceActivatedPassword!2026';
@@ -97,7 +100,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
           openId: 'open-alice',
           unionId: 'union-alice',
           name: '飞书成员 Alice',
-          email: memberEmail,
+          email: importedRemoteEmail,
           active: true,
           departmentExternalIds: ['od-engineering', 'od-platform'],
           primaryDepartmentExternalId: 'od-platform',
@@ -399,7 +402,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     const alice = synchronized.members.find((member) => member.displayName === '飞书成员 Alice');
     expect(platformDepartment?.source).toBe('FEISHU');
     expect(alice?.source).toBe('FEISHU');
-    expect(alice?.email).toBe(memberEmail);
+    expect(alice?.email).toBe(importedRemoteEmail);
     expect(alice?.employment?.orgUnitId).toBe(platformDepartment?.id);
     expect(alice?.id).not.toBe(createdMember.body.id);
 
@@ -418,18 +421,19 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       },
     });
     expect(aliceBinding.user.email).toMatch(/^feishu-[a-f0-9]{32}@external\.invalid$/);
-    expect(aliceBinding.user.email).not.toBe(memberEmail);
+    expect(aliceBinding.user.email).not.toBe(importedRemoteEmail);
     expect(aliceBinding.user.passwordCredential).toBeNull();
     expect(aliceBinding.user.employments).toHaveLength(2);
     expect(aliceBinding.user.employments.filter((employment) => employment.isPrimary)).toHaveLength(
       1,
     );
+    const aliceSyntheticEmail = aliceBinding.user.email;
 
     await request(app.getHttpServer())
       .post('/api/v1/auth/login')
       .send({
         tenantSlug,
-        email: aliceBinding.user.email,
+        email: aliceSyntheticEmail,
         password: legacySharedImportedPassword,
       })
       .expect(401);
@@ -437,17 +441,47 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       .post('/api/v1/auth/login')
       .send({
         tenantSlug,
-        email: memberEmail,
+        email: importedRemoteEmail,
         password: legacySharedImportedPassword,
       })
       .expect(401);
+
+    const locallyBoundAlice = await request(app.getHttpServer())
+      .patch(`/api/v1/admin/members/${alice!.id}`)
+      .set(bearer(accessToken))
+      .send({ email: importedLoginEmail })
+      .expect(200);
+    expect(locallyBoundAlice.body).toMatchObject({
+      id: alice!.id,
+      email: importedLoginEmail,
+      source: 'FEISHU',
+    });
+    const locallyBoundIdentity = await administrator.user.findUniqueOrThrow({
+      where: { id: alice!.id },
+      include: {
+        employments: {
+          where: { status: { not: 'TERMINATED' } },
+          select: { workEmail: true, workEmailOverridden: true },
+        },
+      },
+    });
+    expect(locallyBoundIdentity.email).toBe(importedLoginEmail);
+    expect(locallyBoundIdentity.emailNormalized).toBe(importedLoginEmail);
+    expect(locallyBoundIdentity.employments).toHaveLength(2);
+    expect(
+      locallyBoundIdentity.employments.every(
+        (employment) =>
+          employment.workEmail === importedLoginEmail && employment.workEmailOverridden,
+      ),
+    ).toBe(true);
 
     const issuedActivation = await request(app.getHttpServer())
       .post(`/api/v1/admin/members/${alice!.id}/invitation`)
       .set(bearer(accessToken))
       .expect(200);
     const activationInvitation = issueMemberInvitationResponseSchema.parse(issuedActivation.body);
-    expect(activationInvitation.email).toBe(memberEmail);
+    expect(activationInvitation.email).toBe(importedLoginEmail);
+    expect(activationInvitation.deliveryTargetEvidence).toBe('ISSUED');
     expect(activationInvitation.deliveryKind).toBe('MANUAL_FALLBACK');
     if (activationInvitation.fallback === null) throw new Error('Manual fallback was expected.');
     const activationUrl = new URL(activationInvitation.fallback.acceptanceUrl);
@@ -468,6 +502,21 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     ).resolves.toEqual({
       mustChangePassword: false,
     });
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: aliceSyntheticEmail, password: activatedImportedPassword })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedRemoteEmail, password: activatedImportedPassword })
+      .expect(401);
+    const activatedLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedLoginEmail, password: activatedImportedPassword })
+      .expect(200);
+    expect(authSessionResponseSchema.parse(activatedLogin.body).account.email).toBe(
+      importedLoginEmail,
+    );
 
     await request(app.getHttpServer())
       .patch(`/api/v1/admin/org-units/${platformDepartment!.id}`)
@@ -528,18 +577,53 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     });
     await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ tenantSlug, email: memberEmail, password: legacySharedImportedPassword })
+      .send({ tenantSlug, email: importedRemoteEmail, password: activatedImportedPassword })
       .expect(401);
     const relogin = await request(app.getHttpServer())
       .post('/api/v1/auth/login')
       .send({
         tenantSlug,
-        email: aliceBinding.user.email,
+        email: importedLoginEmail,
         password: activatedImportedPassword,
       })
       .expect(200);
-    expect(authSessionResponseSchema.parse(relogin.body).account.passwordChangeRequired).toBe(
-      false,
+    expect(authSessionResponseSchema.parse(relogin.body).account).toMatchObject({
+      email: importedLoginEmail,
+      passwordChangeRequired: false,
+    });
+    const afterOverrideSync = await administrator.user.findUniqueOrThrow({
+      where: { id: alice!.id },
+      include: {
+        employments: {
+          where: { status: { not: 'TERMINATED' } },
+          select: { workEmail: true, workEmailOverridden: true },
+        },
+      },
+    });
+    expect(afterOverrideSync.email).toBe(importedLoginEmail);
+    expect(
+      afterOverrideSync.employments.every(
+        (employment) =>
+          employment.workEmail === importedLoginEmail && employment.workEmailOverridden,
+      ),
+    ).toBe(true);
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/admin/members/${alice!.id}`)
+      .set(bearer(accessToken))
+      .send({ email: importedChangedEmail })
+      .expect(200)
+      .expect(({ body }) => expect(body.email).toBe(importedChangedEmail));
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedLoginEmail, password: activatedImportedPassword })
+      .expect(401);
+    const changedEmailLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedChangedEmail, password: activatedImportedPassword })
+      .expect(200);
+    expect(authSessionResponseSchema.parse(changedEmailLogin.body).account.email).toBe(
+      importedChangedEmail,
     );
 
     feishuSnapshot = {
@@ -553,7 +637,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
           openId: 'open-alice',
           unionId: 'union-alice',
           name: '飞书成员 Alice',
-          email: memberEmail,
+          email: importedRemoteEmail,
           active: true,
           departmentExternalIds: ['od-engineering'],
           primaryDepartmentExternalId: 'od-engineering',
@@ -567,6 +651,22 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     expect(pendingRemoval.status).toBe('SUCCEEDED');
     expect(pendingRemoval.run?.departments.archived).toBe(0);
     expect(pendingRemoval.run?.members.deactivated).toBe(0);
+    const afterDepartmentChangeSync = await administrator.user.findUniqueOrThrow({
+      where: { id: alice!.id },
+      include: {
+        employments: {
+          where: { status: 'ACTIVE' },
+          select: { workEmail: true, workEmailOverridden: true },
+        },
+      },
+    });
+    expect(afterDepartmentChangeSync.email).toBe(importedChangedEmail);
+    expect(
+      afterDepartmentChangeSync.employments.every(
+        (employment) =>
+          employment.workEmail === importedChangedEmail && employment.workEmailOverridden,
+      ),
+    ).toBe(true);
 
     const confirmedMissingSince = new Date(Date.now() - 2 * 60 * 60_000);
     await administrator.directoryEmploymentBinding.updateMany({

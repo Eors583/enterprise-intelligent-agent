@@ -6,6 +6,7 @@ export * from './admin-agent.js';
 export * from './api-error.js';
 export * from './auth.js';
 export * from './identity-governance.js';
+export * from './im-realtime.js';
 export * from './bootstrap.js';
 export * from './business-semantics.js';
 export * from './business-events.js';

@@ -8,6 +8,7 @@ import type { BootstrapPayload } from './bootstrap';
 const hookSpies = vi.hoisted(() => ({
   objectives: vi.fn(),
   tasks: vi.fn(),
+  createConversation: vi.fn(),
 }));
 
 vi.mock('../messaging/agent-collaboration', () => ({
@@ -23,7 +24,7 @@ vi.mock('../messaging/hooks', () => ({
   }),
   useCreateDirectConversation: () => ({
     isPending: false,
-    mutate: vi.fn(),
+    mutate: hookSpies.createConversation,
     mutateAsync: vi.fn(),
   }),
 }));
@@ -31,7 +32,18 @@ vi.mock('../messaging/MessagingWorkspace', async () => {
   const { createElement: createMockElement } = await import('react');
   return {
     ConversationWorkspace: () => null,
-    MessagingSidebar: () => createMockElement('aside', { 'data-testid': 'messaging-sidebar' }),
+    MessagingSidebar: ({ onStartConversation }: { onStartConversation?: () => void }) =>
+      createMockElement(
+        'aside',
+        { 'data-testid': 'messaging-sidebar' },
+        onStartConversation
+          ? createMockElement(
+              'button',
+              { type: 'button', onClick: onStartConversation },
+              '新建会话',
+            )
+          : null,
+      ),
   };
 });
 vi.mock('../roles/hooks', () => ({
@@ -151,59 +163,38 @@ const PAYLOAD: BootstrapPayload = {
       },
     },
   ],
+  departmentAgents: [],
 };
 
 describe('desktop workbench navigation integration', () => {
-  it('activates the authorized workbench entry without claiming an online state', async () => {
+  it('shows only the four employee entries and opens on the real workbench overview', async () => {
     const dom = await renderInTestDom(createElement(DirectoryWorkspace, { payload: PAYLOAD }));
     try {
-      const entry = [...dom.container.querySelectorAll('.rail-navigation button')].find(
-        (button) => button.getAttribute('aria-label') === '目标与任务',
-      );
-      expect(entry).not.toBeUndefined();
-      expect(entry?.getAttribute('aria-current')).toBeNull();
-      expect(hookSpies.objectives).toHaveBeenCalledWith(false);
-      expect(hookSpies.tasks).toHaveBeenCalledWith(false);
-      expect(dom.container.querySelector('[aria-label="当前账号"]')?.textContent).toBe('我');
-
-      if (entry) await dom.click(entry);
-      await dom.flush();
-
-      expect(entry?.getAttribute('aria-current')).toBe('page');
-      expect(hookSpies.objectives).toHaveBeenLastCalledWith(true);
-      expect(hookSpies.tasks).toHaveBeenLastCalledWith(true);
+      expect(dom.container.querySelector('.primary-rail')).toBeNull();
+      expect(hookSpies.objectives).toHaveBeenCalledWith(true);
+      expect(hookSpies.tasks).toHaveBeenCalledWith(true);
       expect(dom.container.querySelector('.workspace.workbench-active')).not.toBeNull();
-      expect(dom.container.querySelector('[data-testid="workbench-sidebar"]')).not.toBeNull();
-      expect(dom.container.querySelector('[data-testid="workbench-workspace"]')?.textContent).toBe(
-        '目标与任务工作区',
+      expect(dom.container.querySelector('[data-testid="workbench-sidebar"]')).toBeNull();
+      expect(dom.container.querySelector('[data-testid="messaging-sidebar"]')).not.toBeNull();
+      expect(dom.container.querySelector('.employee-workbench-overview')?.textContent).toContain(
+        '询问智能体',
       );
-      expect(
-        dom.container.querySelector('[data-testid="workbench-workspace"]')?.textContent,
-      ).not.toContain('在线');
       expect(dom.container.querySelector('.assistant-launcher')).toBeNull();
+      expect(dom.container.textContent).not.toContain('安全连接');
+      expect(dom.container.textContent).not.toContain('桌面安全模式');
     } finally {
       await dom.cleanup();
     }
   });
 
-  it('renders real home and agent-center workspaces and exposes the unified search control', async () => {
-    const dom = await renderInTestDom(createElement(DirectoryWorkspace, { payload: PAYLOAD }));
+  it('keeps search and opens one shared member and Agent conversation entry', async () => {
+    const dom = await renderInTestDom(
+      createElement(DirectoryWorkspace, {
+        payload: PAYLOAD,
+        navigationRequest: { destination: 'messages', requestId: 1 },
+      }),
+    );
     try {
-      const homeEntry = [...dom.container.querySelectorAll('.rail-navigation button')].find(
-        (button) => button.getAttribute('aria-label') === '首页',
-      );
-      const agentEntry = [...dom.container.querySelectorAll('.rail-navigation button')].find(
-        (button) => button.getAttribute('aria-label') === '智能体',
-      );
-      expect(homeEntry).not.toBeUndefined();
-      expect(agentEntry).not.toBeUndefined();
-
-      if (homeEntry) await dom.click(homeEntry);
-      await dom.flush();
-      expect(dom.container.querySelector('.home-workspace')).not.toBeNull();
-      expect(dom.container.textContent).toContain('欢迎回来');
-      expect(dom.container.textContent).not.toContain('该模块尚未接入');
-
       const search = dom.container.querySelector<HTMLInputElement>(
         '.desktop-search-dock input[aria-label="统一搜索"]',
       );
@@ -217,17 +208,32 @@ describe('desktop workbench navigation integration', () => {
         '产品决策智能体',
       );
 
-      if (agentEntry) await dom.click(agentEntry);
+      const start = [...dom.container.querySelectorAll('button')].find(
+        (button) => button.textContent === '新建会话',
+      );
+      expect(start).not.toBeUndefined();
+      if (start) await dom.click(start);
       await dom.flush();
-      expect(dom.container.querySelector('.agent-center-workspace')).not.toBeNull();
-      expect(dom.container.textContent).toContain('智能体中心');
-      expect(dom.container.textContent).not.toContain('该模块尚未接入');
+      expect(dom.container.querySelector('[role="dialog"]')?.textContent).toContain('新建会话');
+      expect(dom.container.querySelector('[role="dialog"]')?.textContent).toContain('联系本人');
+      expect(dom.container.querySelector('[role="dialog"]')?.textContent).toContain('询问智能体');
+      const dialog = dom.container.querySelector('[role="dialog"]');
+      const sharedAction = [...(dialog?.querySelectorAll('button') ?? [])].find((button) =>
+        button.textContent?.includes('联系本人'),
+      );
+      if (sharedAction) await dom.click(sharedAction);
+      expect(hookSpies.createConversation).toHaveBeenCalledWith(
+        { type: 'direct', target: { type: 'human', userId: 'member-1' } },
+        expect.any(Object),
+      );
+      expect(dialog?.querySelectorAll('article button')).toHaveLength(2);
+      expect(dom.container.textContent).not.toContain('智能体协作');
     } finally {
       await dom.cleanup();
     }
   });
 
-  it('shows model evidence honestly and disables contact when an online configuration is not ready', async () => {
+  it('keeps the shared human conversation available when only the Agent model is not ready', async () => {
     const payload: BootstrapPayload = structuredClone(PAYLOAD);
     payload.members[0]!.capabilities.canContactAgent = true;
     payload.members[0]!.agent!.operationalAvailability = {
@@ -236,18 +242,21 @@ describe('desktop workbench navigation integration', () => {
       reasonCodes: ['NO_RECENT_SUCCESSFUL_PROVIDER_EVIDENCE'],
       checkedAt: '2026-07-28T01:00:00.000Z',
     };
-    const dom = await renderInTestDom(createElement(DirectoryWorkspace, { payload }));
+    const dom = await renderInTestDom(
+      createElement(DirectoryWorkspace, {
+        payload,
+        navigationRequest: { destination: 'directory', requestId: 1 },
+      }),
+    );
     try {
-      const directoryEntry = [...dom.container.querySelectorAll('.rail-navigation button')].find(
-        (button) => button.getAttribute('aria-label') === '通讯录',
-      );
-      if (directoryEntry) await dom.click(directoryEntry);
       await dom.flush();
 
       const contactAgent = dom.container.querySelector<HTMLButtonElement>(
         '.contact-actions .primary-button',
       );
-      expect(contactAgent?.disabled).toBe(true);
+      expect(contactAgent?.disabled).toBe(false);
+      expect(contactAgent?.textContent).toContain('打开共享会话');
+      expect(contactAgent?.title).toContain('可联系本人');
       expect(dom.container.querySelector('.agent-operational-status')?.textContent).toContain(
         '配置已启用，但模型未就绪',
       );
@@ -259,30 +268,25 @@ describe('desktop workbench navigation integration', () => {
     }
   });
 
-  it('integrates the employee experience and trusted usage feature into authorized navigation', async () => {
-    const dom = await renderInTestDom(createElement(DirectoryWorkspace, { payload: PAYLOAD }));
+  it('moves roles and account security into My and hides legacy self-service entries', async () => {
+    const dom = await renderInTestDom(
+      createElement(DirectoryWorkspace, {
+        payload: PAYLOAD,
+        navigationRequest: { destination: 'my', requestId: 1 },
+      }),
+    );
     try {
-      const entry = [...dom.container.querySelectorAll('.rail-navigation button')].find(
-        (button) => button.getAttribute('aria-label') === '经验与用量',
-      );
-      expect(entry).not.toBeUndefined();
-
-      if (entry) await dom.click(entry);
       await dom.flush();
 
-      expect(entry?.getAttribute('aria-current')).toBe('page');
-      expect(hookSpies.tasks).toHaveBeenLastCalledWith(true);
-      expect(dom.container.querySelector('.workspace.experience-usage-active')).not.toBeNull();
-      expect(
-        dom.container.querySelector('[data-testid="experience-usage-workspace"]')?.textContent,
-      ).toBe('经验与 AI 用量工作区');
-      expect(
-        dom.container
-          .querySelector('[data-testid="experience-usage-workspace"]')
-          ?.getAttribute('data-task-count'),
-      ).toBe('1');
+      expect(dom.container.querySelector('.workspace.my-active')).not.toBeNull();
+      expect(dom.container.textContent).toContain('角色与权限');
+      expect(dom.container.textContent).toContain('账号切换');
+      expect(dom.container.textContent).toContain('修改密码');
+      expect(dom.container.textContent).toContain('账号安全');
+      expect(dom.container.textContent).toContain('关于');
+      expect(dom.container.querySelector('[aria-label="经验与用量"]')).toBeNull();
+      expect(dom.container.querySelector('[aria-label="我的成长"]')).toBeNull();
       expect(dom.container.querySelector('.assistant-launcher')).toBeNull();
-      expect(dom.container.textContent).not.toContain('该模块尚未接入');
     } finally {
       await dom.cleanup();
     }

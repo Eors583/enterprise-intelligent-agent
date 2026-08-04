@@ -15,6 +15,7 @@ import {
   listToolDefinitions,
   transitionToolVersion,
 } from '@/api/admin-api';
+import { TagInput } from '@/components/EntityPicker';
 import {
   EmptyState,
   ErrorState,
@@ -26,13 +27,16 @@ import {
 } from '@/components/ui';
 
 import {
+  buildToolObjectSchema,
   formatToolDate,
   nextToolLifecycleAction,
-  parseToolList,
+  publishedCompensationOptions,
   toolErrorMessage,
   toolLifecycleLabel,
   toolRiskLabel,
   toolStatusLabel,
+  type ToolSchemaField,
+  type ToolSchemaFieldType,
 } from './tool-governance-view';
 import './tool-governance.css';
 
@@ -92,7 +96,7 @@ export function ToolGovernancePage(): ReactNode {
           <span className="eyebrow">TOOL GATEWAY</span>
           <h1>工具治理</h1>
           <p>
-            工具必须经过封闭 JSON Schema、风险分级、测试和发布。高风险动作由独立审批人确认，
+            工具必须经过结构化字段校验、风险分级、测试和发布。高风险动作由独立审批人确认，
             禁止工具永远不会进入执行队列。
           </p>
         </div>
@@ -213,6 +217,7 @@ export function ToolGovernancePage(): ReactNode {
       {detail && createVersionOpen ? (
         <CreateToolVersionDialog
           definition={detail.definition}
+          definitions={definitions ?? []}
           onClose={() => setCreateVersionOpen(false)}
           onSaved={() => {
             setCreateVersionOpen(false);
@@ -297,7 +302,7 @@ function ToolDefinitionDetailPanel({
         {detail.versions.length === 0 ? (
           <EmptyState
             title="还没有版本"
-            description="定义本身不可执行；请创建包含 Schema、风险和出站边界的版本。"
+            description="定义本身不可执行；请创建包含输入输出规则、风险和出站边界的版本。"
           />
         ) : (
           <div className="tool-version-list">
@@ -387,10 +392,9 @@ function CreateToolDefinitionDialog({
   onClose: () => void;
   onSaved: (definition: ToolDefinition) => void;
 }): ReactNode {
-  const [key, setKey] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
-  const [labels, setLabels] = useState('');
+  const [labels, setLabels] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -400,10 +404,9 @@ function CreateToolDefinitionDialog({
     setError(null);
     try {
       const input: CreateToolDefinitionRequest = {
-        key,
         name,
         description,
-        permissionLabels: parseToolList(labels),
+        permissionLabels: labels,
         idempotencyKey: crypto.randomUUID(),
       };
       onSaved(await createToolDefinition(input));
@@ -423,17 +426,9 @@ function CreateToolDefinitionDialog({
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
         <label>
-          <span>唯一 Key</span>
-          <input
-            required
-            value={key}
-            onChange={(event) => setKey(event.target.value)}
-            placeholder="crm.customer.read"
-          />
-        </label>
-        <label>
           <span>名称</span>
           <input required value={name} onChange={(event) => setName(event.target.value)} />
+          <small>系统会根据名称生成租户内稳定 Key；同名冲突会安全追加序号。</small>
         </label>
         <label>
           <span>用途说明</span>
@@ -446,7 +441,14 @@ function CreateToolDefinitionDialog({
         </label>
         <label>
           <span>权限标签</span>
-          <input value={labels} onChange={(event) => setLabels(event.target.value)} />
+          <TagInput
+            value={labels}
+            onChange={setLabels}
+            ariaLabel="工具权限标签"
+            placeholder="输入标签后按回车，例如 crm.read"
+            disabled={saving}
+          />
+          <small>仅填写业务权限标签，不填写成员、密钥或连接地址。</small>
         </label>
         <FieldError message={error} />
         <DialogActions saving={saving} onClose={onClose} label="注册定义" />
@@ -457,18 +459,15 @@ function CreateToolDefinitionDialog({
 
 function CreateToolVersionDialog({
   definition,
+  definitions,
   onClose,
   onSaved,
 }: {
   definition: ToolDefinition;
+  definitions: readonly ToolDefinition[];
   onClose: () => void;
   onSaved: (version: ToolVersion) => void;
 }): ReactNode {
-  const objectSchema = JSON.stringify(
-    { type: 'object', additionalProperties: false, properties: {}, required: [] },
-    null,
-    2,
-  );
   const [name, setName] = useState(definition.name);
   const [description, setDescription] = useState(definition.description);
   const [adapter, setAdapter] = useState<CreateToolVersionRequest['adapter']>('HTTP');
@@ -480,41 +479,48 @@ function CreateToolVersionDialog({
     useState<CreateToolVersionRequest['dryRunMode']>('VALIDATE_ONLY');
   const [idempotencyMode, setIdempotencyMode] =
     useState<CreateToolVersionRequest['idempotencyMode']>('PROVIDER_SUPPORTED');
-  const [inputSchema, setInputSchema] = useState(objectSchema);
-  const [outputSchema, setOutputSchema] = useState(objectSchema);
-  const [methods, setMethods] = useState('GET');
-  const [hosts, setHosts] = useState('');
-  const [sensitivePaths, setSensitivePaths] = useState('');
+  const [inputFields, setInputFields] = useState<ToolSchemaField[]>([]);
+  const [outputFields, setOutputFields] = useState<ToolSchemaField[]>([]);
+  const [methods, setMethods] = useState<CreateToolVersionRequest['allowedHttpMethods']>(['GET']);
+  const [hosts, setHosts] = useState<string[]>([]);
+  const [sensitivePaths, setSensitivePaths] = useState<string[]>([]);
   const [compensationToolVersionId, setCompensationToolVersionId] = useState('');
+  const [connectionOpen, setConnectionOpen] = useState(false);
   const [timeoutMs, setTimeoutMs] = useState(10_000);
   const [maxAttempts, setMaxAttempts] = useState(2);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const compensationOptions = publishedCompensationOptions(definitions);
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     setSaving(true);
     setError(null);
     try {
+      if (!endpointRef.trim()) {
+        setConnectionOpen(true);
+        throw new Error('请在高级连接向导中填写服务端 Endpoint Ref。');
+      }
+      if (adapter === 'HTTP' && hosts.length === 0) {
+        setConnectionOpen(true);
+        throw new Error('HTTP 工具必须在高级连接向导中配置真实 Host 白名单。');
+      }
       const input: CreateToolVersionRequest = {
         name,
         description,
         adapter,
-        endpointRef,
-        inputSchema: JSON.parse(inputSchema) as Record<string, unknown>,
-        outputSchema: JSON.parse(outputSchema) as Record<string, unknown>,
+        endpointRef: endpointRef.trim(),
+        inputSchema: buildToolObjectSchema(inputFields),
+        outputSchema: buildToolObjectSchema(outputFields),
         riskClass,
         dataClassification: classification,
         timeoutMs,
         maxAttempts,
         idempotencyMode,
         dryRunMode,
-        allowedHttpMethods:
-          adapter === 'HTTP'
-            ? (parseToolList(methods) as CreateToolVersionRequest['allowedHttpMethods'])
-            : [],
-        allowedHostPatterns: adapter === 'HTTP' ? parseToolList(hosts) : [],
-        sensitiveInputPaths: parseToolList(sensitivePaths),
+        allowedHttpMethods: adapter === 'HTTP' ? methods : [],
+        allowedHostPatterns: adapter === 'HTTP' ? hosts : [],
+        sensitiveInputPaths: sensitivePaths,
         ...(compensationToolVersionId.trim()
           ? { compensationToolVersionId: compensationToolVersionId.trim() }
           : {}),
@@ -532,7 +538,7 @@ function CreateToolVersionDialog({
   return (
     <Modal
       title="创建不可变工具版本"
-      description="Schema 必须为封闭子集；HTTP 工具必须声明方法和 Host 白名单。"
+      description="通过字段向导定义输入输出；HTTP 工具还需要选择允许的方法和服务地址。"
       onClose={onClose}
       size="wide"
       dismissible={!saving}
@@ -563,15 +569,6 @@ function CreateToolVersionDialog({
             rows={3}
             value={description}
             onChange={(event) => setDescription(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Endpoint Ref（服务端凭据引用，不填写密钥）</span>
-          <input
-            required
-            value={endpointRef}
-            onChange={(event) => setEndpointRef(event.target.value)}
-            placeholder="secret://crm/customer-read"
           />
         </label>
         <div className="tool-form-grid three">
@@ -612,27 +609,6 @@ function CreateToolVersionDialog({
             </select>
           </label>
         </div>
-        {adapter === 'HTTP' ? (
-          <div className="tool-form-grid">
-            <label>
-              <span>允许的 HTTP 方法</span>
-              <input
-                required
-                value={methods}
-                onChange={(event) => setMethods(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Host 白名单</span>
-              <input
-                required
-                value={hosts}
-                onChange={(event) => setHosts(event.target.value)}
-                placeholder="api.example.com"
-              />
-            </label>
-          </div>
-        ) : null}
         <div className="tool-form-grid">
           <label>
             <span>幂等保障</span>
@@ -671,49 +647,274 @@ function CreateToolVersionDialog({
           </label>
         </div>
         <label>
-          <span>敏感输入 JSON Path</span>
-          <input
-            value={sensitivePaths}
-            onChange={(event) => setSensitivePaths(event.target.value)}
-            placeholder="$.token, $.customer.phone"
-          />
-        </label>
-        <label>
-          <span>补偿工具版本 ID（可选）</span>
-          <input
+          <span>失败补偿版本（可选）</span>
+          <select
             value={compensationToolVersionId}
             onChange={(event) => setCompensationToolVersionId(event.target.value)}
-            placeholder="已发布补偿 Tool Version UUID"
-          />
+          >
+            <option value="">不配置补偿</option>
+            {compensationOptions.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           <small>原调用成功后才可创建独立补偿调用；补偿仍按其风险级别完成确认或审批。</small>
+          {compensationOptions.length === 0 ? (
+            <small>当前租户还没有可选择的已发布工具版本。</small>
+          ) : null}
         </label>
-        <div className="tool-schema-grid">
+        <details
+          className="tool-connection-wizard"
+          open={connectionOpen}
+          onToggle={(event) => setConnectionOpen(event.currentTarget.open)}
+        >
+          <summary>
+            <span>高级连接向导</span>
+            <small>连接引用、出站白名单、敏感字段与输入输出结构</small>
+          </summary>
+          <div className="tool-connection-boundary" role="note">
+            当前未接入连接器目录。Endpoint Ref 必须对应服务端真实配置的
+            TOOL_ENDPOINT_BINDINGS；这里不会创建、展示或保存凭据。
+          </div>
           <label>
-            <span>Input JSON Schema</span>
-            <textarea
-              required
-              rows={12}
-              value={inputSchema}
-              onChange={(event) => setInputSchema(event.target.value)}
-              spellCheck={false}
+            <span>Endpoint Ref（仅服务端凭据引用）</span>
+            <input
+              value={endpointRef}
+              onChange={(event) => setEndpointRef(event.target.value)}
+              placeholder="填写已由运维配置的绑定引用"
             />
           </label>
+          {adapter === 'HTTP' ? (
+            <div className="tool-form-grid">
+              <label>
+                <span>允许的请求方式</span>
+                <div className="tool-method-picker">
+                  {(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const).map((method) => (
+                    <label key={method}>
+                      <input
+                        type="checkbox"
+                        checked={methods.includes(method)}
+                        onChange={(event) =>
+                          setMethods((current) =>
+                            event.target.checked
+                              ? [...new Set([...current, method])]
+                              : current.filter((candidate) => candidate !== method),
+                          )
+                        }
+                      />
+                      {method}
+                    </label>
+                  ))}
+                </div>
+              </label>
+              <label>
+                <span>允许访问的服务地址</span>
+                <TagInput
+                  value={hosts}
+                  onChange={setHosts}
+                  ariaLabel="服务地址"
+                  placeholder="输入一个地址后按回车"
+                />
+              </label>
+            </div>
+          ) : null}
           <label>
-            <span>Output JSON Schema</span>
-            <textarea
-              required
-              rows={12}
-              value={outputSchema}
-              onChange={(event) => setOutputSchema(event.target.value)}
-              spellCheck={false}
-            />
+            <span>需要保护的输入字段</span>
+            <div className="tool-sensitive-field-picker">
+              {inputFields.length === 0 ? <small>请先在下方添加输入字段。</small> : null}
+              {inputFields
+                .filter((field) => field.name.trim() !== '')
+                .map((field) => {
+                  const path = `$.${field.name.trim()}`;
+                  return (
+                    <label key={field.id}>
+                      <input
+                        type="checkbox"
+                        checked={sensitivePaths.includes(path)}
+                        onChange={(event) =>
+                          setSensitivePaths((current) =>
+                            event.target.checked
+                              ? [...new Set([...current, path])]
+                              : current.filter((candidate) => candidate !== path),
+                          )
+                        }
+                      />
+                      {field.description.trim() || field.name}
+                    </label>
+                  );
+                })}
+            </div>
           </label>
-        </div>
+          <div className="tool-schema-grid">
+            <ToolSchemaBuilder
+              title="输入字段"
+              fields={inputFields}
+              onChange={setInputFields}
+              disabled={saving}
+            />
+            <ToolSchemaBuilder
+              title="输出字段"
+              fields={outputFields}
+              onChange={setOutputFields}
+              disabled={saving}
+            />
+          </div>
+          <p className="form-hint">
+            系统会根据字段向导生成并校验输入输出结构，页面不接受原始配置文本。
+          </p>
+        </details>
         <FieldError message={error} />
         <DialogActions saving={saving} onClose={onClose} label="创建版本" />
       </form>
     </Modal>
   );
+}
+
+function ToolSchemaBuilder({
+  title,
+  fields,
+  onChange,
+  disabled,
+}: {
+  title: string;
+  fields: readonly ToolSchemaField[];
+  onChange: (fields: ToolSchemaField[]) => void;
+  disabled: boolean;
+}): ReactNode {
+  const updateField = (id: string, patch: Partial<ToolSchemaField>): void => {
+    onChange(fields.map((field) => (field.id === id ? { ...field, ...patch } : field)));
+  };
+
+  return (
+    <section className="tool-schema-builder">
+      <header>
+        <strong>{title}</strong>
+        <select
+          aria-label={`${title}模板`}
+          value=""
+          disabled={disabled}
+          onChange={(event) => {
+            if (event.target.value) onChange(toolSchemaTemplate(event.target.value));
+          }}
+        >
+          <option value="">应用模板…</option>
+          <option value="identifier">标识查询</option>
+          <option value="result">标准执行结果</option>
+          <option value="empty">清空字段</option>
+        </select>
+      </header>
+      {fields.length === 0 ? (
+        <p>当前为封闭空对象；可应用模板或逐项添加字段。</p>
+      ) : (
+        <div className="tool-schema-fields">
+          {fields.map((field) => (
+            <div key={field.id} className="tool-schema-field">
+              <input
+                aria-label={`${title}字段名`}
+                value={field.name}
+                disabled={disabled}
+                placeholder="字段名"
+                onChange={(event) => updateField(field.id, { name: event.target.value })}
+              />
+              <select
+                aria-label={`${field.name || title}字段类型`}
+                value={field.type}
+                disabled={disabled}
+                onChange={(event) =>
+                  updateField(field.id, {
+                    type: event.target.value as ToolSchemaFieldType,
+                  })
+                }
+              >
+                <option value="string">文本</option>
+                <option value="number">数字</option>
+                <option value="integer">整数</option>
+                <option value="boolean">布尔值</option>
+              </select>
+              <input
+                aria-label={`${field.name || title}字段说明`}
+                value={field.description}
+                disabled={disabled}
+                placeholder="字段说明（可选）"
+                onChange={(event) => updateField(field.id, { description: event.target.value })}
+              />
+              <label>
+                <input
+                  type="checkbox"
+                  checked={field.required}
+                  disabled={disabled}
+                  onChange={(event) => updateField(field.id, { required: event.target.checked })}
+                />
+                必填
+              </label>
+              <button
+                className="button secondary compact"
+                type="button"
+                disabled={disabled}
+                onClick={() => onChange(fields.filter((candidate) => candidate.id !== field.id))}
+              >
+                移除
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      <button
+        className="button secondary compact"
+        type="button"
+        disabled={disabled}
+        onClick={() =>
+          onChange([
+            ...fields,
+            {
+              id: crypto.randomUUID(),
+              name: '',
+              type: 'string',
+              required: false,
+              description: '',
+            },
+          ])
+        }
+      >
+        添加字段
+      </button>
+    </section>
+  );
+}
+
+function toolSchemaTemplate(template: string): ToolSchemaField[] {
+  if (template === 'empty') return [];
+  if (template === 'identifier') {
+    return [
+      {
+        id: crypto.randomUUID(),
+        name: 'id',
+        type: 'string',
+        required: true,
+        description: '业务对象标识',
+      },
+    ];
+  }
+  if (template === 'result') {
+    return [
+      {
+        id: crypto.randomUUID(),
+        name: 'success',
+        type: 'boolean',
+        required: true,
+        description: '操作是否成功',
+      },
+      {
+        id: crypto.randomUUID(),
+        name: 'message',
+        type: 'string',
+        required: false,
+        description: '结果说明',
+      },
+    ];
+  }
+  return [];
 }
 
 function ToolLifecycleDialog({

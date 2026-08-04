@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DesktopAuthState } from '../../../shared/desktop-api';
 import { AuthScreen } from '../features/auth/AuthScreen';
-import { AccountSwitcher } from '../features/auth/AccountSwitcher';
+import { AccountSwitcher, type AccountMenuDestination } from '../features/auth/AccountSwitcher';
 import { PasswordChangeScreen } from '../features/auth/PasswordChangeScreen';
 import { BootstrapError, fetchBootstrap } from '../features/directory/bootstrap';
 import { DirectoryWorkspace } from '../features/directory/DirectoryWorkspace';
@@ -15,6 +15,18 @@ export function App(): React.JSX.Element {
   const [authError, setAuthError] = useState<string | null>(null);
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [accountMenuRequest, setAccountMenuRequest] = useState(0);
+  const [workspaceNavigationRequest, setWorkspaceNavigationRequest] = useState<{
+    destination: AccountMenuDestination;
+    requestId: number;
+  } | null>(null);
+
+  const navigateFromAccountMenu = useCallback((destination: AccountMenuDestination): void => {
+    setWorkspaceNavigationRequest((current) => ({
+      destination,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+  }, []);
 
   const acceptAuthState = useCallback(
     async (next: DesktopAuthState): Promise<void> => {
@@ -92,6 +104,7 @@ export function App(): React.JSX.Element {
           onStateChange={acceptAuthState}
           onAddAccount={() => setShowAddAccount(true)}
           onChangePassword={() => setShowPasswordChange(true)}
+          onNavigate={navigateFromAccountMenu}
         />
         <FailureScreen
           error={error}
@@ -119,12 +132,19 @@ export function App(): React.JSX.Element {
 
   return (
     <>
-      <DirectoryWorkspace payload={bootstrap.data} />
+      <DirectoryWorkspace
+        payload={bootstrap.data}
+        navigationRequest={workspaceNavigationRequest}
+        onOpenAccountMenu={() => setAccountMenuRequest((value) => value + 1)}
+        onChangePassword={() => setShowPasswordChange(true)}
+      />
       <AccountSwitcher
         state={authState}
+        openRequest={accountMenuRequest}
         onStateChange={acceptAuthState}
         onAddAccount={() => setShowAddAccount(true)}
         onChangePassword={() => setShowPasswordChange(true)}
+        onNavigate={navigateFromAccountMenu}
       />
       {showAddAccount && (
         <AuthScreen
