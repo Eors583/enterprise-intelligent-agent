@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { renderInTestDom } from '@/test/dom-test-utils';
 
-vi.mock('@/api/admin-api', () => ({ logout: vi.fn() }));
+vi.mock('@/api/session-api', () => ({ logout: vi.fn() }));
 vi.mock('@/features/auth/ChangePasswordModal', () => ({
   ChangePasswordModal: () => null,
 }));
@@ -119,7 +119,7 @@ describe('admin consolidated navigation', () => {
       if (primaryEntry) await dom.click(primaryEntry);
 
       const entry = [...dom.container.querySelectorAll('.admin-secondary-nav button')].find(
-        (button) => button.textContent?.includes('测试与发布'),
+        (button) => button.textContent?.includes('质量评测'),
       );
       const modelEntry = [...dom.container.querySelectorAll('.admin-secondary-nav button')].find(
         (button) => button.textContent?.includes('模型服务'),
@@ -127,7 +127,7 @@ describe('admin consolidated navigation', () => {
       expect(entry).not.toBeUndefined();
       expect(modelEntry).not.toBeUndefined();
       expect(modelEntry?.textContent).toContain('智能体使用的模型与路由');
-      expect(entry?.textContent).toContain('评测集、Run 与发布门禁');
+      expect(entry?.textContent).toContain('可选评测集、Run 与质量检查');
       if (entry) await dom.click(entry);
       expect(entry?.getAttribute('aria-current')).toBe('page');
       expect(dom.container.querySelector('[data-testid="ai-evaluation-page"]')?.textContent).toBe(

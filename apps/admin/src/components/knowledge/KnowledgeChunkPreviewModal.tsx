@@ -109,6 +109,18 @@ export function KnowledgeChunkPreviewModal({
                     </div>
                     <span>{formatPageRange(chunk.pageStart, chunk.pageEnd)}</span>
                   </header>
+                  <div className="knowledge-chunk-lineage">
+                    <span>父块：{chunk.parentHeadingPath.join(' / ') || '整篇文档'}</span>
+                    <span>
+                      相邻：{chunk.previousChunkId === null ? '开头' : '有上一块'} ·{' '}
+                      {chunk.nextChunkId === null ? '结尾' : '有下一块'}
+                    </span>
+                    {chunk.sheetName !== null ? <span>工作表：{chunk.sheetName}</span> : null}
+                  </div>
+                  <details>
+                    <summary>查看父级上下文</summary>
+                    <p>{chunk.parentExcerpt}</p>
+                  </details>
                   <pre>{chunk.content}</pre>
                   <footer>
                     <span>{chunk.tokenCount.toLocaleString()} tokens</span>

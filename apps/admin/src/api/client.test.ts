@@ -1,13 +1,36 @@
 import { z } from 'zod';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ApiError, apiUrl, messageFromError, request } from './client';
+import { ApiError, apiUrl, messageFromError, request, requestBlob } from './client';
 
 describe('admin api client', () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it('joins relative API base and paths without duplicate slashes', () => {
     expect(apiUrl('admin/organization', '/api/v1/')).toBe('/api/v1/admin/organization');
+  });
+
+  it('reads binary responses and decodes their UTF-8 source filename', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('pdf-source', {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/pdf',
+          'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent('员工制度.pdf')}`,
+        },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await requestBlob('/admin/knowledge/source');
+
+    expect(result.fileName).toBe('员工制度.pdf');
+    expect(result.mimeType).toBe('application/pdf');
+    await expect(result.blob.text()).resolves.toBe('pdf-source');
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      method: 'GET',
+      credentials: 'include',
+    });
   });
 
   it('keeps useful API errors for UI feedback', () => {

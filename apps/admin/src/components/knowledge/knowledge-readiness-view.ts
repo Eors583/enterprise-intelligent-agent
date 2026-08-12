@@ -58,5 +58,14 @@ export function knowledgeReadinessSummary(
 ): 'READY' | 'DEGRADED' | 'PROCESSING' | 'FAILED' {
   if (readiness.documents.processing > 0) return 'PROCESSING';
   if (readiness.documents.failed > 0) return 'FAILED';
-  return readiness.activationAllowed ? 'READY' : 'DEGRADED';
+  return readiness.retrievalMode === 'HYBRID' ? 'READY' : 'DEGRADED';
+}
+
+export function knowledgeCapabilityRecoveryPollingRequired(
+  readiness: KnowledgeBaseIndexReadiness | null,
+): boolean {
+  if (readiness === null || readiness.documents.processing > 0) return false;
+  return [readiness.embedding.status, readiness.rerank.status].some(
+    (status) => status === 'NOT_READY' || status === 'UNAVAILABLE',
+  );
 }

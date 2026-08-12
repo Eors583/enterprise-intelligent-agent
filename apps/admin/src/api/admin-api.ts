@@ -18,6 +18,7 @@ import {
   createToolDefinitionRequestSchema,
   createToolVersionRequestSchema,
   createKnowledgeBaseRequestSchema,
+  createKnowledgeEmbeddingIndexVersionRequestSchema,
   createKnowledgeDocumentRequestSchema,
   createKnowledgeGraphConflictRequestSchema,
   createKnowledgeGraphCorrectionRequestSchema,
@@ -36,13 +37,20 @@ import {
   experienceTransitionRequestSchema,
   prepareExperienceKnowledgeProjectionRequestSchema,
   knowledgeBaseSchema,
+  ensureKnowledgeFoldersRequestSchema,
+  knowledgeFolderListResponseSchema,
   knowledgeBaseIndexReadinessSchema,
   knowledgeBaseListResponseSchema,
   knowledgeDocumentChunkListResponseSchema,
   knowledgeDocumentSchema,
+  knowledgeUploadInspectionSchema,
+  inspectKnowledgeUploadRequestSchema,
   knowledgeDocumentVersionDetailSchema,
+  knowledgeStructuredDocumentPreviewSchema,
   knowledgeParseReviewQueueResponseSchema,
   knowledgeEmbeddingRebuildResponseSchema,
+  knowledgeEmbeddingIndexVersionSchema,
+  knowledgeEmbeddingIndexVersionListResponseSchema,
   knowledgeGraphRebuildResponseSchema,
   knowledgeGraphOverviewSchema,
   knowledgeGraphConflictSchema,
@@ -58,7 +66,10 @@ import {
   reviewKnowledgeDocumentParseRequestSchema,
   reviewKnowledgeDocumentGovernanceRequestSchema,
   updateKnowledgeDocumentVersionGovernanceRequestSchema,
+  updateKnowledgeDocumentAccessRequestSchema,
   transitionKnowledgeGraphCorrectionRequestSchema,
+  transitionKnowledgeGraphCorrectionBatchRequestSchema,
+  knowledgeGraphCorrectionBatchResultSchema,
   transitionKnowledgeOntologyVersionRequestSchema,
   browserAuthSessionResponseSchema,
   browserLoginResultSchema,
@@ -94,6 +105,11 @@ import {
   publishKnowledgeDocumentVersionRequestSchema,
   updateKnowledgeBaseRequestSchema,
   updateKnowledgeDocumentRequestSchema,
+  createKnowledgeSourceConnectorRequestSchema,
+  updateKnowledgeSourceConnectorRequestSchema,
+  knowledgeSourceConnectorSchema,
+  knowledgeSourceConnectorListResponseSchema,
+  knowledgeSourceSyncRunSchema,
   updateMemberRequestSchema,
   updateAdminAgentRequestSchema,
   updateAgentUsageLimitsRequestSchema,
@@ -128,6 +144,7 @@ import {
   type CreateToolDefinitionRequest,
   type CreateToolVersionRequest,
   type CreateKnowledgeBaseRequest,
+  type CreateKnowledgeEmbeddingIndexVersionRequest,
   type CreateKnowledgeDocumentRequest,
   type CreateKnowledgeGraphConflictRequest,
   type CreateKnowledgeGraphCorrectionRequest,
@@ -148,10 +165,17 @@ import {
   type KnowledgeBase,
   type KnowledgeBaseIndexReadiness,
   type KnowledgeBaseListResponse,
+  type EnsureKnowledgeFoldersRequest,
+  type KnowledgeFolderListResponse,
+  type KnowledgeEmbeddingIndexVersion,
+  type KnowledgeEmbeddingIndexVersionListResponse,
   type KnowledgeDocumentChunkListResponse,
   type KnowledgeDocument,
   type KnowledgeDocumentGovernancePolicy,
   type KnowledgeDocumentVersionDetail,
+  type InspectKnowledgeUploadRequest,
+  type KnowledgeUploadInspection,
+  type KnowledgeStructuredDocumentPreview,
   type KnowledgeParseReviewQueueResponse,
   type KnowledgeEmbeddingRebuildResponse,
   type KnowledgeGraphRebuildResponse,
@@ -169,7 +193,10 @@ import {
   type ReviewKnowledgeDocumentParseRequest,
   type ReviewKnowledgeDocumentGovernanceRequest,
   type UpdateKnowledgeDocumentVersionGovernanceRequest,
+  type UpdateKnowledgeDocumentAccessRequest,
   type TransitionKnowledgeGraphCorrectionRequest,
+  type TransitionKnowledgeGraphCorrectionBatchRequest,
+  type KnowledgeGraphCorrectionBatchResult,
   type TransitionKnowledgeOntologyVersionRequest,
   type LoginRequest,
   type MfaLoginVerifyRequest,
@@ -202,6 +229,11 @@ import {
   type PublishKnowledgeDocumentVersionRequest,
   type UpdateKnowledgeBaseRequest,
   type UpdateKnowledgeDocumentRequest,
+  type CreateKnowledgeSourceConnectorRequest,
+  type UpdateKnowledgeSourceConnectorRequest,
+  type KnowledgeSourceConnector,
+  type KnowledgeSourceConnectorListResponse,
+  type KnowledgeSourceSyncRun,
   type UpdateMemberRequest,
   type UpdateAdminAgentRequest,
   type UpdateAgentUsageLimitsRequest,
@@ -217,7 +249,7 @@ import {
 } from '@enterprise/contracts';
 import { z } from 'zod';
 
-import { request } from './client';
+import { request, requestBlob, type BinaryApiResponse } from './client';
 
 const mutationResponseSchema = z.unknown();
 const experienceListResponseSchema = z
@@ -832,6 +864,95 @@ export function listKnowledgeBases(signal?: AbortSignal): Promise<KnowledgeBaseL
   });
 }
 
+export function listKnowledgeEmbeddingIndexVersions(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeEmbeddingIndexVersionListResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/embedding-index-versions`,
+    {
+      schema: knowledgeEmbeddingIndexVersionListResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function createKnowledgeEmbeddingIndexVersion(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeEmbeddingIndexVersionRequest,
+): Promise<KnowledgeEmbeddingIndexVersion> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/embedding-index-versions`,
+    {
+      method: 'POST',
+      body: createKnowledgeEmbeddingIndexVersionRequestSchema.parse(input),
+      schema: knowledgeEmbeddingIndexVersionSchema,
+    },
+  );
+}
+
+export function activateKnowledgeEmbeddingIndexVersion(
+  knowledgeBaseId: string,
+  embeddingIndexVersionId: string,
+): Promise<KnowledgeBase> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/embedding-index-versions/${encodeURIComponent(embeddingIndexVersionId)}/activate`,
+    { method: 'POST', schema: knowledgeBaseSchema },
+  );
+}
+
+export function listKnowledgeSourceConnectors(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeSourceConnectorListResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors`,
+    {
+      schema: knowledgeSourceConnectorListResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function createKnowledgeSourceConnector(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeSourceConnectorRequest,
+): Promise<KnowledgeSourceConnector> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors`,
+    {
+      method: 'POST',
+      body: createKnowledgeSourceConnectorRequestSchema.parse(input),
+      schema: knowledgeSourceConnectorSchema,
+    },
+  );
+}
+
+export function updateKnowledgeSourceConnector(
+  knowledgeBaseId: string,
+  connectorId: string,
+  input: UpdateKnowledgeSourceConnectorRequest,
+): Promise<KnowledgeSourceConnector> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors/${encodeURIComponent(connectorId)}`,
+    {
+      method: 'PATCH',
+      body: updateKnowledgeSourceConnectorRequestSchema.parse(input),
+      schema: knowledgeSourceConnectorSchema,
+    },
+  );
+}
+
+export function syncKnowledgeSourceConnector(
+  knowledgeBaseId: string,
+  connectorId: string,
+): Promise<KnowledgeSourceSyncRun> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors/${encodeURIComponent(connectorId)}/sync`,
+    { method: 'POST', schema: knowledgeSourceSyncRunSchema },
+  );
+}
+
 export function getKnowledgeBaseReadiness(
   knowledgeBaseId: string,
   signal?: AbortSignal,
@@ -968,6 +1089,20 @@ export function transitionKnowledgeGraphCorrection(
   );
 }
 
+export function transitionKnowledgeGraphRelationCorrectionBatch(
+  knowledgeBaseId: string,
+  input: TransitionKnowledgeGraphCorrectionBatchRequest,
+): Promise<KnowledgeGraphCorrectionBatchResult> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/relation-corrections/batch-transitions`,
+    {
+      method: 'POST',
+      body: transitionKnowledgeGraphCorrectionBatchRequestSchema.parse(input),
+      schema: knowledgeGraphCorrectionBatchResultSchema,
+    },
+  );
+}
+
 export function createKnowledgeBase(input: CreateKnowledgeBaseRequest): Promise<KnowledgeBase> {
   return request('/admin/knowledge-bases', {
     method: 'POST',
@@ -985,6 +1120,21 @@ export function updateKnowledgeBase(
     body: updateKnowledgeBaseRequestSchema.parse(input),
     schema: mutationResponseSchema,
   });
+}
+
+export function updateKnowledgeDocumentAccess(
+  knowledgeBaseId: string,
+  documentId: string,
+  input: UpdateKnowledgeDocumentAccessRequest,
+): Promise<KnowledgeDocument> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/access`,
+    {
+      method: 'PATCH',
+      body: updateKnowledgeDocumentAccessRequestSchema.parse(input),
+      schema: knowledgeDocumentSchema,
+    },
+  );
 }
 
 export function createKnowledgeDocument(
@@ -1024,6 +1174,33 @@ export function getKnowledgeDocumentVersion(
       schema: knowledgeDocumentVersionDetailSchema,
       ...(signal ? { signal } : {}),
     },
+  );
+}
+
+export function getKnowledgeStructuredDocumentPreview(
+  knowledgeBaseId: string,
+  documentId: string,
+  documentVersionId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeStructuredDocumentPreview> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(documentVersionId)}/structured`,
+    {
+      schema: knowledgeStructuredDocumentPreviewSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function getKnowledgeDocumentSource(
+  knowledgeBaseId: string,
+  documentId: string,
+  documentVersionId: string,
+  signal?: AbortSignal,
+): Promise<BinaryApiResponse> {
+  return requestBlob(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(documentVersionId)}/source`,
+    signal,
   );
 }
 
@@ -1080,11 +1257,13 @@ export function uploadKnowledgeDocument(
     title: string;
     changeSummary?: string;
     governance?: KnowledgeDocumentGovernancePolicy;
+    folderId?: string | null;
   },
 ): Promise<KnowledgeDocument> {
   const body = new FormData();
   body.append('file', input.file, input.file.name);
   body.append('title', input.title.trim());
+  if (input.folderId !== undefined) body.append('folderId', input.folderId ?? 'null');
   if (input.changeSummary?.trim()) body.append('changeSummary', input.changeSummary.trim());
   if (input.governance !== undefined) {
     body.append('governance', JSON.stringify(input.governance));
@@ -1095,6 +1274,33 @@ export function uploadKnowledgeDocument(
     body,
     schema: knowledgeDocumentSchema,
   });
+}
+
+export function ensureKnowledgeFolders(
+  knowledgeBaseId: string,
+  input: EnsureKnowledgeFoldersRequest,
+): Promise<KnowledgeFolderListResponse> {
+  return request(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/folders/ensure`, {
+    method: 'POST',
+    body: ensureKnowledgeFoldersRequestSchema.parse(input),
+    schema: knowledgeFolderListResponseSchema,
+  });
+}
+
+export function inspectKnowledgeUpload(
+  knowledgeBaseId: string,
+  input: InspectKnowledgeUploadRequest,
+  signal?: AbortSignal,
+): Promise<KnowledgeUploadInspection> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/upload-inspection`,
+    {
+      method: 'POST',
+      body: inspectKnowledgeUploadRequestSchema.parse(input),
+      schema: knowledgeUploadInspectionSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
 }
 
 export function importKnowledgeWebDocument(

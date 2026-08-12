@@ -135,6 +135,20 @@ enum KnowledgeBaseStatus {
   ARCHIVED
 }
 
+enum KnowledgeSpaceType {
+  COMPANY
+  DEPARTMENT
+  PROJECT
+  MEMBER
+}
+
+enum KnowledgeEmbeddingIndexStatus {
+  BUILDING
+  ACTIVE
+  RETIRED
+  FAILED
+}
+
 enum KnowledgeDocumentStatus {
   DRAFT
   PROCESSING
@@ -172,6 +186,22 @@ enum KnowledgeSourceType {
   MARKDOWN
   FILE
   WEB
+}
+
+enum KnowledgeSourceConnectorStatus {
+  ACTIVE
+  PAUSED
+}
+
+enum KnowledgeSourceItemStatus {
+  ACTIVE
+  DELETED
+}
+
+enum KnowledgeSourceSyncRunStatus {
+  RUNNING
+  SUCCEEDED
+  FAILED
 }
 
 enum KnowledgeParseReviewStatus {
@@ -690,6 +720,10 @@ enum AiEvaluationMetric {
   SENSITIVE_DATA_DISCLOSURE_COUNT
   AVERAGE_COST_MICROS
   P95_LATENCY_MS
+  RETRIEVAL_RECALL_AT_5
+  RETRIEVAL_MRR
+  RETRIEVAL_NDCG_AT_10
+  CITATION_SUPPORT_RATE
 }
 
 enum AiEvaluationDatasetStatus {
@@ -797,6 +831,7 @@ model Tenant {
   updatedAt                  DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   users                       User[]
+  memberProfiles              MemberProfile[]
   organizations               Organization[]
   orgUnits                    OrgUnit[]
   employments                 Employment[]
@@ -820,12 +855,16 @@ model Tenant {
   authSessions                AuthSession[]
   authActionTokens            AuthActionToken[]
   knowledgeBases              KnowledgeBase[]
+  knowledgeFolders            KnowledgeFolder[]
   knowledgeDocuments          KnowledgeDocument[]
   knowledgeDocumentVersions   KnowledgeDocumentVersion[]
+  knowledgeParentChunks       KnowledgeParentChunk[]
   knowledgeChunks             KnowledgeChunk[]
   knowledgeChunkEmbeddings    KnowledgeChunkEmbedding[]
+  knowledgeEmbeddingIndexes   KnowledgeEmbeddingIndexVersion[]
   knowledgeIngestionJobs      KnowledgeIngestionJob[]
   knowledgeBaseOrgUnits       KnowledgeBaseOrgUnit[]
+  knowledgeBaseMembers        KnowledgeBaseMember[]
   knowledgeEntities           KnowledgeEntity[]
   knowledgeEntityMentions     KnowledgeEntityMention[]
   knowledgeRelations          KnowledgeRelation[]
@@ -868,36 +907,40 @@ model User {
   createdAt       DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant                            Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  tenant                            Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   employments                       Employment[]
-  ownedAgents                       AgentInstance[]            @relation("AgentOwner")
-  createdAgents                     AgentInstance[]            @relation("AgentCreator")
-  createdConversations              Conversation[]             @relation("ConversationCreator")
+  memberProfile                     MemberProfile?
+  ownedAgents                       AgentInstance[]                  @relation("AgentOwner")
+  createdAgents                     AgentInstance[]                  @relation("AgentCreator")
+  createdConversations              Conversation[]                   @relation("ConversationCreator")
   conversationParticipants          ConversationParticipant[]
   conversationUserStates            ConversationUserState[]
-  sentMessages                      Message[]                  @relation("UserSentMessages")
+  sentMessages                      Message[]                        @relation("UserSentMessages")
   passwordCredential                PasswordCredential?
   authSessions                      AuthSession[]
-  authActionTokens                  AuthActionToken[]          @relation("AuthActionTokenUser")
-  createdAuthActionTokens           AuthActionToken[]          @relation("AuthActionTokenCreator")
-  createdKnowledgeBases             KnowledgeBase[]            @relation("KnowledgeBaseCreator")
-  createdKnowledgeDocuments         KnowledgeDocument[]        @relation("KnowledgeDocumentCreator")
-  createdKnowledgeDocumentVersions  KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionCreator")
-  reviewedKnowledgeDocumentVersions KnowledgeDocumentVersion[] @relation("KnowledgeDocumentVersionReviewer")
-  requestedAgentRuns                AgentRun[]                 @relation("AgentRunRequester")
+  authActionTokens                  AuthActionToken[]                @relation("AuthActionTokenUser")
+  createdAuthActionTokens           AuthActionToken[]                @relation("AuthActionTokenCreator")
+  createdKnowledgeBases             KnowledgeBase[]                  @relation("KnowledgeBaseCreator")
+  createdKnowledgeFolders           KnowledgeFolder[]                @relation("KnowledgeFolderCreator")
+  createdKnowledgeDocuments         KnowledgeDocument[]              @relation("KnowledgeDocumentCreator")
+  createdKnowledgeDocumentVersions  KnowledgeDocumentVersion[]       @relation("KnowledgeDocumentVersionCreator")
+  reviewedKnowledgeDocumentVersions KnowledgeDocumentVersion[]       @relation("KnowledgeDocumentVersionReviewer")
+  createdKnowledgeEmbeddingIndexes  KnowledgeEmbeddingIndexVersion[] @relation("KnowledgeEmbeddingIndexCreator")
+  accessibleKnowledgeBases          KnowledgeBaseMember[]
+  requestedAgentRuns                AgentRun[]                       @relation("AgentRunRequester")
   directoryBindings                 DirectoryUserBinding[]
   answerFeedbacks                   AnswerFeedback[]
-  roleAssignments                   RoleAssignment[]           @relation("RoleAssignmentUser")
-  createdRoleAssignments            RoleAssignment[]           @relation("RoleAssignmentCreator")
-  revokedRoleAssignments            RoleAssignment[]           @relation("RoleAssignmentRevoker")
-  createdAgentVersions              AgentVersion[]             @relation("AgentVersionCreator")
-  reviewRequestedAgentVersions      AgentVersion[]             @relation("AgentVersionReviewRequester")
-  reviewedAgentVersions             AgentVersion[]             @relation("AgentVersionReviewer")
-  approvedAgentVersions             AgentVersion[]             @relation("AgentVersionApprover")
-  publishedAgentVersions            AgentVersion[]             @relation("AgentVersionPublisher")
-  retiredAgentVersions              AgentVersion[]             @relation("AgentVersionRetirer")
-  requestedDirectorySyncPreviews    DirectorySyncPreview[]     @relation("DirectorySyncPreviewRequester")
-  requestedDirectorySyncRuns        DirectorySyncRun[]         @relation("DirectorySyncRunRequester")
+  roleAssignments                   RoleAssignment[]                 @relation("RoleAssignmentUser")
+  createdRoleAssignments            RoleAssignment[]                 @relation("RoleAssignmentCreator")
+  revokedRoleAssignments            RoleAssignment[]                 @relation("RoleAssignmentRevoker")
+  createdAgentVersions              AgentVersion[]                   @relation("AgentVersionCreator")
+  reviewRequestedAgentVersions      AgentVersion[]                   @relation("AgentVersionReviewRequester")
+  reviewedAgentVersions             AgentVersion[]                   @relation("AgentVersionReviewer")
+  approvedAgentVersions             AgentVersion[]                   @relation("AgentVersionApprover")
+  publishedAgentVersions            AgentVersion[]                   @relation("AgentVersionPublisher")
+  retiredAgentVersions              AgentVersion[]                   @relation("AgentVersionRetirer")
+  requestedDirectorySyncPreviews    DirectorySyncPreview[]           @relation("DirectorySyncPreviewRequester")
+  requestedDirectorySyncRuns        DirectorySyncRun[]               @relation("DirectorySyncRunRequester")
 
   // Composite candidate key for tenant-scoped foreign keys. The globally
   // unique id remains the primary key, while relations must also prove that
@@ -953,7 +996,7 @@ model OrgUnit {
   employments         Employment[]
   positions           Position[]
   knowledgeBaseScopes KnowledgeBaseOrgUnit[]
-  departmentAgents    AgentInstance[]             @relation("DepartmentAgents")
+  departmentAgents    AgentInstance[]           @relation("DepartmentAgents")
   directoryBindings   DirectoryOrgUnitBinding[]
 
   @@unique([tenantId, id])
@@ -1077,32 +1120,111 @@ model AuthRecoveryDelivery {
 }
 
 model KnowledgeBase {
-  id          String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId    String              @map("tenant_id") @db.Uuid
-  key         String              @db.VarChar(100)
-  name        String              @db.VarChar(200)
-  description String?             @db.Text
-  status      KnowledgeBaseStatus @default(DRAFT)
-  createdById String              @map("created_by_id") @db.Uuid
-  version     Int                 @default(1)
-  createdAt   DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                             String              @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                       String              @map("tenant_id") @db.Uuid
+  key                            String              @db.VarChar(100)
+  name                           String              @db.VarChar(200)
+  description                    String?             @db.Text
+  status                         KnowledgeBaseStatus @default(DRAFT)
+  spaceType                      KnowledgeSpaceType  @default(COMPANY) @map("space_type")
+  spaceTargetId                  String              @map("space_target_id") @db.Uuid
+  spaceTargetName                String              @map("space_target_name") @db.VarChar(200)
+  retrievalMode                  String              @default("HYBRID") @map("retrieval_mode") @db.VarChar(24)
+  retrievalTopK                  Int                 @default(8) @map("retrieval_top_k")
+  retrievalScoreThreshold        Decimal             @default(0.08) @map("retrieval_score_threshold") @db.Decimal(5, 4)
+  retrievalSemanticWeight        Decimal             @default(0.7) @map("retrieval_semantic_weight") @db.Decimal(5, 4)
+  retrievalKeywordWeight         Decimal             @default(0.3) @map("retrieval_keyword_weight") @db.Decimal(5, 4)
+  retrievalRerankEnabled         Boolean             @default(true) @map("retrieval_rerank_enabled")
+  relationshipRetrievalEnabled   Boolean             @default(true) @map("relationship_retrieval_enabled")
+  maxChunksPerDocument           Int                 @default(3) @map("max_chunks_per_document")
+  chunkTargetTokens              Int                 @default(500) @map("chunk_target_tokens")
+  chunkOverlapTokens             Int                 @default(80) @map("chunk_overlap_tokens")
+  activeEmbeddingIndexVersionId  String?             @map("active_embedding_index_version_id") @db.Uuid
+  pendingEmbeddingIndexVersionId String?             @map("pending_embedding_index_version_id") @db.Uuid
+  createdById                    String              @map("created_by_id") @db.Uuid
+  version                        Int                 @default(1)
+  createdAt                      DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                      DateTime            @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant           Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  createdBy        User                        @relation("KnowledgeBaseCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
-  orgUnits         KnowledgeBaseOrgUnit[]
-  documents        KnowledgeDocument[]
-  documentVersions KnowledgeDocumentVersion[]
-  chunks           KnowledgeChunk[]
-  entities         KnowledgeEntity[]
-  entityMentions   KnowledgeEntityMention[]
-  relations        KnowledgeRelation[]
-  relationEvidence KnowledgeRelationEvidence[]
+  tenant                       Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  createdBy                    User                             @relation("KnowledgeBaseCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
+  orgUnits                     KnowledgeBaseOrgUnit[]
+  members                      KnowledgeBaseMember[]
+  documents                    KnowledgeDocument[]
+  folders                      KnowledgeFolder[]
+  documentVersions             KnowledgeDocumentVersion[]
+  parentChunks                 KnowledgeParentChunk[]
+  chunks                       KnowledgeChunk[]
+  entities                     KnowledgeEntity[]
+  entityMentions               KnowledgeEntityMention[]
+  relations                    KnowledgeRelation[]
+  relationEvidence             KnowledgeRelationEvidence[]
+  embeddingIndexVersions       KnowledgeEmbeddingIndexVersion[] @relation("KnowledgeBaseEmbeddingIndexVersions")
+  activeEmbeddingIndexVersion  KnowledgeEmbeddingIndexVersion?  @relation("KnowledgeBaseActiveEmbeddingIndex", fields: [tenantId, id, activeEmbeddingIndexVersionId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
+  pendingEmbeddingIndexVersion KnowledgeEmbeddingIndexVersion?  @relation("KnowledgeBasePendingEmbeddingIndex", fields: [tenantId, id, pendingEmbeddingIndexVersionId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
 
   @@unique([tenantId, id])
   @@unique([tenantId, key])
   @@index([tenantId, status, name])
+  @@index([tenantId, spaceType, spaceTargetId, name], map: "knowledge_bases_space_tree_idx")
   @@map("knowledge_bases")
+}
+
+model KnowledgeFolder {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  knowledgeBaseId String   @map("knowledge_base_id") @db.Uuid
+  parentId        String?  @map("parent_id") @db.Uuid
+  name            String   @db.VarChar(200)
+  path            String   @db.VarChar(2000)
+  createdById     String   @map("created_by_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  knowledgeBase KnowledgeBase       @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Cascade)
+  createdBy     User                @relation("KnowledgeFolderCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
+  parent        KnowledgeFolder?    @relation("KnowledgeFolderTree", fields: [tenantId, knowledgeBaseId, parentId], references: [tenantId, knowledgeBaseId, id], onDelete: Cascade, onUpdate: NoAction)
+  children      KnowledgeFolder[]   @relation("KnowledgeFolderTree")
+  documents     KnowledgeDocument[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, knowledgeBaseId, id], map: "knowledge_folders_scope_identity_key")
+  @@unique([tenantId, knowledgeBaseId, path], map: "knowledge_folders_scope_path_key")
+  @@index([tenantId, knowledgeBaseId, parentId, name], map: "knowledge_folders_parent_name_idx")
+  @@map("knowledge_folders")
+}
+
+model KnowledgeEmbeddingIndexVersion {
+  id              String                        @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String                        @map("tenant_id") @db.Uuid
+  knowledgeBaseId String                        @map("knowledge_base_id") @db.Uuid
+  version         Int
+  status          KnowledgeEmbeddingIndexStatus @default(BUILDING)
+  provider        String                        @db.VarChar(40)
+  model           String                        @db.VarChar(200)
+  dimensions      Int
+  distance        String                        @default("COSINE") @db.VarChar(24)
+  normalization   String                        @default("L2") @db.VarChar(24)
+  collectionName  String?                       @map("collection_name") @db.VarChar(200)
+  createdById     String                        @map("created_by_id") @db.Uuid
+  createdAt       DateTime                      @default(now()) @map("created_at") @db.Timestamptz(6)
+  activatedAt     DateTime?                     @map("activated_at") @db.Timestamptz(6)
+  retiredAt       DateTime?                     @map("retired_at") @db.Timestamptz(6)
+  failureCode     String?                       @map("failure_code") @db.VarChar(120)
+
+  tenant        Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: NoAction)
+  knowledgeBase KnowledgeBase             @relation("KnowledgeBaseEmbeddingIndexVersions", fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction)
+  createdBy     User                      @relation("KnowledgeEmbeddingIndexCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction)
+  activeFor     KnowledgeBase[]           @relation("KnowledgeBaseActiveEmbeddingIndex")
+  pendingFor    KnowledgeBase[]           @relation("KnowledgeBasePendingEmbeddingIndex")
+  embeddings    KnowledgeChunkEmbedding[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, knowledgeBaseId, id], map: "knowledge_embedding_index_versions_scope_identity_key")
+  @@unique([tenantId, knowledgeBaseId, version], map: "knowledge_embedding_index_versions_number_key")
+  @@index([tenantId, knowledgeBaseId, status, version(sort: Desc)], map: "knowledge_embedding_index_versions_lookup_idx")
+  @@map("knowledge_embedding_index_versions")
 }
 
 model KnowledgeBaseOrgUnit {
@@ -1122,10 +1244,27 @@ model KnowledgeBaseOrgUnit {
   @@map("knowledge_base_org_units")
 }
 
+model KnowledgeBaseMember {
+  id              String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String   @map("tenant_id") @db.Uuid
+  knowledgeBaseId String   @map("knowledge_base_id") @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  knowledgeBase KnowledgeBase @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Cascade)
+  user          User          @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, knowledgeBaseId, userId], map: "knowledge_base_members_tenant_id_knowledge_base_id_user_id_key")
+  @@index([tenantId, userId], map: "knowledge_base_members_tenant_id_user_id_idx")
+  @@map("knowledge_base_members")
+}
+
 model KnowledgeDocument {
   id               String                  @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId         String                  @map("tenant_id") @db.Uuid
   knowledgeBaseId  String                  @map("knowledge_base_id") @db.Uuid
+  folderId         String?                 @map("folder_id") @db.Uuid
   title            String                  @db.VarChar(300)
   sourceType       KnowledgeSourceType     @map("source_type")
   mimeType         String?                 @map("mime_type") @db.VarChar(160)
@@ -1142,9 +1281,11 @@ model KnowledgeDocument {
 
   tenant           Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   knowledgeBase    KnowledgeBase               @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict)
+  folder           KnowledgeFolder?            @relation(fields: [tenantId, knowledgeBaseId, folderId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
   createdBy        User                        @relation("KnowledgeDocumentCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
   currentVersion   KnowledgeDocumentVersion?   @relation("KnowledgeDocumentCurrentVersion", fields: [tenantId, knowledgeBaseId, id, currentVersionId], references: [tenantId, knowledgeBaseId, documentId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_documents_current_version_fkey")
   versions         KnowledgeDocumentVersion[]  @relation("KnowledgeDocumentVersionHistory")
+  parentChunks     KnowledgeParentChunk[]
   chunks           KnowledgeChunk[]
   entityMentions   KnowledgeEntityMention[]
   relationEvidence KnowledgeRelationEvidence[]
@@ -1153,6 +1294,7 @@ model KnowledgeDocument {
   @@unique([tenantId, knowledgeBaseId, id], map: "knowledge_documents_scope_identity_key")
   @@unique([tenantId, knowledgeBaseId, id, currentVersionId], map: "knowledge_documents_current_version_identity_key")
   @@index([tenantId, knowledgeBaseId, status, updatedAt(sort: Desc)], map: "knowledge_documents_tenant_id_knowledge_base_id_status_updated_")
+  @@index([tenantId, knowledgeBaseId, folderId, status, title], map: "knowledge_documents_folder_listing_idx")
   @@map("knowledge_documents")
 }
 
@@ -1168,6 +1310,10 @@ model KnowledgeDocumentVersion {
   objectKey                  String?                        @map("object_key") @db.Text
   objectSize                 Int?                           @map("object_size")
   objectSha256               String?                        @map("object_sha256") @db.Char(64)
+  structuredObjectKey        String?                        @map("structured_object_key") @db.Text
+  structuredObjectSize       Int?                           @map("structured_object_size")
+  structuredObjectSha256     String?                        @map("structured_object_sha256") @db.Char(64)
+  structuredFormat           String?                        @map("structured_format") @db.VarChar(120)
   sourceUri                  String?                        @map("source_uri") @db.Text
   checksum                   String?                        @db.Char(64)
   contentText                String?                        @map("content_text") @db.Text
@@ -1213,6 +1359,7 @@ model KnowledgeDocumentVersion {
   currentForDocument KnowledgeDocument?          @relation("KnowledgeDocumentCurrentVersion")
   createdBy          User                        @relation("KnowledgeDocumentVersionCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_document_versions_created_by_fkey")
   parseReviewedBy    User?                       @relation("KnowledgeDocumentVersionReviewer", fields: [tenantId, parseReviewedById], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_document_versions_parse_reviewer_fkey")
+  parentChunks       KnowledgeParentChunk[]
   chunks             KnowledgeChunk[]
   ingestionJobs      KnowledgeIngestionJob[]
   entityMentions     KnowledgeEntityMention[]
@@ -1227,12 +1374,107 @@ model KnowledgeDocumentVersion {
   @@map("knowledge_document_versions")
 }
 
+model KnowledgeSourceConnector {
+  id              String                         @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String                         @map("tenant_id") @db.Uuid
+  knowledgeBaseId String                         @map("knowledge_base_id") @db.Uuid
+  name            String                         @db.VarChar(120)
+  providerType    String                         @default("HTTPS_MANIFEST") @map("provider_type") @db.VarChar(40)
+  manifestUrl     String                         @map("manifest_url") @db.Text
+  status          KnowledgeSourceConnectorStatus @default(ACTIVE)
+  cursor          String?                        @db.Text
+  lastSyncedAt    DateTime?                      @map("last_synced_at") @db.Timestamptz(6)
+  createdById     String                         @map("created_by_id") @db.Uuid
+  createdAt       DateTime                       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime                       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, knowledgeBaseId, status, updatedAt(sort: Desc)], map: "knowledge_source_connectors_scope_status_idx")
+  @@map("knowledge_source_connectors")
+}
+
+model KnowledgeSourceItem {
+  id               String                    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId         String                    @map("tenant_id") @db.Uuid
+  connectorId      String                    @map("connector_id") @db.Uuid
+  externalId       String                    @map("external_id") @db.VarChar(300)
+  sourceRevision   String                    @map("source_revision") @db.VarChar(300)
+  sha256           String?                   @db.Char(64)
+  sourceUri        String?                   @map("source_uri") @db.Text
+  fileName         String                    @map("file_name") @db.VarChar(300)
+  mimeType         String                    @map("mime_type") @db.VarChar(160)
+  sourceModifiedAt DateTime?                 @map("source_modified_at") @db.Timestamptz(6)
+  documentId       String?                   @map("document_id") @db.Uuid
+  status           KnowledgeSourceItemStatus @default(ACTIVE)
+  lastSeenRunId    String?                   @map("last_seen_run_id") @db.Uuid
+  createdAt        DateTime                  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime                  @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, connectorId, externalId], map: "knowledge_source_items_external_identity_key")
+  @@index([tenantId, connectorId, status, updatedAt(sort: Desc)], map: "knowledge_source_items_connector_status_idx")
+  @@map("knowledge_source_items")
+}
+
+model KnowledgeSourceSyncRun {
+  id              String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String                       @map("tenant_id") @db.Uuid
+  connectorId     String                       @map("connector_id") @db.Uuid
+  status          KnowledgeSourceSyncRunStatus @default(RUNNING)
+  cursorBefore    String?                      @map("cursor_before") @db.Text
+  cursorAfter     String?                      @map("cursor_after") @db.Text
+  discoveredCount Int                          @default(0) @map("discovered_count")
+  createdCount    Int                          @default(0) @map("created_count")
+  updatedCount    Int                          @default(0) @map("updated_count")
+  skippedCount    Int                          @default(0) @map("skipped_count")
+  deletedCount    Int                          @default(0) @map("deleted_count")
+  failedCount     Int                          @default(0) @map("failed_count")
+  failures        Json                         @default("[]")
+  requestedById   String                       @map("requested_by_id") @db.Uuid
+  startedAt       DateTime                     @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt      DateTime?                    @map("finished_at") @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@index([tenantId, connectorId, startedAt(sort: Desc), id], map: "knowledge_source_sync_runs_connector_started_idx")
+  @@map("knowledge_source_sync_runs")
+}
+
+model KnowledgeParentChunk {
+  id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId          String   @map("tenant_id") @db.Uuid
+  knowledgeBaseId   String   @map("knowledge_base_id") @db.Uuid
+  documentId        String   @map("document_id") @db.Uuid
+  documentVersionId String   @map("document_version_id") @db.Uuid
+  parentIndex       Int      @map("parent_index")
+  headingPath       String[] @default([]) @map("heading_path")
+  content           String   @db.Text
+  tokenCount        Int      @map("token_count")
+  contentHash       String   @map("content_hash") @db.Char(64)
+  metadata          Json     @default("{}")
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_parent_chunks_tenant_id_fkey")
+  knowledgeBase   KnowledgeBase            @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_parent_chunks_knowledge_base_fkey")
+  document        KnowledgeDocument        @relation(fields: [tenantId, knowledgeBaseId, documentId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_parent_chunks_document_fkey")
+  documentVersion KnowledgeDocumentVersion @relation(fields: [tenantId, knowledgeBaseId, documentId, documentVersionId], references: [tenantId, knowledgeBaseId, documentId, id], onDelete: Cascade, onUpdate: NoAction, map: "knowledge_parent_chunks_document_version_fkey")
+  children        KnowledgeChunk[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, knowledgeBaseId, documentId, documentVersionId, id], map: "knowledge_parent_chunks_scope_identity_key")
+  @@unique([tenantId, documentVersionId, parentIndex], map: "knowledge_parent_chunks_version_index_key")
+  @@index([tenantId, knowledgeBaseId, documentId], map: "knowledge_parent_chunks_scope_idx")
+  @@map("knowledge_parent_chunks")
+}
+
 model KnowledgeChunk {
   id                String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
   tenantId          String   @map("tenant_id") @db.Uuid
   knowledgeBaseId   String   @map("knowledge_base_id") @db.Uuid
   documentId        String   @map("document_id") @db.Uuid
   documentVersionId String   @map("document_version_id") @db.Uuid
+  parentChunkId     String   @map("parent_chunk_id") @db.Uuid
+  previousChunkId   String?  @map("previous_chunk_id") @db.Uuid
+  nextChunkId       String?  @map("next_chunk_id") @db.Uuid
   chunkIndex        Int      @map("chunk_index")
   headingPath       String[] @default([]) @map("heading_path")
   content           String   @db.Text
@@ -1245,6 +1487,7 @@ model KnowledgeChunk {
   knowledgeBase    KnowledgeBase               @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_chunks_knowledge_base_fkey")
   document         KnowledgeDocument           @relation(fields: [tenantId, knowledgeBaseId, documentId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_chunks_document_fkey")
   documentVersion  KnowledgeDocumentVersion    @relation(fields: [tenantId, knowledgeBaseId, documentId, documentVersionId], references: [tenantId, knowledgeBaseId, documentId, id], onDelete: Cascade, onUpdate: NoAction, map: "knowledge_chunks_document_version_fkey")
+  parentChunk      KnowledgeParentChunk        @relation(fields: [tenantId, knowledgeBaseId, documentId, documentVersionId, parentChunkId], references: [tenantId, knowledgeBaseId, documentId, documentVersionId, id], onDelete: Cascade, onUpdate: NoAction, map: "knowledge_chunks_parent_chunk_fkey")
   embeddings       KnowledgeChunkEmbedding[]
   entityMentions   KnowledgeEntityMention[]
   relationEvidence KnowledgeRelationEvidence[]
@@ -1254,25 +1497,28 @@ model KnowledgeChunk {
   @@unique([tenantId, documentVersionId, chunkIndex], map: "knowledge_chunks_version_index_key")
   @@index([tenantId, documentVersionId, contentHash], map: "knowledge_chunks_version_hash_idx")
   @@index([tenantId, knowledgeBaseId, documentId], map: "knowledge_chunks_scope_idx")
+  @@index([tenantId, parentChunkId, chunkIndex], map: "knowledge_chunks_parent_idx")
   @@index([content(ops: raw("gin_trgm_ops"))], type: Gin, map: "knowledge_chunks_content_trgm_idx")
   @@map("knowledge_chunks")
 }
 
 model KnowledgeChunkEmbedding {
-  id                 String                      @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
-  tenantId           String                      @map("tenant_id") @db.Uuid
-  chunkId            String                      @map("chunk_id") @db.Uuid
-  embeddingModel     String                      @map("embedding_model") @db.VarChar(200)
-  embeddingDimension Int                         @map("embedding_dimension")
-  contentHash        String                      @map("content_hash") @db.Char(64)
-  embedding          Unsupported("vector(1536)")
-  createdAt          DateTime                    @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt          DateTime                    @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                      String                @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId                String                @map("tenant_id") @db.Uuid
+  chunkId                 String                @map("chunk_id") @db.Uuid
+  embeddingIndexVersionId String                @map("embedding_index_version_id") @db.Uuid
+  embeddingModel          String                @map("embedding_model") @db.VarChar(200)
+  embeddingDimension      Int                   @map("embedding_dimension")
+  contentHash             String                @map("content_hash") @db.Char(64)
+  embedding               Unsupported("vector")
+  createdAt               DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime              @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant Tenant         @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_chunk_embeddings_tenant_id_fkey")
-  chunk  KnowledgeChunk @relation(fields: [tenantId, chunkId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction, map: "knowledge_chunk_embeddings_chunk_fkey")
+  tenant                Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_chunk_embeddings_tenant_id_fkey")
+  chunk                 KnowledgeChunk                 @relation(fields: [tenantId, chunkId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction, map: "knowledge_chunk_embeddings_chunk_fkey")
+  embeddingIndexVersion KnowledgeEmbeddingIndexVersion @relation(fields: [tenantId, embeddingIndexVersionId], references: [tenantId, id], onDelete: Cascade, onUpdate: NoAction, map: "knowledge_chunk_embeddings_index_version_fkey")
 
-  @@unique([tenantId, chunkId, embeddingModel], map: "knowledge_chunk_embeddings_tenant_chunk_model_key")
+  @@unique([tenantId, chunkId, embeddingIndexVersionId], map: "knowledge_chunk_embeddings_tenant_chunk_index_version_key")
   @@index([tenantId, embeddingModel], map: "knowledge_chunk_embeddings_tenant_model_idx")
   @@map("knowledge_chunk_embeddings")
 }
@@ -1285,6 +1531,7 @@ model KnowledgeIngestionJob {
   status            KnowledgeIngestionStatus @default(PENDING)
   progress          Int                      @default(0)
   attempts          Int                      @default(0)
+  failureAttempts   Int                      @default(0) @map("failure_attempts")
   availableAt       DateTime                 @default(now()) @map("available_at") @db.Timestamptz(6)
   claimedBy         String?                  @map("claimed_by") @db.VarChar(200)
   leaseExpiresAt    DateTime?                @map("lease_expires_at") @db.Timestamptz(6)
@@ -1490,6 +1737,7 @@ model Employment {
   workEmailOverridden Boolean          @default(false) @map("work_email_overridden")
   employmentType      String?          @map("employment_type") @db.VarChar(80)
   hireDate            DateTime?        @map("hire_date") @db.Date
+  countryOrRegion     String?          @map("country_or_region") @db.VarChar(120)
   city                String?          @db.VarChar(120)
   status              EmploymentStatus @default(PENDING)
   isPrimary           Boolean          @default(false) @map("is_primary")
@@ -1514,6 +1762,35 @@ model Employment {
   @@index([tenantId, orgUnitId, status])
   @@index([tenantId, userId, organizationId, isPrimary])
   @@map("employments")
+}
+
+model MemberProfile {
+  id                      String   @id @default(uuid()) @db.Uuid
+  tenantId                String   @map("tenant_id") @db.Uuid
+  userId                  String   @map("user_id") @db.Uuid
+  personalSummary         String?  @map("personal_summary") @db.Text
+  educationBackground     String?  @map("education_background") @db.Text
+  careerOverview          String?  @map("career_overview") @db.Text
+  jobResponsibilities     String?  @map("job_responsibilities") @db.Text
+  communicationPreference String?  @map("communication_preference") @db.Text
+  collaborationHabits     String?  @map("collaboration_habits") @db.Text
+  routineSchedule         String?  @map("routine_schedule") @db.Text
+  contactInformation      String?  @map("contact_information") @db.Text
+  coreSkills              String?  @map("core_skills") @db.Text
+  availableResources      String?  @map("available_resources") @db.Text
+  hobbies                 String?  @db.Text
+  clubs                   String?  @db.Text
+  faqs                    Json     @default("[]")
+  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, userId])
+  @@index([tenantId, updatedAt])
+  @@map("member_profiles")
 }
 
 model DirectoryIntegration {
@@ -3606,6 +3883,31 @@ model AiEvaluationMetricResult {
 
   @@id([tenantId, runId, metric])
   @@map("ai_evaluation_metric_results")
+}
+
+model AiKnowledgeRetrievalBenchmarkRun {
+  id                 String    @id @default(uuid()) @db.Uuid
+  tenantId           String    @map("tenant_id") @db.Uuid
+  datasetVersionId   String    @map("dataset_version_id") @db.Uuid
+  datasetContentHash String    @map("dataset_content_hash") @db.Char(64)
+  status             String    @default("RUNNING") @db.VarChar(20)
+  thresholds         Json
+  metrics            Json?
+  failures           Json      @default("[]")
+  caseResults        Json      @default("[]") @map("case_results")
+  processedCaseCount Int       @default(0) @map("processed_case_count")
+  totalCaseCount     Int       @default(0) @map("total_case_count")
+  requestedByUserId  String    @map("requested_by_user_id") @db.Uuid
+  idempotencyKey     String    @map("idempotency_key") @db.VarChar(200)
+  requestHash        String    @map("request_hash") @db.Char(64)
+  startedAt          DateTime  @default(now()) @map("started_at") @db.Timestamptz(6)
+  finishedAt         DateTime? @map("finished_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, datasetVersionId, createdAt(sort: Desc), id])
+  @@map("ai_knowledge_retrieval_benchmark_runs")
 }
 
 model AiEvaluationBadCase {

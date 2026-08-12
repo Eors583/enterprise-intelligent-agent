@@ -174,7 +174,14 @@ function createEmailHarness(options: {
   } as unknown as AdminAccessService;
   return {
     transaction,
-    service: new OrganizationAdminService(prisma, access, {} as PasswordHasher),
+    service: new OrganizationAdminService(
+      prisma,
+      access,
+      {} as PasswordHasher,
+      {
+        countOrgUnitBindings: vi.fn().mockResolvedValue(0),
+      } as never,
+    ),
   };
 }
 

@@ -89,10 +89,37 @@ describe('KnowledgeAdminController uploads', () => {
     );
   });
 
-  it('delegates tenant-scoped enterprise readiness reads to the admin service', async () => {
+  it('streams an authorized original source inline with its UTF-8 filename', async () => {
+    const getDocumentVersionSource = vi.fn().mockResolvedValue({
+      body: Buffer.from('source file'),
+      size: 11,
+      mimeType: 'application/pdf',
+      fileName: '员工制度.pdf',
+    });
+    const controller = createController({ getDocumentVersionSource });
+
+    const response = await controller.getDocumentVersionSource(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+    );
+
+    expect(getDocumentVersionSource).toHaveBeenCalledWith(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+    );
+    expect(response.getHeaders()).toMatchObject({
+      type: 'application/pdf',
+      disposition: `inline; filename*=UTF-8''${encodeURIComponent('员工制度.pdf')}`,
+      length: 11,
+    });
+  });
+
+  it('delegates tenant-scoped retrieval diagnostics to the admin service', async () => {
     const readiness = vi.fn().mockResolvedValue({
       knowledgeBaseId: KNOWLEDGE_BASE_ID,
-      activationAllowed: false,
+      retrievalMode: 'LEXICAL',
     });
     const controller = createController({ readiness });
 
@@ -334,8 +361,25 @@ describe('KnowledgeAdminController uploads', () => {
     ).toThrow(BadRequestException);
     expect(uploadDocument).not.toHaveBeenCalled();
   });
+
+  it('forwards a validated upload inspection request', async () => {
+    const inspection = {
+      decision: 'NEW_DOCUMENT' as const,
+      matchingDocument: null,
+    };
+    const inspectUpload = vi.fn().mockResolvedValue(inspection);
+    const controller = createController({ inspectUpload });
+    const request = {
+      fileName: 'employee-handbook.pdf',
+      size: 2048,
+      sha256: 'a'.repeat(64),
+    };
+
+    await expect(controller.inspectUpload(KNOWLEDGE_BASE_ID, request)).resolves.toEqual(inspection);
+    expect(inspectUpload).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID, request);
+  });
 });
 
 function createController(overrides: Record<string, unknown>): KnowledgeAdminController {
-  return new KnowledgeAdminController(overrides as unknown as KnowledgeAdminService);
+  return new KnowledgeAdminController(overrides as unknown as KnowledgeAdminService, {} as never);
 }

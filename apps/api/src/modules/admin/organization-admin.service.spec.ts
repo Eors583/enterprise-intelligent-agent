@@ -170,6 +170,9 @@ function createHarness(
       prisma as unknown as AdminPrismaService,
       access as unknown as AdminAccessService,
       passwords as unknown as PasswordHasher,
+      {
+        countOrgUnitBindings: vi.fn().mockResolvedValue(0),
+      } as never,
     ),
   };
 }

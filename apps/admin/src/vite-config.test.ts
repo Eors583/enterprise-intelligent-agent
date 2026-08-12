@@ -37,6 +37,14 @@ describe('admin Vite security configuration', () => {
     expect(config.preview.port).toBe(4273);
     expect(config.preview.headers['Content-Security-Policy']).toContain("script-src 'self'");
     expect(config.preview.headers['Content-Security-Policy']).not.toContain("'nonce-");
+    expect(config.server.headers['Cache-Control']).toBe('no-store');
+    expect(config.preview.headers['Cache-Control']).toBe('no-cache, max-age=0, must-revalidate');
+    expect(config.build).toMatchObject({
+      target: 'es2022',
+      minify: 'esbuild',
+      cssMinify: true,
+      sourcemap: false,
+    });
     expect(config.preview.proxy['/api']).toEqual({
       target: 'http://127.0.0.1:3300',
       changeOrigin: true,

@@ -313,6 +313,26 @@ export const transitionKnowledgeGraphCorrectionRequestSchema = z
   })
   .strict();
 
+export const transitionKnowledgeGraphCorrectionBatchRequestSchema = z
+  .object({
+    ontologyVersionId: UUID,
+    action: z.enum(['APPROVE', 'APPLY']),
+    comment: z.string().trim().min(1).max(1_000),
+    idempotencyKey: IDEMPOTENCY_KEY,
+  })
+  .strict();
+
+export const knowledgeGraphCorrectionBatchResultSchema = z
+  .object({
+    ontologyVersionId: UUID,
+    action: z.enum(['APPROVE', 'APPLY']),
+    matchedCount: z.number().int().nonnegative(),
+    transitionedCount: z.number().int().nonnegative(),
+    skippedCount: z.number().int().nonnegative(),
+    replayed: z.boolean(),
+  })
+  .strict();
+
 export const knowledgeGraphCorrectionSchema = z
   .object({
     id: UUID,
@@ -358,6 +378,15 @@ export const knowledgeEntityAliasSchema = z.object({
 export const knowledgeGraphGovernanceOverviewSchema = z
   .object({
     knowledgeBaseId: UUID,
+    suggestedOntology: z
+      .object({
+        entityTypes: z.array(knowledgeOntologyEntityTypeInputSchema).max(200),
+        predicates: z.array(knowledgeOntologyPredicateInputSchema).max(500),
+        sourceEntityCount: z.number().int().nonnegative(),
+        sourceRelationCount: z.number().int().nonnegative(),
+        ungovernedRelationCount: z.number().int().nonnegative(),
+      })
+      .strict(),
     ontologies: z.array(knowledgeOntologySchema),
     conflicts: z.array(knowledgeGraphConflictSchema),
     corrections: z.array(knowledgeGraphCorrectionSchema),
@@ -368,6 +397,9 @@ export const knowledgeGraphGovernanceOverviewSchema = z
       excludedConflictCount: z.number().int().nonnegative(),
       mergedEntityCount: z.number().int().nonnegative(),
       publishedOntologyVersionCount: z.number().int().nonnegative(),
+      ungovernedRelationCount: z.number().int().nonnegative(),
+      pendingReviewRelationCount: z.number().int().nonnegative(),
+      approvedRelationCount: z.number().int().nonnegative(),
     }),
   })
   .strict();
@@ -443,6 +475,12 @@ export type CreateKnowledgeGraphCorrectionRequest = z.infer<
 >;
 export type TransitionKnowledgeGraphCorrectionRequest = z.infer<
   typeof transitionKnowledgeGraphCorrectionRequestSchema
+>;
+export type TransitionKnowledgeGraphCorrectionBatchRequest = z.infer<
+  typeof transitionKnowledgeGraphCorrectionBatchRequestSchema
+>;
+export type KnowledgeGraphCorrectionBatchResult = z.infer<
+  typeof knowledgeGraphCorrectionBatchResultSchema
 >;
 export type KnowledgeGraphCorrection = z.infer<typeof knowledgeGraphCorrectionSchema>;
 export type KnowledgeEntityMerge = z.infer<typeof knowledgeEntityMergeSchema>;

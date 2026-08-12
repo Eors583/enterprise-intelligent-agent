@@ -89,7 +89,13 @@ describe('KnowledgeGovernanceModal entity selection', () => {
     try {
       await dom.flush();
       await dom.flush();
-      expect(dom.container.textContent).toContain('知识负责人');
+      expect(dom.container.textContent).toContain('知识归属账号');
+      expect(
+        [...dom.container.querySelectorAll('input')].some(
+          (input) => input.value === '当前登录账号' && input.disabled,
+        ),
+      ).toBe(true);
+      expect(dom.container.textContent).not.toContain('知识负责人');
       expect(dom.container.textContent).toContain('产品研发中心');
       expect(dom.container.textContent).toContain('发布产品手册');
       expect(dom.container.textContent).toContain('产品专家');

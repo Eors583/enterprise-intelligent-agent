@@ -85,14 +85,18 @@ describe('Role Blueprint contracts', () => {
     ).toThrow();
   });
 
-  it('requires the exact Evaluation Run reference for publication', () => {
+  it('publishes using only the optimistic revision guard', () => {
     expect(
       publishRoleVersionRequestSchema.parse({
         expectedRevision: 3,
-        evaluationRunId: '00000000-0000-7000-8000-000000000105',
       }),
     ).toMatchObject({ expectedRevision: 3 });
-    expect(publishRoleVersionRequestSchema.safeParse({ expectedRevision: 3 }).success).toBe(false);
+    expect(
+      publishRoleVersionRequestSchema.safeParse({
+        expectedRevision: 3,
+        evaluationRunId: '00000000-0000-7000-8000-000000000105',
+      }).success,
+    ).toBe(false);
   });
 
   it('accepts only recognizable knowledge-base selections in a role version', () => {

@@ -17,7 +17,7 @@ export interface ClamAvKnowledgeFileScannerOptions {
 
 const DEFAULT_PORT = 3310;
 const DEFAULT_TIMEOUT_MS = 30_000;
-const DEFAULT_MAXIMUM_BYTES = 50 * 1024 * 1024;
+const DEFAULT_MAXIMUM_BYTES = 2_147_483_647;
 const DEFAULT_CHUNK_BYTES = 256 * 1024;
 const MAXIMUM_RESPONSE_BYTES = 4_096;
 
@@ -50,7 +50,7 @@ export class ClamAvKnowledgeFileScanner extends KnowledgeFileScanner {
       options.maximumBytes,
       DEFAULT_MAXIMUM_BYTES,
       1,
-      100 * 1024 * 1024,
+      2_147_483_647,
       'ClamAV source limit',
     );
     this.chunkBytes = boundedInteger(

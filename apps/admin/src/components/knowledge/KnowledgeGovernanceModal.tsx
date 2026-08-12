@@ -54,7 +54,6 @@ export function KnowledgeGovernanceModal({
   onChanged: (message: string) => void;
 }): ReactNode {
   const initial = version.governance;
-  const [ownerUserId, setOwnerUserId] = useState(initial.ownerUserId);
   const [classification, setClassification] = useState<
     KnowledgeDocumentGovernancePolicy['classification']
   >(initial.classification);
@@ -111,18 +110,11 @@ export function KnowledgeGovernanceModal({
 
   const referenceOptions = useMemo(
     () => ({
-      owners:
-        references.organization?.members.map<EntityOption>((member) => ({
-          id: member.id,
-          label: member.displayName,
-          description: `${member.email} · ${member.status}`,
-          disabled: member.status !== 'ACTIVE',
-        })) ?? [],
       organizationUnits:
         references.organization?.orgUnits.map<EntityOption>((unit) => ({
           id: unit.id,
           label: unit.name,
-          description: unit.status === 'ACTIVE' ? '启用部门' : '已归档',
+          description: unit.status === 'ACTIVE' ? '启用部门' : '已停用',
           disabled: unit.status !== 'ACTIVE',
         })) ?? [],
       tasks: references.tasks.map<EntityOption>((task) => ({
@@ -149,7 +141,7 @@ export function KnowledgeGovernanceModal({
 
   const policy = useMemo<KnowledgeDocumentGovernancePolicy>(
     () => ({
-      ownerUserId: ownerUserId.trim(),
+      ownerUserId: initial.ownerUserId,
       classification,
       scopeMode,
       organizationScopeIds: restricted ? sortedUnique(organizationScopeIds) : [],
@@ -169,7 +161,6 @@ export function KnowledgeGovernanceModal({
       effectiveFrom,
       expiresAt,
       organizationScopeIds,
-      ownerUserId,
       restricted,
       retentionAction,
       retentionUntil,
@@ -233,15 +224,9 @@ export function KnowledgeGovernanceModal({
       <form className="form-stack" onSubmit={(event) => void save(event)}>
         <div className="form-grid three">
           <label>
-            <span>数据所有者</span>
-            <EntitySelect
-              value={ownerUserId}
-              options={referenceOptions.owners}
-              onChange={setOwnerUserId}
-              placeholder="选择企业成员"
-              disabled={published}
-              required
-            />
+            <span>知识归属账号</span>
+            <input value="当前登录账号" readOnly disabled />
+            <small>由系统自动记录，不能替其他成员选择。</small>
           </label>
           <label>
             <span>数据分级</span>
@@ -366,7 +351,7 @@ export function KnowledgeGovernanceModal({
               }
               disabled={published}
             >
-              <option value="ARCHIVE">归档</option>
+              <option value="ARCHIVE">停用</option>
               <option value="REVIEW_DELETE">人工复核删除</option>
               <option value="LEGAL_HOLD">法务留存</option>
             </select>

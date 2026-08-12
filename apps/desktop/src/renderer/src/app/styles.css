@@ -5285,6 +5285,10 @@ body {
   top: 105px;
 }
 
+.desktop-search-dock.messaging-hidden {
+  display: none;
+}
+
 .desktop-search-dock .design-global-search {
   width: 100%;
   height: 36px;
@@ -6647,6 +6651,49 @@ body {
 
 .conversation-message-search-results p {
   margin: 3px 0;
+}
+
+.pending-conversation-body {
+  display: grid;
+  flex: 1;
+  place-items: center;
+  padding: 24px;
+}
+
+.pending-conversation-body > div {
+  max-width: 420px;
+  text-align: center;
+}
+
+.pending-conversation-body button,
+.pending-conversation-composer button {
+  border: 0;
+  border-radius: 9px;
+  padding: 9px 14px;
+  color: #fff;
+  background: #078574;
+}
+
+.pending-conversation-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin: 0 18px 16px;
+  padding: 10px;
+  border: 1px solid #e0e7e5;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.pending-conversation-composer input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+}
+
+.pending-conversation-composer :disabled {
+  opacity: 0.55;
 }
 
 .new-conversation-mode {

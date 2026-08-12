@@ -94,7 +94,7 @@ export function KnowledgeGraphPanel({ knowledgeBaseId }: { knowledgeBaseId: stri
         <header className="card-header">
           <div>
             <h2>关系知识治理</h2>
-            <p>检查实体消歧、关系方向、来源证据与跨切片扩展，验证强关系检索链路。</p>
+            <p>查看实体、关系、来源证据与跨切片扩展；图谱是普通文档检索之外的可选增强。</p>
           </div>
           <button
             className="button secondary compact"
@@ -110,11 +110,11 @@ export function KnowledgeGraphPanel({ knowledgeBaseId }: { knowledgeBaseId: stri
           <div className={`knowledge-graph-headline status-${summary.toLowerCase()}`}>
             <span>{knowledgeGraphStatusLabel(overview.status)}</span>
             <strong>
-              {overview.strongRetrievalReady
-                ? '实体、关系与证据链已满足强关系检索门禁'
-                : '当前知识库不能标记为强关系型检索就绪'}
+              {overview.status === 'READY'
+                ? '实体、关系与证据链可用于关系扩展'
+                : '关系图谱尚未就绪，普通文档检索继续可用'}
             </strong>
-            <em>{overview.strongRetrievalReady ? 'GRAPH READY' : 'GRAPH NOT READY'}</em>
+            <em>{overview.status === 'READY' ? 'GRAPH READY' : 'OPTIONAL'}</em>
           </div>
 
           <div className="knowledge-graph-metrics">
@@ -147,19 +147,17 @@ export function KnowledgeGraphPanel({ knowledgeBaseId }: { knowledgeBaseId: stri
             />
           </div>
 
-          {overview.readinessBlockers.length > 0 ? (
+          {overview.diagnostics.length > 0 ? (
             <div className="knowledge-activation-blockers" role="status">
-              <strong>强关系检索阻断项</strong>
+              <strong>关系图谱诊断</strong>
               <ul>
-                {overview.readinessBlockers.map((reason) => (
+                {overview.diagnostics.map((reason) => (
                   <li key={reason}>{knowledgeGraphReadinessReasonLabel(reason)}</li>
                 ))}
               </ul>
             </div>
           ) : (
-            <Notice tone="success">
-              图谱门禁已通过：全部关系均有来源切片证据，且实体提及覆盖达到生产要求。
-            </Notice>
+            <Notice tone="success">关系图谱状态正常，关系扩展可作为混合检索的补充。</Notice>
           )}
 
           <div className="knowledge-graph-taxonomy">

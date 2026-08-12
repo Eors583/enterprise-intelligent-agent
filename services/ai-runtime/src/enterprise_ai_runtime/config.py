@@ -274,8 +274,10 @@ class RuntimeSettings:
             )
 
     def _validate_knowledge_providers(self) -> None:
-        if self.embedding_dimensions != 1536:
-            raise RuntimeConfigurationError("AI_RUNTIME_EMBEDDING_DIMENSIONS must be 1536")
+        if not 1 <= self.embedding_dimensions <= 16_000:
+            raise RuntimeConfigurationError(
+                "AI_RUNTIME_EMBEDDING_DIMENSIONS must be between 1 and 16000"
+            )
         if not 0.1 <= self.embedding_timeout_seconds <= 300:
             raise RuntimeConfigurationError(
                 "AI_RUNTIME_EMBEDDING_TIMEOUT_SECONDS must be between 0.1 and 300"

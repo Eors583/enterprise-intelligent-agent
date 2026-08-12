@@ -1,4 +1,5 @@
-import { apiErrorResponseSchema, browserAuthSessionResponseSchema } from '@enterprise/contracts';
+import { apiErrorResponseSchema } from '@enterprise/contracts/api-error';
+import { browserAuthSessionResponseSchema } from '@enterprise/contracts/auth-session';
 import type { ZodType } from 'zod';
 
 import { writeSession } from '@/auth/session';
@@ -174,6 +175,55 @@ export async function request<T>(path: string, options: RequestOptions<T>): Prom
     });
   }
   return parsed.data;
+}
+
+export interface BinaryApiResponse {
+  readonly blob: Blob;
+  readonly fileName: string | null;
+  readonly mimeType: string;
+}
+
+export async function requestBlob(path: string, signal?: AbortSignal): Promise<BinaryApiResponse> {
+  const execute = async (): Promise<Response> => {
+    try {
+      return await fetch(apiUrl(path), {
+        method: 'GET',
+        credentials: 'include',
+        headers: { Accept: '*/*' },
+        ...(signal ? { signal } : {}),
+      });
+    } catch (cause) {
+      throw new ApiError('无法连接管理服务，请检查网络或服务是否已启动。', { cause });
+    }
+  };
+
+  let response = await execute();
+  if (response.status === 401 && (await refreshOnce())) response = await execute();
+  if (!response.ok) {
+    const error = await parseError(response);
+    if (error.status === 401) writeSession(null);
+    throw error;
+  }
+  const mimeType =
+    response.headers.get('content-type')?.split(';')[0]?.trim() || 'application/octet-stream';
+  return {
+    blob: await response.blob(),
+    fileName: responseFileName(response.headers.get('content-disposition')),
+    mimeType,
+  };
+}
+
+function responseFileName(contentDisposition: string | null): string | null {
+  if (contentDisposition === null) return null;
+  const encoded = /filename\*=UTF-8''([^;]+)/iu.exec(contentDisposition)?.[1];
+  if (encoded !== undefined) {
+    try {
+      return decodeURIComponent(encoded.replace(/^"|"$/gu, ''));
+    } catch {
+      return null;
+    }
+  }
+  return /filename="?([^";]+)"?/iu.exec(contentDisposition)?.[1]?.trim() ?? null;
 }
 
 function browserCsrfToken(): string | null {

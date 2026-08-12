@@ -27,9 +27,9 @@ import { roleDefinitionSnapshotSchema, roleKnowledgeScopeSchema } from '@enterpr
 import { Prisma } from '@prisma/client';
 
 import { AdminPrismaService } from '../../database/admin-prisma.service.js';
-import { AiEvaluationService } from '../ai-evaluation/ai-evaluation.service.js';
 import { AdminAccessService, type AdminPrincipal } from './admin-access.service.js';
 import { recordAdminAudit } from './admin-audit.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 
 type BlueprintRecord = Prisma.AgentTemplateGetPayload<{
   include: typeof roleBlueprintInclude;
@@ -41,7 +41,7 @@ export class RoleBlueprintAdminService {
   constructor(
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
-    @Inject(AiEvaluationService) private readonly evaluations: AiEvaluationService,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
   ) {}
 
   async list(): Promise<RoleBlueprintListResponse> {
@@ -67,7 +67,6 @@ export class RoleBlueprintAdminService {
         where: {
           tenantId: principal.tenantId,
           status: 'PUBLISHED',
-          reviewStatus: 'APPROVED',
           template: { is: { mission: { not: '' } } },
         },
         include: {
@@ -80,16 +79,7 @@ export class RoleBlueprintAdminService {
           const snapshot = roleDefinitionSnapshotSchema.safeParse(
             jsonRecord(version.roleDefinitionSnapshot),
           );
-          if (
-            !snapshot.success ||
-            version.blueprintRevision <= 0 ||
-            version.createdById === null ||
-            version.approvedById === null ||
-            version.createdById === version.approvedById ||
-            version.reviewRequestedById === null ||
-            version.reviewedById === null ||
-            version.reviewRequestedById === version.reviewedById
-          ) {
+          if (!snapshot.success || version.blueprintRevision <= 0) {
             return [];
           }
           return [
@@ -210,8 +200,9 @@ export class RoleBlueprintAdminService {
       if (blueprint === null) throw blueprintNotFound();
       const roleDefinitionSnapshot = snapshotRoleDefinition(blueprint);
       const knowledgeScope = await validatedKnowledgeScope(
-        transaction,
+        this.knowledge,
         principal.tenantId,
+        principal.userId,
         request.knowledgeScope,
       );
       const latest = await transaction.agentVersion.findFirst({
@@ -257,7 +248,12 @@ export class RoleBlueprintAdminService {
       const knowledgeScope =
         request.knowledgeScope === undefined
           ? undefined
-          : await validatedKnowledgeScope(transaction, principal.tenantId, request.knowledgeScope);
+          : await validatedKnowledgeScope(
+              this.knowledge,
+              principal.tenantId,
+              principal.userId,
+              request.knowledgeScope,
+            );
       const updated = await transaction.agentVersion.updateMany({
         where: {
           tenantId: principal.tenantId,
@@ -308,8 +304,9 @@ export class RoleBlueprintAdminService {
       }
       assertVersionRevision(current, request.expectedRevision);
       await validatedKnowledgeScope(
-        transaction,
+        this.knowledge,
         principal.tenantId,
+        principal.userId,
         jsonRecord(current.knowledgeScope),
       );
       const now = new Date();
@@ -392,26 +389,21 @@ export class RoleBlueprintAdminService {
     const candidate = await this.prisma.withTenant(principal.tenantId, (transaction) =>
       findVersion(transaction, principal.tenantId, blueprintId, versionId),
     );
-    if (candidate.status !== 'TESTING' || candidate.reviewStatus !== 'APPROVED') {
-      throw new ConflictException('Only an approved Role Version can be published.');
+    if (candidate.status !== 'DRAFT' && candidate.status !== 'TESTING') {
+      throw new ConflictException('Only a draft or testing Role Version can be published.');
     }
     assertVersionRevision(candidate, request.expectedRevision);
-    const readiness = await this.evaluations.requireReferencedRunReady({
-      evaluationRunId: request.evaluationRunId,
-      subjectType: 'AGENT_VERSION',
-      subjectId: versionId,
-      subjectVersion: candidate.version,
-    });
     return this.prisma.withTenant(principal.tenantId, async (transaction) => {
       await lockBlueprint(transaction, principal.tenantId, blueprintId);
       const current = await findVersion(transaction, principal.tenantId, blueprintId, versionId);
-      if (current.status !== 'TESTING' || current.reviewStatus !== 'APPROVED') {
-        throw new ConflictException('Only an approved Role Version can be published.');
+      if (current.status !== 'DRAFT' && current.status !== 'TESTING') {
+        throw new ConflictException('Only a draft or testing Role Version can be published.');
       }
       assertVersionRevision(current, request.expectedRevision);
       await validatedKnowledgeScope(
-        transaction,
+        this.knowledge,
         principal.tenantId,
+        principal.userId,
         jsonRecord(current.knowledgeScope),
       );
       const now = new Date();
@@ -422,9 +414,9 @@ export class RoleBlueprintAdminService {
           status: 'PUBLISHED',
           publishedAt: now,
           publishedById: principal.userId,
-          evaluationRunId: request.evaluationRunId,
-          evaluationDatasetVersionId: readiness.datasetVersionId,
-          evaluationSnapshotHash: readiness.currentSnapshotHash,
+          evaluationRunId: null,
+          evaluationDatasetVersionId: null,
+          evaluationSnapshotHash: null,
           retiredAt: null,
           retiredById: null,
           revision: { increment: 1 },
@@ -775,8 +767,9 @@ function jsonObject(value: Record<string, unknown>): Prisma.InputJsonObject {
 }
 
 async function validatedKnowledgeScope(
-  transaction: Prisma.TransactionClient,
+  knowledge: KnowledgeGateway,
   tenantId: string,
+  userId: string,
   value: Record<string, unknown>,
 ): Promise<Prisma.InputJsonObject> {
   const scope = jsonObject(value);
@@ -791,15 +784,7 @@ async function validatedKnowledgeScope(
   }
   const knowledgeBaseIds = [...new Set(rawIds)].sort();
   if (knowledgeBaseIds.length > 0) {
-    const active = await transaction.knowledgeBase.findMany({
-      where: { tenantId, id: { in: knowledgeBaseIds }, status: 'ACTIVE' },
-      select: { id: true },
-    });
-    if (active.length !== knowledgeBaseIds.length) {
-      throw new ConflictException(
-        'Knowledge scope contains a missing, inactive, or cross-tenant knowledge base.',
-      );
-    }
+    await knowledge.validateKnowledgeBaseSelection({ tenantId, userId, knowledgeBaseIds });
   }
   return { ...scope, knowledgeBaseIds };
 }

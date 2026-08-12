@@ -149,7 +149,7 @@ export class RoleAssignmentAdminService {
         });
         if (versionIdentity === null) {
           throw new ConflictException(
-            'Only an independently approved published structured Role Blueprint version can be assigned.',
+            'Only a published structured Role Blueprint version can be assigned.',
           );
         }
         await transaction.$queryRaw`
@@ -166,7 +166,6 @@ export class RoleAssignmentAdminService {
             id: request.agentVersionId,
             tenantId: principal.tenantId,
             status: 'PUBLISHED',
-            reviewStatus: 'APPROVED',
             template: { is: { mission: { not: '' } } },
           },
           include: {
@@ -175,7 +174,7 @@ export class RoleAssignmentAdminService {
         });
         if (version === null || !isGovernedPublishedRoleVersion(version)) {
           throw new ConflictException(
-            'Only an independently approved published structured Role Blueprint version can be assigned.',
+            'Only a published structured Role Blueprint version can be assigned.',
           );
         }
         const delegationSource = await validateDelegationSource(
@@ -559,15 +558,8 @@ function isGovernedRoleVersion(
 ): boolean {
   return (
     executableStatuses.includes(version.status) &&
-    version.reviewStatus === 'APPROVED' &&
     version.template.mission.trim().length > 0 &&
     version.blueprintRevision > 0 &&
-    version.createdById !== null &&
-    version.approvedById !== null &&
-    version.createdById !== version.approvedById &&
-    version.reviewRequestedById !== null &&
-    version.reviewedById !== null &&
-    version.reviewRequestedById !== version.reviewedById &&
     roleDefinitionSnapshotSchema.safeParse(jsonRecord(version.roleDefinitionSnapshot)).success
   );
 }

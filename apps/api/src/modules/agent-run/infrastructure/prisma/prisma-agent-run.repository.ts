@@ -10,9 +10,9 @@ import type {
   AuthorizationReasonCode,
 } from '../../../authorization/authorization.types.js';
 import {
-  KnowledgeRetrievalService,
+  KnowledgeRetrievalGateway,
   type KnowledgeRetrievalAuthorizationContext,
-} from '../../../knowledge-retrieval/knowledge-retrieval.service.js';
+} from '../../../knowledge-gateway/knowledge-gateway.port.js';
 import type {
   AgentRunCancellationPreparation,
   AgentRunExternalAttachment,
@@ -92,7 +92,8 @@ type RunForExecution = Prisma.AgentRunGetPayload<{
 export class PrismaAgentRunRepository extends AgentRunRepository {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
-    @Inject(KnowledgeRetrievalService) private readonly retrieval: KnowledgeRetrievalService,
+    @Inject(KnowledgeRetrievalGateway)
+    private readonly retrieval: KnowledgeRetrievalGateway,
     @Inject(AuthorizationDecisionService)
     private readonly authorization: AuthorizationDecisionService,
   ) {
@@ -198,6 +199,9 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         run.inputMessage,
       );
       const knowledgeBaseIds = readSelectedKnowledgeBaseIds(executionSnapshot.knowledgeScope);
+      const resolveAuthorizedKnowledgeBases = isOwnerAuthorizedKnowledgeScope(
+        executionSnapshot.knowledgeScope,
+      );
       const storedMemorySnapshot = parseAgentRunMemoryContextSnapshot(run.memoryContextSnapshot);
       if (run.memoryContextSnapshot != null && storedMemorySnapshot === null) {
         await markRunTerminal(
@@ -222,6 +226,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         run,
         messages,
         knowledgeBaseIds,
+        resolveAuthorizedKnowledgeBases,
         knowledgeAuthorization: validation.knowledgeAuthorization,
         executionSnapshot,
         memorySnapshot,
@@ -265,6 +270,14 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
       });
     }
 
+    const knowledgeBaseIds = snapshot.resolveAuthorizedKnowledgeBases
+      ? await this.retrieval.resolveAccessibleKnowledgeBaseIds({
+          tenantId,
+          userId: snapshot.run.requesterUserId,
+          authorization: snapshot.knowledgeAuthorization,
+        })
+      : snapshot.knowledgeBaseIds;
+
     // Embedding and Reranker calls happen only after the snapshot transaction and
     // advisory Run lock have been released. Unexpected retrieval failures leave the Run
     // QUEUED; explicitly classified semantic-provider failures degrade to lexical retrieval
@@ -272,11 +285,10 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
     const retrieval = await this.retrieval.search({
       tenantId,
       userId: snapshot.run.requesterUserId,
-      knowledgeBaseIds: snapshot.knowledgeBaseIds,
+      knowledgeBaseIds,
       authorization: snapshot.knowledgeAuthorization,
       query: preRetrievalSafety.messages.at(-1)?.text ?? '',
       maximumOutboundClassification: preRetrievalSafety.decision.classification,
-      limit: 8,
     });
     const knowledgeSources: AgentRunKnowledgeSource[] = retrieval.items.map((item) => ({
       documentId: item.documentId,
@@ -340,22 +352,19 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         );
         return terminalPreparation('FAILED', null, validation.errorCode);
       }
-      const knowledgeStillAccessible = await this.retrieval.areChunksAccessibleInTransaction(
-        transaction,
-        {
-          tenantId,
-          userId: run.requesterUserId,
-          knowledgeBaseIds: snapshot.knowledgeBaseIds,
-          chunks: knowledgeSources.map((source) => ({
-            chunkId: source.chunkId,
-            documentVersionId: source.documentVersionId,
-            classification: source.classification,
-            governanceHash: source.governanceHash,
-            contentHash: source.contentHash,
-          })),
-          authorization: validation.knowledgeAuthorization,
-        },
-      );
+      const knowledgeStillAccessible = await this.retrieval.areChunksAccessible({
+        tenantId,
+        userId: run.requesterUserId,
+        knowledgeBaseIds,
+        chunks: knowledgeSources.map((source) => ({
+          chunkId: source.chunkId,
+          documentVersionId: source.documentVersionId,
+          classification: source.classification,
+          governanceHash: source.governanceHash,
+          contentHash: source.contentHash,
+        })),
+        authorization: validation.knowledgeAuthorization,
+      });
       if (!knowledgeStillAccessible) {
         await markRunTerminal(
           transaction,
@@ -465,7 +474,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         safety.messages,
         safety.knowledgeSources,
         safety.memoryContexts,
-        snapshot.knowledgeBaseIds.length > 0,
+        snapshot.resolveAuthorizedKnowledgeBases || knowledgeBaseIds.length > 0,
         modelRoute,
         safety.decision,
         storedProbeCatalogId,
@@ -1840,62 +1849,11 @@ function mapPreparedRun(
     knowledgeSources,
     memoryContexts,
     knowledgeGroundingRequired,
+    knowledgeEvidenceFallbackEnabled: true,
     controlledModelConnectivityProbe,
     ...(effectiveModelRoute === null ? {} : { modelRoute: effectiveModelRoute }),
     inputSafetyDecision,
   };
-}
-
-export async function loadKnowledgeSourcesLegacy(
-  transaction: Transaction,
-  run: RunForExecution,
-  query: string,
-) {
-  const knowledgeBaseIds = readSelectedKnowledgeBaseIds(run.agentVersion.knowledgeScope);
-  if (knowledgeBaseIds.length === 0) return [];
-
-  const employments = await transaction.employment.findMany({
-    where: { tenantId: run.tenantId, userId: run.requesterUserId, status: 'ACTIVE' },
-    select: { orgUnitId: true },
-  });
-  const orgUnitIds = employments.map((employment) => employment.orgUnitId);
-  const documents = await transaction.knowledgeDocument.findMany({
-    where: {
-      tenantId: run.tenantId,
-      knowledgeBaseId: { in: knowledgeBaseIds },
-      status: 'READY',
-      contentText: { not: null },
-      knowledgeBase: {
-        status: 'ACTIVE',
-        OR: [
-          { orgUnits: { none: {} } },
-          ...(orgUnitIds.length === 0
-            ? []
-            : [{ orgUnits: { some: { orgUnitId: { in: orgUnitIds } } } }]),
-        ],
-      },
-    },
-    select: { id: true, knowledgeBaseId: true, title: true, contentText: true },
-    take: 100,
-  });
-  const terms = tokenize(query);
-  return documents
-    .map((document) => ({
-      document,
-      score: relevanceScore(document.title, document.contentText ?? '', terms),
-    }))
-    .filter((candidate) => candidate.score > 0 || terms.length === 0)
-    .sort(
-      (left, right) =>
-        right.score - left.score || left.document.title.localeCompare(right.document.title),
-    )
-    .slice(0, 6)
-    .map(({ document }) => ({
-      documentId: document.id,
-      knowledgeBaseId: document.knowledgeBaseId,
-      title: document.title,
-      excerpt: createExcerpt(document.contentText ?? '', terms),
-    }));
 }
 
 function readSelectedKnowledgeBaseIds(value: Prisma.JsonValue): string[] {
@@ -1907,6 +1865,15 @@ function readSelectedKnowledgeBaseIds(value: Prisma.JsonValue): string[] {
         50,
       )
     : [];
+}
+
+function isOwnerAuthorizedKnowledgeScope(value: Prisma.JsonValue): boolean {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    !Array.isArray(value) &&
+    value.mode === 'owner-authorized'
+  );
 }
 
 function createCitationExcerpt(content: string): string {

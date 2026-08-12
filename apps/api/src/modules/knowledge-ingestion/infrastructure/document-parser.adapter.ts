@@ -16,6 +16,13 @@ export const SUPPORTED_DOCUMENT_MIME_TYPES = [
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'image/png',
+  'image/jpeg',
+  'image/tiff',
+  'image/bmp',
+  'image/webp',
 ] as const;
 
 export type SupportedDocumentMimeType = (typeof SUPPORTED_DOCUMENT_MIME_TYPES)[number];
@@ -62,6 +69,7 @@ export interface ParsedKnowledgeDocument {
   readonly text: string;
   readonly metadata: ParsedKnowledgeDocumentMetadata;
   readonly pages?: readonly ParsedKnowledgeDocumentPage[];
+  readonly structuredContent?: Readonly<Record<string, unknown>>;
 }
 
 /**
@@ -75,7 +83,7 @@ export class DocumentParsingError extends Error {
   }
 }
 
-const DEFAULT_MAXIMUM_BYTES = 20 * 1024 * 1024;
+const DEFAULT_MAXIMUM_BYTES = 2_147_483_647;
 const PDF_SIGNATURE = Buffer.from('%PDF-', 'ascii');
 const ZIP_LOCAL_FILE_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 const UNSAFE_TEXT_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000e-\u001f\u007f]/u;
@@ -109,6 +117,7 @@ export class DocumentParserAdapter implements KnowledgeDocumentParser {
       text: string;
       pageCount?: number;
       pages?: readonly ParsedKnowledgeDocumentPage[];
+      structuredContent?: Readonly<Record<string, unknown>>;
     };
     switch (mimeType) {
       case 'text/plain':
@@ -126,8 +135,16 @@ export class DocumentParserAdapter implements KnowledgeDocumentParser {
         parsed = { text: await parseDocx(input.bytes) };
         break;
       case 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet':
-        parsed = { text: await parseXlsx(input.bytes) };
+        parsed = await parseXlsx(input.bytes);
         break;
+      case 'application/vnd.openxmlformats-officedocument.presentationml.presentation':
+      case 'application/vnd.ms-powerpoint':
+      case 'image/png':
+      case 'image/jpeg':
+      case 'image/tiff':
+      case 'image/bmp':
+      case 'image/webp':
+        throw new DocumentParsingError('UNSUPPORTED_MIME_TYPE');
     }
     input.signal?.throwIfAborted();
 
@@ -148,7 +165,11 @@ export class DocumentParserAdapter implements KnowledgeDocumentParser {
       text,
       metadata: {
         mimeType,
-        sourceType: mimeType === 'text/markdown' ? 'MARKDOWN' : 'TEXT',
+        sourceType:
+          mimeType === 'text/markdown' ||
+          mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            ? 'MARKDOWN'
+            : 'TEXT',
         ...(mimeType === 'application/pdf'
           ? { parser: PDF_PARSER_NAME }
           : mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
@@ -161,6 +182,13 @@ export class DocumentParserAdapter implements KnowledgeDocumentParser {
         ...(parsed.pageCount === undefined ? {} : { pageCount: parsed.pageCount }),
       },
       ...(pages === undefined ? {} : { pages }),
+      structuredContent:
+        parsed.structuredContent ??
+        buildLocalStructuredContent({
+          mimeType,
+          text,
+          ...(pages === undefined ? {} : { pages }),
+        }),
     };
   }
 }
@@ -293,7 +321,10 @@ async function parseDocx(bytes: Buffer): Promise<string> {
   }
 }
 
-async function parseXlsx(bytes: Buffer): Promise<string> {
+async function parseXlsx(bytes: Buffer): Promise<{
+  readonly text: string;
+  readonly structuredContent: Readonly<Record<string, unknown>>;
+}> {
   requireSignature(bytes, ZIP_LOCAL_FILE_SIGNATURE);
   try {
     const workbook = new ExcelJS.Workbook();
@@ -308,6 +339,7 @@ async function parseXlsx(bytes: Buffer): Promise<string> {
     }
 
     const sections: string[] = [];
+    const sheets: Array<Readonly<Record<string, unknown>>> = [];
     let totalRows = 0;
     let totalCells = 0;
     let totalCharacters = 0;
@@ -319,19 +351,30 @@ async function parseXlsx(bytes: Buffer): Promise<string> {
       }
 
       const rows: string[] = [];
+      const structuredRows: Array<Readonly<Record<string, unknown>>> = [];
       worksheet.eachRow({ includeEmpty: false }, (row) => {
         const values: string[] = [];
+        const cells: Array<Readonly<Record<string, unknown>>> = [];
         row.eachCell({ includeEmpty: true }, (cell) => {
-          values.push(
-            cell.text
-              .normalize('NFC')
-              .replace(/[\t\r\n]+/gu, ' ')
-              .replace(/\s{2,}/gu, ' ')
-              .trim(),
-          );
+          const display = cell.text
+            .normalize('NFC')
+            .replace(/[\t\r\n]+/gu, ' ')
+            .replace(/\s{2,}/gu, ' ')
+            .trim();
+          values.push(display);
+          const formula = typeof cell.formula === 'string' ? cell.formula : undefined;
+          cells.push({
+            address: cell.address,
+            column: cell.col,
+            display,
+            ...(formula === undefined ? {} : { formula }),
+          });
         });
         while (values.at(-1) === '') values.pop();
-        if (values.some((value) => value.length > 0)) rows.push(values.join('\t'));
+        if (values.some((value) => value.length > 0)) {
+          rows.push(values.join('\t'));
+          structuredRows.push({ row: row.number, cells });
+        }
       });
       if (rows.length === 0) continue;
 
@@ -342,12 +385,40 @@ async function parseXlsx(bytes: Buffer): Promise<string> {
         throw new DocumentParsingError('DOCUMENT_TOO_LARGE');
       }
       sections.push(section);
+      sheets.push({
+        name: sheetName,
+        rowCount: worksheet.actualRowCount,
+        columnCount: worksheet.actualColumnCount,
+        rows: structuredRows,
+      });
     }
-    return sections.join('\n\n');
+    const text = sections.join('\n\n');
+    return {
+      text,
+      structuredContent: {
+        schemaVersion: 'enterprise-knowledge-document/v1',
+        kind: 'workbook',
+        sheets,
+      },
+    };
   } catch (error) {
     if (error instanceof DocumentParsingError) throw error;
     throw new DocumentParsingError('DOCUMENT_PARSE_FAILED');
   }
+}
+
+function buildLocalStructuredContent(input: {
+  readonly mimeType: SupportedDocumentMimeType;
+  readonly text: string;
+  readonly pages?: readonly ParsedKnowledgeDocumentPage[];
+}): Readonly<Record<string, unknown>> {
+  return {
+    schemaVersion: 'enterprise-knowledge-document/v1',
+    kind: input.pages === undefined ? 'document' : 'paged-document',
+    mimeType: input.mimeType,
+    text: input.text,
+    ...(input.pages === undefined ? {} : { pages: input.pages }),
+  };
 }
 
 function requireSignature(bytes: Buffer, signature: Buffer): void {

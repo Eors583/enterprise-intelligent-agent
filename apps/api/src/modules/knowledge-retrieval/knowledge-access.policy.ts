@@ -6,10 +6,12 @@ export interface KnowledgeAccessScope {
 export interface ScopedKnowledgeBase {
   readonly id: string;
   readonly orgUnits: readonly KnowledgeAccessScope[];
+  readonly members: readonly { readonly userId: string }[];
 }
 
 export function accessibleKnowledgeBaseIds(input: {
   readonly userActive: boolean;
+  readonly memberUserId: string;
   readonly memberOrgUnitIds: ReadonlySet<string>;
   readonly parentByOrgUnitId: ReadonlyMap<string, string | null>;
   readonly knowledgeBases: readonly ScopedKnowledgeBase[];
@@ -21,8 +23,12 @@ export function accessibleKnowledgeBaseIds(input: {
 
   return input.knowledgeBases
     .filter((knowledgeBase) => {
-      if (knowledgeBase.orgUnits.length === 0) return true;
-      return knowledgeBase.orgUnits.some((scope) =>
+      const enterpriseWide =
+        knowledgeBase.orgUnits.length === 0 && knowledgeBase.members.length === 0;
+      const directlyAssigned = knowledgeBase.members.some(
+        (scope) => scope.userId === input.memberUserId,
+      );
+      const departmentAssigned = knowledgeBase.orgUnits.some((scope) =>
         [...input.memberOrgUnitIds].some(
           (memberOrgUnitId) =>
             scope.orgUnitId === memberOrgUnitId ||
@@ -30,6 +36,7 @@ export function accessibleKnowledgeBaseIds(input: {
               isOrgUnitAncestor(scope.orgUnitId, memberOrgUnitId, input.parentByOrgUnitId)),
         ),
       );
+      return enterpriseWide || directlyAssigned || departmentAssigned;
     })
     .map((knowledgeBase) => knowledgeBase.id);
 }

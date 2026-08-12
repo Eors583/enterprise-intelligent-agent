@@ -115,19 +115,6 @@ describe('AdminOverviewService', () => {
       .mockResolvedValueOnce([{ ...inputFixture().today, total: 4, succeeded: 4 }])
       .mockResolvedValueOnce([
         {
-          active_bases: 1,
-          total_documents: 2,
-          ready_documents: 2,
-          failed_documents: 0,
-          pending_parse_reviews: 0,
-          rejected_parse_reviews: 0,
-          failed_ingestion_jobs: 0,
-          total_chunks: 8,
-          chunks_with_embeddings: 8,
-        },
-      ])
-      .mockResolvedValueOnce([
-        {
           latest_run_status: 'SUCCEEDED',
           latest_run_finished_at: new Date('2026-07-28T00:30:00.000Z'),
           failed_runs_24h: 0,
@@ -172,6 +159,19 @@ describe('AdminOverviewService', () => {
           ]),
         ),
       } as never,
+      {
+        readOperationalSummary: vi.fn().mockResolvedValue({
+          activeBases: 1,
+          totalDocuments: 2,
+          readyDocuments: 2,
+          failedDocuments: 0,
+          pendingParseReviews: 0,
+          rejectedParseReviews: 0,
+          failedIngestionJobs: 0,
+          totalChunks: 8,
+          chunksWithEmbeddings: 8,
+        }),
+      } as never,
     );
 
     const result = await service.read();
@@ -191,7 +191,7 @@ describe('AdminOverviewService', () => {
       chunksMissingEmbeddings: 0,
     });
     expect(result.directory.latestRunStatus).toBe('SUCCEEDED');
-    expect(query).toHaveBeenCalledTimes(7);
+    expect(query).toHaveBeenCalledTimes(6);
     const todayQuery = query.mock.calls[2]?.[0] as { readonly sql?: string } | undefined;
     expect(todayQuery?.sql).toContain('run."grounded_citation_count" > 0');
     expect(todayQuery?.sql).not.toContain('public."messages"');

@@ -410,9 +410,6 @@ export class ConversationService {
       risk: 'MEDIUM',
     });
     try {
-      if (request.responseTarget?.type === 'agent') {
-        await this.requireOperationalAgents(user.tenantId, [request.responseTarget.agentId]);
-      }
       const message = await this.conversations.createUserMessage({
         tenantId: user.tenantId,
         conversationId,

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { deriveKnowledgeGraphReadiness } from './knowledge-graph-readiness.js';
 
 describe('knowledge graph readiness', () => {
-  it('requires entities, relations, evidence and full current-chunk linkage', () => {
+  it('reports graph diagnostics without treating them as publication gates', () => {
     expect(
       deriveKnowledgeGraphReadiness({
         entityCount: 0,
@@ -19,8 +19,7 @@ describe('knowledge graph readiness', () => {
       }),
     ).toMatchObject({
       status: 'NOT_BUILT',
-      strongRetrievalReady: false,
-      readinessBlockers: [
+      diagnostics: [
         'NO_ENTITIES',
         'NO_RELATIONS',
         'NO_PUBLISHED_ONTOLOGY',
@@ -47,8 +46,28 @@ describe('knowledge graph readiness', () => {
       status: 'READY',
       mentionCoverage: 1,
       evidenceCoverage: 1,
-      strongRetrievalReady: true,
-      readinessBlockers: [],
+      diagnostics: [],
+    });
+  });
+
+  it('does not invent entities for a small number of legitimately unlinked chunks', () => {
+    expect(
+      deriveKnowledgeGraphReadiness({
+        entityCount: 266,
+        relationCount: 216,
+        relationsWithoutEvidenceCount: 0,
+        publishedChunkCount: 63,
+        linkedChunkCount: 60,
+        processingCount: 0,
+        failedCount: 0,
+        publishedOntologyVersionCount: 1,
+        ungovernedRelationCount: 0,
+        openConflictCount: 0,
+      }),
+    ).toMatchObject({
+      status: 'READY',
+      diagnostics: [],
+      evidenceCoverage: 1,
     });
   });
 
@@ -83,7 +102,7 @@ describe('knowledge graph readiness', () => {
     ).toBe('FAILED');
   });
 
-  it('fails closed when ontology governance or conflict resolution is incomplete', () => {
+  it('marks graph retrieval degraded while surfacing non-blocking diagnostics', () => {
     expect(
       deriveKnowledgeGraphReadiness({
         entityCount: 5,
@@ -99,8 +118,7 @@ describe('knowledge graph readiness', () => {
       }),
     ).toMatchObject({
       status: 'DEGRADED',
-      strongRetrievalReady: false,
-      readinessBlockers: ['UNGOVERNED_RELATIONS', 'OPEN_GRAPH_CONFLICTS'],
+      diagnostics: ['UNGOVERNED_RELATIONS', 'OPEN_GRAPH_CONFLICTS'],
     });
   });
 });

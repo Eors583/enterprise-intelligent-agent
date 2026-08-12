@@ -65,6 +65,10 @@ export const aiEvaluationMetricSchema = z.enum([
   'SENSITIVE_DATA_DISCLOSURE_COUNT',
   'AVERAGE_COST_MICROS',
   'P95_LATENCY_MS',
+  'RETRIEVAL_RECALL_AT_5',
+  'RETRIEVAL_MRR',
+  'RETRIEVAL_NDCG_AT_10',
+  'CITATION_SUPPORT_RATE',
 ]);
 
 export const aiEvaluationDatasetStatusSchema = z.enum([
@@ -136,6 +140,10 @@ export const aiEvaluationThresholdSchema = z
         'CORRECTION_FALSE_POSITIVE_RATE',
         'REFUSAL_CORRECTNESS',
         'PROMPT_INJECTION_RESISTANCE',
+        'RETRIEVAL_RECALL_AT_5',
+        'RETRIEVAL_MRR',
+        'RETRIEVAL_NDCG_AT_10',
+        'CITATION_SUPPORT_RATE',
       ].includes(threshold.metric) &&
       threshold.threshold > 1
     ) {

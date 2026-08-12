@@ -11,6 +11,14 @@ export const adminOrganizationSchema = z.object({
 
 export const organizationSyncSourceSchema = z.enum(['LOCAL', 'FEISHU']);
 
+export const employmentTypeSchema = z.enum([
+  'REGULAR',
+  'INTERN',
+  'OUTSOURCED',
+  'LABOR',
+  'CONSULTANT',
+]);
+
 export const adminOrgUnitSchema = z.object({
   id: z.uuid(),
   organizationId: z.uuid(),
@@ -27,6 +35,8 @@ export const adminMemberSchema = z.object({
   id: z.uuid(),
   email: z.email(),
   displayName: z.string().min(1),
+  phone: z.string().nullable().optional(),
+  avatarUrl: z.url().nullable().optional(),
   status: z.enum(['ACTIVE', 'INACTIVE', 'LOCKED']),
   role: tenantRoleSchema,
   source: organizationSyncSourceSchema,
@@ -36,6 +46,19 @@ export const adminMemberSchema = z.object({
       organizationId: z.uuid(),
       orgUnitId: z.uuid(),
       title: z.string().nullable(),
+      employeeNumber: z.string().nullable().optional(),
+      employmentType: employmentTypeSchema.nullable().optional(),
+      hireDate: z.iso.date().nullable().optional(),
+      countryOrRegion: z.string().nullable().optional(),
+      city: z.string().nullable().optional(),
+      directManager: z
+        .object({ userId: z.uuid(), displayName: z.string().min(1) })
+        .nullable()
+        .optional(),
+      dottedLineManager: z
+        .object({ userId: z.uuid(), displayName: z.string().min(1) })
+        .nullable()
+        .optional(),
       status: z.enum(['PENDING', 'ACTIVE', 'SUSPENDED', 'TERMINATED']),
     })
     .nullable(),
@@ -230,20 +253,55 @@ export const updateOrgUnitRequestSchema = z
  * @deprecated Prefer inviteMemberRequestSchema for the default member onboarding flow.
  * This legacy contract remains available for controlled break-glass provisioning.
  */
-export const createMemberRequestSchema = z.object({
+const memberOnboardingRequestShape = {
   email: z
     .email()
     .max(320)
     .transform((value) => value.toLowerCase()),
   displayName: z.string().trim().min(1).max(120),
-  password: z.string().min(10).max(128),
   role: tenantRoleSchema.default('MEMBER'),
   orgUnitId: z.uuid(),
   title: z.string().trim().min(1).max(200).optional(),
   employeeNumber: z.string().trim().min(1).max(255).optional(),
-});
+  phone: z.string().trim().min(5).max(40).optional(),
+  avatarUrl: z.url().max(2_048).optional(),
+  employmentType: employmentTypeSchema.default('REGULAR'),
+  hireDate: z.iso.date().optional(),
+  countryOrRegion: z.string().trim().min(1).max(120).optional(),
+  city: z.string().trim().min(1).max(120).optional(),
+  directManagerUserId: z.uuid().optional(),
+  dottedLineManagerUserId: z.uuid().optional(),
+};
 
-export const inviteMemberRequestSchema = createMemberRequestSchema.omit({ password: true });
+function validateDistinctManagers(
+  value: {
+    directManagerUserId?: string | undefined;
+    dottedLineManagerUserId?: string | undefined;
+  },
+  context: z.RefinementCtx,
+): void {
+  if (
+    value.directManagerUserId !== undefined &&
+    value.directManagerUserId === value.dottedLineManagerUserId
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['dottedLineManagerUserId'],
+      message: 'Direct and dotted-line managers must be different members.',
+    });
+  }
+}
+
+export const createMemberRequestSchema = z
+  .object({
+    ...memberOnboardingRequestShape,
+    password: z.string().min(10).max(128),
+  })
+  .superRefine(validateDistinctManagers);
+
+export const inviteMemberRequestSchema = z
+  .object(memberOnboardingRequestShape)
+  .superRefine(validateDistinctManagers);
 
 export const memberInvitationSchema = z.object({
   id: z.uuid(),
@@ -301,6 +359,89 @@ export const resetMemberPasswordResponseSchema = z.object({
 });
 
 export const knowledgeBaseStatusSchema = z.enum(['DRAFT', 'ACTIVE', 'ARCHIVED']);
+
+export const knowledgeRetrievalModeSchema = z.enum(['HYBRID', 'VECTOR', 'FULL_TEXT']);
+
+export const knowledgeRetrievalConfigSchema = z
+  .object({
+    mode: knowledgeRetrievalModeSchema.default('HYBRID'),
+    topK: z.number().int().min(1).max(20).default(8),
+    scoreThreshold: z.number().min(0).max(1).default(0.08),
+    semanticWeight: z.number().min(0).max(1).default(0.7),
+    keywordWeight: z.number().min(0).max(1).default(0.3),
+    rerankEnabled: z.boolean().default(true),
+    relationshipRetrievalEnabled: z.boolean().default(true),
+    maxChunksPerDocument: z.number().int().min(1).max(10).default(3),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.mode !== 'HYBRID') return;
+    if (Math.abs(value.semanticWeight + value.keywordWeight - 1) > 0.0001) {
+      context.addIssue({
+        code: 'custom',
+        path: ['semanticWeight'],
+        message: 'Hybrid semanticWeight and keywordWeight must add up to 1.',
+      });
+    }
+  });
+
+export const knowledgeChunkingConfigSchema = z
+  .object({
+    targetTokens: z.number().int().min(100).max(2_000).default(500),
+    overlapTokens: z.number().int().min(0).max(500).default(80),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.overlapTokens >= value.targetTokens) {
+      context.addIssue({
+        code: 'custom',
+        path: ['overlapTokens'],
+        message: 'overlapTokens must be smaller than targetTokens.',
+      });
+    }
+  });
+
+export const knowledgeEmbeddingProviderSchema = z.enum(['openai_compatible', 'local_fastembed']);
+
+export const knowledgeEmbeddingIndexStatusSchema = z.enum([
+  'BUILDING',
+  'ACTIVE',
+  'RETIRED',
+  'FAILED',
+]);
+
+export const knowledgeEmbeddingIndexConfigSchema = z
+  .object({
+    provider: knowledgeEmbeddingProviderSchema,
+    model: z.string().trim().min(1).max(200),
+    dimensions: z.number().int().min(1).max(16_000),
+    distance: z.literal('COSINE').default('COSINE'),
+    normalization: z.enum(['L2', 'NONE']).default('L2'),
+  })
+  .strict();
+
+export const knowledgeEmbeddingIndexVersionSchema = z.object({
+  id: z.uuid(),
+  version: z.number().int().positive(),
+  status: knowledgeEmbeddingIndexStatusSchema,
+  provider: z.string().trim().min(1).max(40),
+  model: z.string().trim().min(1).max(200),
+  dimensions: z.number().int().min(1).max(16_000),
+  distance: z.literal('COSINE'),
+  normalization: z.enum(['L2', 'NONE']),
+  collectionName: z.string().trim().min(1).max(200).nullable(),
+  createdAt: z.iso.datetime(),
+  activatedAt: z.iso.datetime().nullable(),
+  retiredAt: z.iso.datetime().nullable(),
+  failureCode: z.string().trim().min(1).max(120).nullable(),
+});
+
+export const createKnowledgeEmbeddingIndexVersionRequestSchema =
+  knowledgeEmbeddingIndexConfigSchema;
+
+export const knowledgeEmbeddingIndexVersionListResponseSchema = z.object({
+  items: z.array(knowledgeEmbeddingIndexVersionSchema),
+});
 export const knowledgeDocumentStatusSchema = z.enum([
   'DRAFT',
   'PROCESSING',
@@ -424,6 +565,9 @@ export const knowledgeBaseOrgUnitScopeSchema = z.object({
   orgUnitId: z.uuid(),
   includeChildren: z.boolean(),
 });
+export const knowledgeBaseMemberScopeSchema = z.object({
+  userId: z.uuid(),
+});
 
 export const knowledgeIngestionJobSchema = z.object({
   id: z.uuid(),
@@ -465,6 +609,14 @@ export const knowledgeDocumentVersionSummarySchema = z.object({
   parseReviewedAt: z.iso.datetime().nullable().default(null),
   parseReviewNote: z.string().trim().min(1).max(2_000).nullable().default(null),
   parseDiagnostics: z.record(z.string(), z.unknown()).default({}),
+  structuredArtifact: z
+    .object({
+      format: z.string().trim().min(1).max(120),
+      size: z.number().int().nonnegative(),
+      sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    })
+    .nullable()
+    .optional(),
   governance: knowledgeDocumentGovernanceSchema,
   ingestionJob: knowledgeIngestionJobSchema.nullable(),
 });
@@ -472,6 +624,8 @@ export const knowledgeDocumentVersionSummarySchema = z.object({
 export const knowledgeDocumentSummarySchema = z.object({
   id: z.uuid(),
   knowledgeBaseId: z.uuid(),
+  folderId: z.uuid().nullable(),
+  folderPath: z.string().max(2_000).nullable(),
   title: z.string().min(1),
   sourceType: knowledgeSourceTypeSchema,
   mimeType: z.string().nullable(),
@@ -501,14 +655,29 @@ export const knowledgeDocumentVersionDetailSchema = knowledgeDocumentVersionSumm
 
 export const knowledgeDocumentChunkPreviewSchema = z.object({
   id: z.uuid(),
+  parentChunkId: z.uuid(),
+  previousChunkId: z.uuid().nullable(),
+  nextChunkId: z.uuid().nullable(),
   chunkIndex: z.number().int().nonnegative(),
   headingPath: z.array(z.string()),
+  parentHeadingPath: z.array(z.string()),
+  parentExcerpt: z.string(),
   content: z.string(),
   tokenCount: z.number().int().nonnegative(),
   contentHash: z.string().length(64),
   pageStart: z.number().int().positive().nullable(),
   pageEnd: z.number().int().positive().nullable(),
+  sheetName: z.string().min(1).max(200).nullable(),
   embeddingModels: z.array(z.string().min(1).max(200)),
+});
+
+export const knowledgeStructuredDocumentPreviewSchema = z.object({
+  documentVersionId: z.uuid(),
+  format: z.string().trim().min(1).max(120),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  truncated: z.boolean(),
+  content: z.unknown(),
 });
 
 export const knowledgeDocumentChunkListResponseSchema = z.object({
@@ -520,6 +689,33 @@ export const knowledgeDocumentChunkListResponseSchema = z.object({
   semanticCoverage: z.number().min(0).max(1),
   items: z.array(knowledgeDocumentChunkPreviewSchema),
 });
+
+export const inspectKnowledgeUploadRequestSchema = z
+  .object({
+    fileName: z.string().trim().min(1).max(300),
+    size: z.number().int().positive().max(2_147_483_647),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+    documentId: z.uuid().optional(),
+    folderId: z.uuid().nullable().optional(),
+  })
+  .strict();
+
+export const knowledgeUploadInspectionSchema = z
+  .object({
+    decision: z.enum(['NEW_DOCUMENT', 'NEW_VERSION_CANDIDATE', 'EXACT_DUPLICATE']),
+    matchingDocument: z
+      .object({
+        id: z.uuid(),
+        title: z.string().min(1),
+        fileName: z.string().nullable(),
+        currentVersion: z.number().int().positive(),
+        matchedVersion: z.number().int().positive(),
+        updatedAt: z.iso.datetime(),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 
 export const knowledgeCapabilityStatusSchema = z.enum([
   'DISABLED',
@@ -566,8 +762,6 @@ export const knowledgeBaseIndexReadinessSchema = z.object({
   rerank: knowledgeCapabilityReadinessSchema,
   retrievalMode: z.enum(['LEXICAL', 'HYBRID']),
   degradedReason: knowledgeReadinessReasonSchema.nullable(),
-  activationAllowed: z.boolean(),
-  activationBlockers: z.array(knowledgeReadinessReasonSchema),
 });
 
 export const knowledgeGraphStatusSchema = z.enum([
@@ -616,8 +810,7 @@ export const knowledgeGraphOverviewSchema = z
     evidenceCoverage: z.number().min(0).max(1),
     entityTypes: z.array(knowledgeGraphTypeCountSchema),
     relationTypes: z.array(knowledgeGraphRelationTypeCountSchema),
-    strongRetrievalReady: z.boolean(),
-    readinessBlockers: z.array(knowledgeGraphReadinessReasonSchema),
+    diagnostics: z.array(knowledgeGraphReadinessReasonSchema),
     lastBuiltAt: z.iso.datetime().nullable(),
   })
   .superRefine((value, context) => {
@@ -640,21 +833,6 @@ export const knowledgeGraphOverviewSchema = z
         code: 'custom',
         path: ['linkedChunkCount'],
         message: 'Linked chunks cannot exceed published chunks.',
-      });
-    }
-    if (
-      value.strongRetrievalReady &&
-      (value.status !== 'READY' ||
-        value.entityCount === 0 ||
-        value.relationCount === 0 ||
-        value.relationsWithoutEvidenceCount > 0 ||
-        value.readinessBlockers.length > 0)
-    ) {
-      context.addIssue({
-        code: 'custom',
-        path: ['strongRetrievalReady'],
-        message:
-          'Strong retrieval readiness requires entities, evidenced relations and no blockers.',
       });
     }
   });
@@ -713,16 +891,68 @@ export const knowledgeGraphResponseSchema = z.object({
   relations: z.array(knowledgeGraphRelationSchema),
 });
 
+export const knowledgeSpaceTypeSchema = z.enum(['COMPANY', 'DEPARTMENT', 'PROJECT', 'MEMBER']);
+
+export const knowledgeSpaceSchema = z
+  .object({
+    type: knowledgeSpaceTypeSchema,
+    targetId: z.uuid(),
+    targetName: z.string().trim().min(1).max(200),
+  })
+  .strict();
+
+export const knowledgeSpaceSelectionSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('COMPANY') }).strict(),
+  z.object({ type: z.literal('DEPARTMENT'), targetId: z.uuid() }).strict(),
+  z
+    .object({
+      type: z.literal('PROJECT'),
+      targetId: z.uuid().optional(),
+      targetName: z.string().trim().min(1).max(200),
+    })
+    .strict(),
+  z.object({ type: z.literal('MEMBER'), targetId: z.uuid() }).strict(),
+]);
+
+export const knowledgeFolderSchema = z.object({
+  id: z.uuid(),
+  knowledgeBaseId: z.uuid(),
+  parentId: z.uuid().nullable(),
+  name: z.string().min(1).max(200),
+  path: z.string().min(1).max(2_000),
+  directDocumentCount: z.number().int().nonnegative(),
+  directChildCount: z.number().int().nonnegative(),
+  createdAt: z.iso.datetime(),
+  updatedAt: z.iso.datetime(),
+});
+
+export const ensureKnowledgeFoldersRequestSchema = z
+  .object({
+    paths: z.array(z.string().trim().min(1).max(2_000)).min(1).max(1_000),
+  })
+  .strict();
+
+export const knowledgeFolderListResponseSchema = z.object({
+  items: z.array(knowledgeFolderSchema),
+});
+
 export const knowledgeBaseSchema = z.object({
   id: z.uuid(),
   key: z.string().min(1),
   name: z.string().min(1),
   description: z.string().nullable(),
   status: knowledgeBaseStatusSchema,
+  space: knowledgeSpaceSchema,
   version: z.number().int().positive(),
+  retrievalConfig: knowledgeRetrievalConfigSchema,
+  chunkingConfig: knowledgeChunkingConfigSchema,
+  activeEmbeddingIndexVersion: knowledgeEmbeddingIndexVersionSchema.nullable(),
+  pendingEmbeddingIndexVersion: knowledgeEmbeddingIndexVersionSchema.nullable(),
   orgUnitIds: z.array(z.uuid()),
   orgUnitScopes: z.array(knowledgeBaseOrgUnitScopeSchema),
+  memberUserIds: z.array(z.uuid()),
   documentCount: z.number().int().nonnegative(),
+  folders: z.array(knowledgeFolderSchema),
   documents: z.array(knowledgeDocumentSummarySchema),
   updatedAt: z.iso.datetime(),
 });
@@ -739,17 +969,25 @@ export const createKnowledgeBaseRequestSchema = z.object({
     .optional(),
   name: z.string().trim().min(1).max(200),
   description: z.string().trim().max(4_000).nullable().optional(),
-  status: knowledgeBaseStatusSchema.default('DRAFT'),
+  status: knowledgeBaseStatusSchema.default('ACTIVE'),
+  space: knowledgeSpaceSelectionSchema.optional(),
   orgUnitIds: z.array(z.uuid()).max(500).default([]),
   orgUnitScopes: z.array(knowledgeBaseOrgUnitScopeSchema).max(500).optional(),
+  memberUserIds: z.array(z.uuid()).max(500).default([]),
+  retrievalConfig: knowledgeRetrievalConfigSchema.optional(),
+  chunkingConfig: knowledgeChunkingConfigSchema.optional(),
 });
 
 export const updateKnowledgeBaseRequestSchema = z.object({
   name: z.string().trim().min(1).max(200).optional(),
   description: z.string().trim().max(4_000).nullable().optional(),
   status: knowledgeBaseStatusSchema.optional(),
+  space: knowledgeSpaceSelectionSchema.optional(),
   orgUnitIds: z.array(z.uuid()).max(500).optional(),
   orgUnitScopes: z.array(knowledgeBaseOrgUnitScopeSchema).max(500).optional(),
+  memberUserIds: z.array(z.uuid()).max(500).optional(),
+  retrievalConfig: knowledgeRetrievalConfigSchema.optional(),
+  chunkingConfig: knowledgeChunkingConfigSchema.optional(),
   expectedVersion: z.number().int().positive(),
 });
 
@@ -760,6 +998,7 @@ export const createKnowledgeDocumentRequestSchema = z.object({
   fileName: z.string().trim().max(300).optional(),
   contentText: z.string().max(2_000_000).optional(),
   status: z.enum(['DRAFT', 'READY']).default('DRAFT'),
+  folderId: z.uuid().nullable().optional(),
   governance: knowledgeDocumentGovernancePolicySchema.optional(),
 });
 
@@ -801,6 +1040,38 @@ export const updateKnowledgeDocumentVersionGovernanceRequestSchema = z
   })
   .strict();
 
+export const updateKnowledgeDocumentAccessRequestSchema = z
+  .object({
+    mode: z.enum(['INHERIT', 'RESTRICTED']),
+    orgUnitIds: z.array(z.uuid()).max(500),
+    memberUserIds: z.array(z.uuid()).max(500),
+    expectedGovernanceRevision: z.number().int().positive(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      value.mode === 'RESTRICTED' &&
+      value.orgUnitIds.length === 0 &&
+      value.memberUserIds.length === 0
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['mode'],
+        message: 'Restricted document access requires at least one department or member.',
+      });
+    }
+    if (
+      value.mode === 'INHERIT' &&
+      (value.orgUnitIds.length > 0 || value.memberUserIds.length > 0)
+    ) {
+      context.addIssue({
+        code: 'custom',
+        path: ['mode'],
+        message: 'Inherited document access cannot contain additional scopes.',
+      });
+    }
+  });
+
 export const reviewKnowledgeDocumentGovernanceRequestSchema = z
   .object({
     decision: z.enum(['APPROVE', 'REJECT']),
@@ -833,16 +1104,14 @@ export const rollbackKnowledgeDocumentVersionRequestSchema = z.object({
   expectedCurrentVersionId: z.uuid(),
 });
 
-export const publishKnowledgeDocumentVersionRequestSchema = z
-  .object({
-    evaluationRunId: z.uuid(),
-  })
-  .strict();
+export const publishKnowledgeDocumentVersionRequestSchema = z.object({}).strict();
 
 export const knowledgeEmbeddingRebuildResponseSchema = z.object({
   documentVersionId: z.uuid(),
+  embeddingIndexVersionId: z.uuid(),
+  embeddingIndexVersion: z.number().int().positive(),
   embeddingModel: z.string().min(1).max(200),
-  dimensions: z.literal(1536),
+  dimensions: z.number().int().min(1).max(16_000),
   chunkCount: z.number().int().positive(),
 });
 
@@ -897,7 +1166,7 @@ export const knowledgeRelationshipEvidenceSchema = z
   });
 
 export const knowledgeRetrievalDiagnosticSchema = z.object({
-  stage: z.enum(['LEXICAL', 'VECTOR', 'RELATIONSHIP', 'RERANK']),
+  stage: z.enum(['ROUTER', 'LEXICAL', 'VECTOR', 'SQL', 'RELATIONSHIP', 'BUSINESS_API', 'RERANK']),
   status: z.enum(['APPLIED', 'SKIPPED', 'DEGRADED']),
   code: z
     .string()
@@ -917,6 +1186,14 @@ export const knowledgeRetrievalTestResultSchema = z.object({
   documentVersion: z.number().int().positive(),
   title: z.string().min(1),
   headingPath: z.array(z.string()),
+  pageStart: z.number().int().positive().nullable(),
+  pageEnd: z.number().int().positive().nullable(),
+  sheetName: z.string().min(1).max(200).nullable(),
+  sourceMimeType: z.string().trim().min(1).max(255).nullable(),
+  sourceFileName: z.string().trim().min(1).max(500).nullable(),
+  sourceUri: z.url().max(2_048).nullable(),
+  sourceDownloadAvailable: z.boolean(),
+  structuredPreviewAvailable: z.boolean(),
   excerpt: z.string().min(1),
   keywordScore: z.number(),
   fuzzyScore: z.number(),
@@ -934,7 +1211,7 @@ export const knowledgeRetrievalTestResponseSchema = z.object({
   accessibleKnowledgeBaseIds: z.array(z.uuid()),
   mode: z.enum(['LEXICAL', 'HYBRID']),
   embeddingModel: z.string().min(1).max(200).nullable(),
-  reranker: z.enum(['LEXICAL', 'RRF', 'CROSS_ENCODER']),
+  reranker: z.enum(['LEXICAL', 'WEIGHTED_SCORE', 'CROSS_ENCODER']),
   rerankerModel: z.string().min(1).max(200).nullable(),
   degradedReason: z.string().max(120).nullable(),
   lexicalCandidateCount: z.number().int().nonnegative(),
@@ -942,6 +1219,15 @@ export const knowledgeRetrievalTestResponseSchema = z.object({
   relationshipCandidateCount: z.number().int().nonnegative().optional(),
   relationshipExpandedCount: z.number().int().nonnegative().optional(),
   diagnostics: z.array(knowledgeRetrievalDiagnosticSchema).max(20).optional(),
+  queryRoute: z
+    .object({
+      primary: z.enum(['DOCUMENT', 'SQL', 'RELATIONSHIP', 'BUSINESS_API']),
+      fallback: z.array(z.enum(['DOCUMENT', 'SQL', 'RELATIONSHIP', 'BUSINESS_API'])).max(3),
+      reasonCode: z.string().regex(/^[A-Z0-9_]+$/u),
+    })
+    .strict()
+    .optional(),
+  structuredQuerySql: z.string().max(10_000).nullable().optional(),
   semanticCoverage: z.number().min(0).max(1),
   noAnswer: z.boolean(),
   elapsedMs: z.number().nonnegative(),
@@ -952,6 +1238,7 @@ export type AdminOrganizationResponse = z.infer<typeof adminOrganizationResponse
 export type AdminOrgUnit = z.infer<typeof adminOrgUnitSchema>;
 export type AdminMember = z.infer<typeof adminMemberSchema>;
 export type OrganizationSyncSource = z.infer<typeof organizationSyncSourceSchema>;
+export type EmploymentType = z.infer<typeof employmentTypeSchema>;
 export type FeishuOrganizationSyncStatusValue = z.infer<
   typeof feishuOrganizationSyncStatusValueSchema
 >;
@@ -976,7 +1263,22 @@ export type UpdateMemberRequest = z.infer<typeof updateMemberRequestSchema>;
 export type ResetMemberPasswordRequest = z.infer<typeof resetMemberPasswordRequestSchema>;
 export type ResetMemberPasswordResponse = z.infer<typeof resetMemberPasswordResponseSchema>;
 export type KnowledgeBase = z.infer<typeof knowledgeBaseSchema>;
+export type KnowledgeFolder = z.infer<typeof knowledgeFolderSchema>;
+export type EnsureKnowledgeFoldersRequest = z.infer<typeof ensureKnowledgeFoldersRequestSchema>;
+export type KnowledgeFolderListResponse = z.infer<typeof knowledgeFolderListResponseSchema>;
+export type KnowledgeSpace = z.infer<typeof knowledgeSpaceSchema>;
+export type KnowledgeSpaceType = z.infer<typeof knowledgeSpaceTypeSchema>;
+export type KnowledgeSpaceSelection = z.infer<typeof knowledgeSpaceSelectionSchema>;
+export type KnowledgeEmbeddingIndexConfig = z.infer<typeof knowledgeEmbeddingIndexConfigSchema>;
+export type KnowledgeEmbeddingIndexVersion = z.infer<typeof knowledgeEmbeddingIndexVersionSchema>;
+export type KnowledgeEmbeddingIndexVersionListResponse = z.infer<
+  typeof knowledgeEmbeddingIndexVersionListResponseSchema
+>;
 export type KnowledgeBaseOrgUnitScope = z.infer<typeof knowledgeBaseOrgUnitScopeSchema>;
+export type KnowledgeBaseMemberScope = z.infer<typeof knowledgeBaseMemberScopeSchema>;
+export type KnowledgeRetrievalMode = z.infer<typeof knowledgeRetrievalModeSchema>;
+export type KnowledgeRetrievalConfig = z.infer<typeof knowledgeRetrievalConfigSchema>;
+export type KnowledgeChunkingConfig = z.infer<typeof knowledgeChunkingConfigSchema>;
 export type KnowledgeBaseListResponse = z.infer<typeof knowledgeBaseListResponseSchema>;
 export type KnowledgeDocument = z.infer<typeof knowledgeDocumentSchema>;
 export type KnowledgeDocumentSummary = z.infer<typeof knowledgeDocumentSummarySchema>;
@@ -987,9 +1289,14 @@ export type KnowledgeParseReviewQueueResponse = z.infer<
   typeof knowledgeParseReviewQueueResponseSchema
 >;
 export type KnowledgeDocumentChunkPreview = z.infer<typeof knowledgeDocumentChunkPreviewSchema>;
+export type KnowledgeStructuredDocumentPreview = z.infer<
+  typeof knowledgeStructuredDocumentPreviewSchema
+>;
 export type KnowledgeDocumentChunkListResponse = z.infer<
   typeof knowledgeDocumentChunkListResponseSchema
 >;
+export type InspectKnowledgeUploadRequest = z.infer<typeof inspectKnowledgeUploadRequestSchema>;
+export type KnowledgeUploadInspection = z.infer<typeof knowledgeUploadInspectionSchema>;
 export type KnowledgeCapabilityStatus = z.infer<typeof knowledgeCapabilityStatusSchema>;
 export type KnowledgeReadinessReason = z.infer<typeof knowledgeReadinessReasonSchema>;
 export type KnowledgeCapabilityReadiness = z.infer<typeof knowledgeCapabilityReadinessSchema>;
@@ -1003,6 +1310,9 @@ export type KnowledgeGraphQuery = z.infer<typeof knowledgeGraphQuerySchema>;
 export type KnowledgeGraphResponse = z.infer<typeof knowledgeGraphResponseSchema>;
 export type KnowledgeIngestionJob = z.infer<typeof knowledgeIngestionJobSchema>;
 export type CreateKnowledgeBaseRequest = z.infer<typeof createKnowledgeBaseRequestSchema>;
+export type CreateKnowledgeEmbeddingIndexVersionRequest = z.infer<
+  typeof createKnowledgeEmbeddingIndexVersionRequestSchema
+>;
 export type UpdateKnowledgeBaseRequest = z.infer<typeof updateKnowledgeBaseRequestSchema>;
 export type CreateKnowledgeDocumentRequest = z.infer<typeof createKnowledgeDocumentRequestSchema>;
 export type ImportKnowledgeWebDocumentRequest = z.infer<
@@ -1017,6 +1327,9 @@ export type KnowledgeDocumentGovernancePolicy = z.infer<
 export type KnowledgeDocumentGovernance = z.infer<typeof knowledgeDocumentGovernanceSchema>;
 export type UpdateKnowledgeDocumentVersionGovernanceRequest = z.infer<
   typeof updateKnowledgeDocumentVersionGovernanceRequestSchema
+>;
+export type UpdateKnowledgeDocumentAccessRequest = z.infer<
+  typeof updateKnowledgeDocumentAccessRequestSchema
 >;
 export type ReviewKnowledgeDocumentGovernanceRequest = z.infer<
   typeof reviewKnowledgeDocumentGovernanceRequestSchema

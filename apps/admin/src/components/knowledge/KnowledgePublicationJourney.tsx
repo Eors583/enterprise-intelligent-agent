@@ -1,13 +1,9 @@
 import type {
-  AiEvaluationRun,
   KnowledgeBaseIndexReadiness,
   KnowledgeDocumentSummary,
   KnowledgeDocumentVersionSummary,
 } from '@enterprise/contracts';
-import { useEffect, useState, type ReactNode } from 'react';
-
-import { messageFromError } from '@/api/client';
-import { listEvaluationRuns } from '@/features/ai-evaluation/api';
+import type { ReactNode } from 'react';
 
 import {
   deriveKnowledgePublicationJourney,
@@ -25,34 +21,7 @@ export function KnowledgePublicationJourney({
   readiness: KnowledgeBaseIndexReadiness | null;
   onAction: (action: KnowledgePublicationAction) => void;
 }): ReactNode {
-  const [runs, setRuns] = useState<readonly AiEvaluationRun[]>([]);
-  const [runLoadError, setRunLoadError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setRunLoadError(null);
-    void listEvaluationRuns(
-      {
-        subjectType: 'KNOWLEDGE_VERSION',
-        subjectId: version.id,
-        subjectVersion: version.versionNumber,
-        limit: 100,
-      },
-      controller.signal,
-    )
-      .then((response) => setRuns(response.items))
-      .catch((caught: unknown) => {
-        if (!controller.signal.aborted) setRunLoadError(messageFromError(caught));
-      });
-    return () => controller.abort();
-  }, [version.id, version.versionNumber]);
-
-  const journey = deriveKnowledgePublicationJourney({
-    document,
-    version,
-    runs,
-    readiness,
-  });
+  const journey = deriveKnowledgePublicationJourney({ document, version, readiness });
 
   return (
     <section
@@ -74,21 +43,22 @@ export function KnowledgePublicationJourney({
       </ol>
       {!journey.semanticReady ? (
         <p className="knowledge-semantic-not-ready">
-          <strong>非企业语义就绪：</strong>
+          <strong>非阻塞提示：</strong>
           {journey.semanticBlocker}
         </p>
       ) : null}
-      {runLoadError ? <p className="field-error">评测状态读取失败：{runLoadError}</p> : null}
       {journey.nextActionLabel ? (
         <button
           className="button primary compact"
           type="button"
           onClick={() => onAction(journey.nextAction)}
         >
-          下一步：{journey.nextActionLabel}
+          {journey.nextActionLabel}
         </button>
       ) : (
-        <span className="knowledge-publication-complete">当前版本已完成全部发布门禁</span>
+        <span className="knowledge-publication-complete">
+          {journey.semanticReady ? '当前版本已发布并可混合检索' : '等待处理完成'}
+        </span>
       )}
     </section>
   );

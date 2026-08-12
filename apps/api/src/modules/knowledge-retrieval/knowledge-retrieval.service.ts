@@ -1,5 +1,9 @@
 import { Inject, Injectable } from '@nestjs/common';
-import type { AiDataClassification, TenantRole } from '@enterprise/contracts';
+import type {
+  AiDataClassification,
+  KnowledgeRetrievalConfig,
+  KnowledgeRetrievalMode as ConfiguredKnowledgeRetrievalMode,
+} from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../database/prisma.service.js';
@@ -11,18 +15,27 @@ import {
 } from '../ai-safety-model-routing/ai-data-classification.js';
 import { classifyTextForAiEgress } from '../ai-safety-model-routing/ai-safety-policy.js';
 import { AuthorizationDecisionService } from '../authorization/authorization-decision.service.js';
-import type {
-  AuthorizationAssignment,
-  AuthorizationDataLabelContext,
-  AuthorizationOrganizationContext,
-  AuthorizationProjectContext,
-  AuthorizationTaskContext,
-} from '../authorization/authorization.types.js';
 import {
   KnowledgeAiRuntimeClient,
   KnowledgeAiRuntimeError,
   type KnowledgeEmbeddingBatch,
 } from '../knowledge-semantic/knowledge-ai-runtime.client.js';
+import {
+  KnowledgeSearchIndex,
+  type KnowledgeSearchIndexHit,
+  type KnowledgeSearchIndexProfile,
+} from '../knowledge-search-index/knowledge-search-index.port.js';
+import type {
+  KnowledgeEvidenceRecheckInput,
+  KnowledgeRetrievalAuthorizationContext,
+  KnowledgeRetrievalDiagnostic,
+  KnowledgeRetrievalDiagnosticStage,
+  KnowledgeRetrievalMode,
+  KnowledgeRetrievalResponse,
+  KnowledgeRetrievalResult,
+  KnowledgeReranker,
+  KnowledgeSearchInput,
+} from '../knowledge-gateway/knowledge-gateway.port.js';
 import {
   KnowledgeRelationshipExpander,
   type KnowledgeRelationshipTargetRecord,
@@ -33,6 +46,8 @@ import {
   type KnowledgeRelationshipSeed,
 } from './domain/knowledge-relationship-ranking.js';
 import { accessibleKnowledgeBaseIds, isOrgUnitAncestor } from './knowledge-access.policy.js';
+import { routeKnowledgeQuery, type KnowledgeQueryRoute } from './domain/knowledge-query-router.js';
+import { KnowledgeStructuredQueryService } from './knowledge-structured-query.service.js';
 import {
   knowledgeFiltersFromDecision,
   knowledgeVersionResourcePolicyAllowed,
@@ -43,9 +58,13 @@ import {
 } from './knowledge-resource-authorization.js';
 
 const CANDIDATE_LIMIT = 40;
+// Recall still comes from the larger lexical/vector/relationship union. Limit
+// the local CPU cross-encoder to the three strongest fused candidates so the
+// interactive path stays within its measured P95 budget; GPU deployments can
+// raise this value after their own benchmark.
+const RERANK_CANDIDATE_LIMIT = 3;
 const RELATIONSHIP_SEED_LIMIT = 20;
 const RELATIONSHIP_CANDIDATE_LIMIT = 80;
-const RRF_K = 60;
 const MINIMUM_LEXICAL_SCORE = 0.08;
 const MINIMUM_FUZZY_CANDIDATE_SCORE = 0.05;
 const MINIMUM_SEMANTIC_SCORE = 0.35;
@@ -53,58 +72,33 @@ const MINIMUM_RERANK_SCORE = 0.15;
 const MINIMUM_RELATIONSHIP_SCORE = 0.08;
 const MINIMUM_RELATIONSHIP_SEED_LEXICAL_SCORE = 0.35;
 const MINIMUM_RELATIONSHIP_SEED_SEMANTIC_SCORE = 0.6;
-
-export type KnowledgeRetrievalMode = 'LEXICAL' | 'HYBRID';
-export type KnowledgeReranker = 'LEXICAL' | 'RRF' | 'CROSS_ENCODER';
-export type KnowledgeRetrievalDiagnosticStage = 'LEXICAL' | 'VECTOR' | 'RELATIONSHIP' | 'RERANK';
-
-export interface KnowledgeRetrievalDiagnostic {
-  readonly stage: KnowledgeRetrievalDiagnosticStage;
-  readonly status: 'APPLIED' | 'SKIPPED' | 'DEGRADED';
-  readonly code: string;
-  readonly candidateCount: number;
-}
-
-export interface KnowledgeRetrievalResult {
-  readonly chunkId: string;
-  readonly knowledgeBaseId: string;
-  readonly knowledgeBaseName: string;
-  readonly documentId: string;
-  readonly documentVersionId: string;
-  readonly documentVersion: number;
-  readonly title: string;
-  readonly headingPath: readonly string[];
-  readonly content: string;
-  readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
-  readonly classification: AiDataClassification;
-  readonly governanceHash: string;
-  readonly contentHash: string;
-  readonly updatedAt: Date;
-  readonly keywordScore: number;
-  readonly fuzzyScore: number;
-  readonly semanticScore: number | null;
-  readonly fusionScore: number;
-  readonly rerankerScore: number | null;
-  readonly relationshipScore: number;
-  readonly relationshipEvidence: readonly KnowledgeRelationshipEvidence[];
-  readonly finalScore: number;
-}
-
-export interface KnowledgeRetrievalResponse {
-  readonly accessibleKnowledgeBaseIds: readonly string[];
-  readonly mode: KnowledgeRetrievalMode;
-  readonly embeddingModel: string | null;
-  readonly reranker: KnowledgeReranker;
-  readonly rerankerModel: string | null;
-  readonly degradedReason: string | null;
-  readonly lexicalCandidateCount: number;
-  readonly vectorCandidateCount: number;
-  readonly relationshipCandidateCount: number;
-  readonly relationshipExpandedCount: number;
-  readonly semanticCoverage: number;
-  readonly diagnostics: readonly KnowledgeRetrievalDiagnostic[];
-  readonly items: readonly KnowledgeRetrievalResult[];
-}
+const MINIMUM_DIRECT_TERM_COVERAGE = 0.5;
+const MINIMUM_DIRECT_FUZZY_SCORE = 0.25;
+const ENGLISH_QUERY_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'are',
+  'at',
+  'does',
+  'for',
+  'how',
+  'in',
+  'is',
+  'it',
+  'of',
+  'on',
+  'or',
+  'the',
+  'to',
+  'what',
+  'when',
+  'where',
+  'which',
+  'who',
+  'why',
+  'with',
+]);
 
 interface CandidateRow {
   chunk_id: string;
@@ -140,6 +134,11 @@ interface CandidateState {
   readonly fusionScore: number;
   readonly relationshipScore: number;
   readonly relationshipEvidence: readonly KnowledgeRelationshipEvidence[];
+  readonly policy: KnowledgeBaseRetrievalPolicy;
+}
+
+interface KnowledgeBaseRetrievalPolicy extends KnowledgeRetrievalConfig {
+  readonly knowledgeBaseId: string;
 }
 
 interface LoadedCandidates {
@@ -151,77 +150,315 @@ interface LoadedCandidates {
   readonly relationshipExpandedCount: number;
   readonly relationshipDiagnostic: KnowledgeRetrievalDiagnostic;
   readonly relationshipDegradedReason: string | null;
+  readonly searchIndexDegradedReason: string | null;
+  readonly policies: readonly KnowledgeBaseRetrievalPolicy[];
 }
 
-export interface KnowledgeRetrievalAuthorizationContext {
-  readonly tenantRole: TenantRole;
-  readonly assignment?: AuthorizationAssignment | null;
-  readonly organization?: AuthorizationOrganizationContext;
-  readonly project?: AuthorizationProjectContext;
-  readonly dataLabels?: AuthorizationDataLabelContext;
-  readonly taskContext?: AuthorizationTaskContext;
+interface PrefetchedSearchIndexCandidates {
+  readonly hits: readonly KnowledgeSearchIndexHit[] | null;
+  readonly degradedReason: string | null;
 }
 
-interface SearchInput {
-  readonly tenantId: string;
-  readonly userId: string;
-  readonly knowledgeBaseIds: readonly string[];
-  readonly authorization?: KnowledgeRetrievalAuthorizationContext;
-  /**
-   * Admin retrieval-test only. IDs must also be present in knowledgeBaseIds.
-   * Agent Run callers deliberately never set this field.
-   */
-  readonly previewDraftKnowledgeBaseIds?: readonly string[];
-  /**
-   * Admin retrieval-test only. When present, retrieval is restricted to these
-   * exact READY candidate versions instead of following each document's
-   * published current-version pointer. Employee and Agent Run callers never
-   * receive this capability.
-   */
-  readonly previewKnowledgeVersionIds?: readonly string[];
-  readonly query: string;
-  readonly maximumOutboundClassification?: AiDataClassification;
-  readonly limit?: number;
+interface ResolvedEmbeddingIndexProfile {
+  readonly model: string;
+  readonly dimensions: number;
+  readonly indexVersionIds: readonly string[];
+  readonly searchIndexProfile: KnowledgeSearchIndexProfile;
 }
+
+const DEFAULT_RETRIEVAL_CONFIG: KnowledgeRetrievalConfig = {
+  mode: 'HYBRID',
+  topK: 8,
+  scoreThreshold: 0.08,
+  semanticWeight: 0.7,
+  keywordWeight: 0.3,
+  rerankEnabled: true,
+  relationshipRetrievalEnabled: true,
+  maxChunksPerDocument: 3,
+};
 
 @Injectable()
 export class KnowledgeRetrievalService {
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(KnowledgeAiRuntimeClient) private readonly semantic: KnowledgeAiRuntimeClient,
+    @Inject(KnowledgeSearchIndex) private readonly searchIndex: KnowledgeSearchIndex,
     @Inject(KnowledgeRelationshipExpander)
     private readonly relationships: KnowledgeRelationshipExpander,
     @Inject(AuthorizationDecisionService)
     private readonly authorization: AuthorizationDecisionService,
+    @Inject(KnowledgeStructuredQueryService)
+    private readonly structured: KnowledgeStructuredQueryService,
   ) {}
 
-  async search(input: SearchInput): Promise<KnowledgeRetrievalResponse> {
+  async resolveAccessibleKnowledgeBaseIds(input: {
+    readonly tenantId: string;
+    readonly userId: string;
+    readonly authorization?: KnowledgeRetrievalAuthorizationContext;
+  }): Promise<readonly string[]> {
+    const authorizationFilters = this.authorizeRetrieval(input);
+    return this.prisma.withTenant(input.tenantId, async (transaction) => {
+      const [user, employments, orgUnits, knowledgeBases] = await Promise.all([
+        transaction.user.findFirst({
+          where: { tenantId: input.tenantId, id: input.userId },
+          select: { status: true },
+        }),
+        transaction.employment.findMany({
+          where: { tenantId: input.tenantId, userId: input.userId, status: 'ACTIVE' },
+          select: { orgUnitId: true },
+        }),
+        transaction.orgUnit.findMany({
+          where: { tenantId: input.tenantId, status: 'ACTIVE' },
+          select: { id: true, parentId: true, organizationId: true },
+        }),
+        transaction.knowledgeBase.findMany({
+          where: { tenantId: input.tenantId, status: 'ACTIVE' },
+          include: { orgUnits: true, members: true },
+          orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+        }),
+      ]);
+      const parentByOrgUnitId = new Map(orgUnits.map((unit) => [unit.id, unit.parentId]));
+      const resolvedAuthorization = resolveOrganizationAuthorization(
+        authorizationFilters,
+        employments,
+        orgUnits,
+      );
+      const activeOrgUnitIds = new Set(orgUnits.map((orgUnit) => orgUnit.id));
+      const scopedKnowledgeBases = filterKnowledgeBasesByAssignmentOrganization(
+        knowledgeBases,
+        resolvedAuthorization.assignmentOrgUnitIds,
+        parentByOrgUnitId,
+      );
+      return accessibleKnowledgeBaseIds({
+        userActive: user?.status === 'ACTIVE',
+        memberUserId: input.userId,
+        memberOrgUnitIds: new Set(
+          employments
+            .map((employment) => employment.orgUnitId)
+            .filter((orgUnitId) => activeOrgUnitIds.has(orgUnitId)),
+        ),
+        parentByOrgUnitId,
+        knowledgeBases: scopedKnowledgeBases,
+      }).slice(0, 50);
+    });
+  }
+
+  async search(input: KnowledgeSearchInput): Promise<KnowledgeRetrievalResponse> {
     const authorizationFilters = this.authorizeRetrieval(input);
     const query = normalizeQuery(input.query);
+    const queryRoute = routeKnowledgeQuery(input.query);
     const outboundClassification = resolveOutboundClassification(input, query);
+    const embeddingProfile = await this.resolveEmbeddingProfile(input);
     let embedding: KnowledgeEmbeddingBatch | null = null;
     let degradedReason: string | null = null;
-    if (this.semantic.semanticEnabled && !isExternalKnowledgeAiApproved(outboundClassification)) {
+    if (queryRoute.primary === 'SQL') {
+      // Exact workbook analysis does not send table contents to a model provider.
+      // Authorized lexical candidates are sufficient to locate the structured artifact.
+      embedding = null;
+    } else if (
+      this.semantic.semanticEnabled &&
+      !isExternalKnowledgeAiApproved(outboundClassification)
+    ) {
       degradedReason = 'KNOWLEDGE_EMBEDDING_CLASSIFICATION_NOT_APPROVED';
+    } else if (this.semantic.semanticEnabled && embeddingProfile === null) {
+      degradedReason = 'KNOWLEDGE_EMBEDDING_INDEX_PROFILE_UNAVAILABLE';
     } else if (this.semantic.semanticEnabled) {
       try {
-        embedding = await this.semantic.embed(input.tenantId, [query], outboundClassification);
+        embedding = await this.semantic.embed(
+          input.tenantId,
+          [query],
+          outboundClassification,
+          undefined,
+          embeddingProfile ?? undefined,
+        );
       } catch (error) {
         degradedReason = safeSemanticErrorCode(error);
       }
     }
 
-    const loaded = await this.prisma.withTenant(input.tenantId, (transaction) =>
-      this.loadCandidates(transaction, input, query, embedding, authorizationFilters),
+    const prefetchedSearchIndex = await this.prefetchSearchIndex(
+      input,
+      query,
+      embedding,
+      embeddingProfile,
     );
-    return this.rankCandidates(
+    const loaded = await this.prisma.withTenant(input.tenantId, (transaction) =>
+      this.loadCandidates(
+        transaction,
+        input,
+        query,
+        embedding,
+        embeddingProfile,
+        authorizationFilters,
+        prefetchedSearchIndex,
+      ),
+    );
+    const ranked = await this.rankCandidates(
       input,
       query,
       loaded,
       embedding,
-      degradedReason ?? loaded.relationshipDegradedReason,
+      degradedReason ??
+        prefetchedSearchIndex.degradedReason ??
+        loaded.searchIndexDegradedReason ??
+        loaded.relationshipDegradedReason,
       outboundClassification,
     );
+    return this.applyQueryRoute(input, ranked);
+  }
+
+  async areChunksAccessible(input: KnowledgeEvidenceRecheckInput): Promise<boolean> {
+    return this.prisma.withTenant(input.tenantId, (transaction) =>
+      this.areChunksAccessibleInTransaction(transaction, input),
+    );
+  }
+
+  private async resolveEmbeddingProfile(
+    input: KnowledgeSearchInput,
+  ): Promise<ResolvedEmbeddingIndexProfile | null> {
+    const requestedIds = [...new Set(input.knowledgeBaseIds)].slice(0, 50);
+    if (requestedIds.length === 0) return null;
+    const indexes = await this.prisma.withTenant(input.tenantId, (transaction) =>
+      transaction.knowledgeBase.findMany({
+        where: { tenantId: input.tenantId, id: { in: requestedIds } },
+        select: {
+          activeEmbeddingIndexVersion: {
+            select: {
+              id: true,
+              provider: true,
+              model: true,
+              dimensions: true,
+              distance: true,
+              collectionName: true,
+            },
+          },
+        },
+      }),
+    );
+    const active = indexes.flatMap((item) =>
+      item.activeEmbeddingIndexVersion == null ? [] : [item.activeEmbeddingIndexVersion],
+    );
+    if (active.length === 0) return null;
+    const first = active[0];
+    if (first === undefined || first.distance !== 'COSINE') return null;
+    const compatible = active.every(
+      (item) =>
+        item.model === first.model &&
+        item.dimensions === first.dimensions &&
+        item.distance === first.distance &&
+        item.collectionName === first.collectionName,
+    );
+    if (!compatible) return null;
+    return {
+      model: first.model,
+      dimensions: first.dimensions,
+      indexVersionIds: active.map((item) => item.id),
+      searchIndexProfile: {
+        indexVersionId: first.id,
+        ...(active.every((item) => item.provider === 'legacy_runtime')
+          ? {}
+          : { compatibleIndexVersionIds: active.map((item) => item.id) }),
+        collectionName: first.collectionName,
+        dimensions: first.dimensions,
+        distance: 'COSINE',
+      },
+    };
+  }
+
+  private async applyQueryRoute(
+    input: KnowledgeSearchInput,
+    response: KnowledgeRetrievalResponse,
+  ): Promise<KnowledgeRetrievalResponse> {
+    const queryRoute = routeKnowledgeQuery(input.query);
+    const routerDiagnostic: KnowledgeRetrievalDiagnostic = {
+      stage: 'ROUTER',
+      status: 'APPLIED',
+      code: queryRoute.reasonCode,
+      candidateCount: response.items.length,
+    };
+    if (queryRoute.primary !== 'SQL') {
+      return {
+        ...response,
+        queryRoute,
+        structuredQuerySql: null,
+        diagnostics: [...response.diagnostics, routerDiagnostic],
+      };
+    }
+    try {
+      const structured = await this.structured.tryQuery({
+        tenantId: input.tenantId,
+        query: input.query,
+        candidates: response.items.map((item) => ({
+          documentVersionId: item.documentVersionId,
+          chunkId: item.chunkId,
+        })),
+      });
+      if (structured === null) {
+        return {
+          ...response,
+          queryRoute,
+          structuredQuerySql: null,
+          diagnostics: [
+            ...response.diagnostics,
+            routerDiagnostic,
+            {
+              stage: 'SQL',
+              status: 'SKIPPED',
+              code: 'KNOWLEDGE_SQL_NO_MATCHING_WORKBOOK_PLAN',
+              candidateCount: 0,
+            },
+          ],
+        };
+      }
+      const source = response.items.find(
+        (item) =>
+          item.documentVersionId === structured.documentVersionId &&
+          item.chunkId === structured.chunkId,
+      );
+      if (source === undefined) return response;
+      return {
+        ...response,
+        queryRoute,
+        structuredQuerySql: structured.sql,
+        diagnostics: [
+          ...response.diagnostics,
+          routerDiagnostic,
+          {
+            stage: 'SQL',
+            status: 'APPLIED',
+            code: 'KNOWLEDGE_SQL_WORKBOOK_QUERY_APPLIED',
+            candidateCount: 1,
+          },
+        ],
+        items: [
+          {
+            ...source,
+            headingPath: [`工作表：${structured.sheetName}`],
+            sheetName: structured.sheetName,
+            content: structured.content,
+            finalScore: 1,
+          },
+          ...response.items.filter((item) => item.chunkId !== source.chunkId),
+        ],
+      };
+    } catch {
+      return {
+        ...response,
+        queryRoute,
+        structuredQuerySql: null,
+        degradedReason: response.degradedReason ?? 'KNOWLEDGE_SQL_CHANNEL_UNAVAILABLE',
+        diagnostics: [
+          ...response.diagnostics,
+          routerDiagnostic,
+          {
+            stage: 'SQL',
+            status: 'DEGRADED',
+            code: 'KNOWLEDGE_SQL_CHANNEL_UNAVAILABLE',
+            candidateCount: 0,
+          },
+        ],
+      };
+    }
   }
 
   /**
@@ -230,30 +467,31 @@ export class KnowledgeRetrievalService {
    */
   async searchInTransaction(
     transaction: Prisma.TransactionClient,
-    input: SearchInput,
+    input: KnowledgeSearchInput,
   ): Promise<KnowledgeRetrievalResponse> {
     const authorizationFilters = this.authorizeRetrieval(input);
     const query = normalizeQuery(input.query);
-    const loaded = await this.loadCandidates(transaction, input, query, null, authorizationFilters);
-    return this.rankWithoutRemote(input, loaded, null, loaded.relationshipDegradedReason);
+    const loaded = await this.loadCandidates(
+      transaction,
+      input,
+      query,
+      null,
+      null,
+      authorizationFilters,
+      { hits: null, degradedReason: null },
+    );
+    return this.rankWithoutRemote(
+      input,
+      loaded,
+      null,
+      loaded.searchIndexDegradedReason ?? loaded.relationshipDegradedReason,
+    );
   }
 
   /** Re-checks source lineage and ACLs immediately before runtime dispatch. */
   async areChunksAccessibleInTransaction(
     transaction: Prisma.TransactionClient,
-    input: {
-      readonly tenantId: string;
-      readonly userId: string;
-      readonly knowledgeBaseIds: readonly string[];
-      readonly chunks: readonly {
-        readonly chunkId: string;
-        readonly documentVersionId: string;
-        readonly classification: AiDataClassification;
-        readonly governanceHash: string;
-        readonly contentHash: string;
-      }[];
-      readonly authorization?: KnowledgeRetrievalAuthorizationContext;
-    },
+    input: KnowledgeEvidenceRecheckInput,
   ): Promise<boolean> {
     const authorizationFilters = this.authorizeRetrieval(input);
     const requestedIds = [...new Set(input.knowledgeBaseIds)].slice(0, 50);
@@ -277,7 +515,7 @@ export class KnowledgeRetrievalService {
       }),
       transaction.knowledgeBase.findMany({
         where: { tenantId: input.tenantId, id: { in: requestedIds }, status: 'ACTIVE' },
-        include: { orgUnits: true },
+        include: { orgUnits: true, members: true },
       }),
     ]);
     const resolvedAuthorization = resolveOrganizationAuthorization(
@@ -293,6 +531,7 @@ export class KnowledgeRetrievalService {
     );
     const accessibleIds = accessibleKnowledgeBaseIds({
       userActive: user?.status === 'ACTIVE',
+      memberUserId: input.userId,
       memberOrgUnitIds: new Set(
         employments
           .map((employment) => employment.orgUnitId)
@@ -376,15 +615,18 @@ export class KnowledgeRetrievalService {
     return knowledgeFiltersFromDecision(
       decision,
       context?.assignment?.roleTemplateId === undefined ? [] : [context.assignment.roleTemplateId],
+      input.userId,
     );
   }
 
   private async loadCandidates(
     transaction: Prisma.TransactionClient,
-    input: SearchInput,
+    input: KnowledgeSearchInput,
     query: string,
     embedding: KnowledgeEmbeddingBatch | null,
+    embeddingProfile: ResolvedEmbeddingIndexProfile | null,
     authorizationFilters: KnowledgeResourceAuthorizationFilters,
+    prefetchedSearchIndex: PrefetchedSearchIndexCandidates,
   ): Promise<LoadedCandidates> {
     const requestedIds = [...new Set(input.knowledgeBaseIds)].slice(0, 50);
     const requestedIdSet = new Set(requestedIds);
@@ -406,6 +648,8 @@ export class KnowledgeRetrievalService {
           0,
         ),
         relationshipDegradedReason: null,
+        searchIndexDegradedReason: null,
+        policies: [],
       };
     }
 
@@ -433,7 +677,7 @@ export class KnowledgeRetrievalService {
               : [{ status: 'DRAFT' as const, id: { in: previewDraftIds } }]),
           ],
         },
-        include: { orgUnits: true },
+        include: { orgUnits: true, members: true },
       }),
     ]);
     const resolvedAuthorization = resolveOrganizationAuthorization(
@@ -455,6 +699,7 @@ export class KnowledgeRetrievalService {
     );
     const accessibleIds = accessibleKnowledgeBaseIds({
       userActive: user?.status === 'ACTIVE',
+      memberUserId: input.userId,
       memberOrgUnitIds,
       parentByOrgUnitId,
       knowledgeBases: scopedKnowledgeBases,
@@ -473,8 +718,18 @@ export class KnowledgeRetrievalService {
           0,
         ),
         relationshipDegradedReason: null,
+        searchIndexDegradedReason: null,
+        policies: [],
       };
     }
+
+    const accessibleIdSet = new Set(accessibleIds);
+    const policies = scopedKnowledgeBases
+      .filter((knowledgeBase) => accessibleIdSet.has(knowledgeBase.id))
+      .map(resolveKnowledgeBaseRetrievalPolicy);
+    const policyByKnowledgeBaseId = new Map(
+      policies.map((policy) => [policy.knowledgeBaseId, policy]),
+    );
 
     const terms = queryTerms(query);
     const accessibleKnowledgeBaseIdSql = Prisma.join(
@@ -563,8 +818,85 @@ export class KnowledgeRetrievalService {
     `);
 
     let vectorRows: VectorCandidateRow[] = [];
+    let searchIndexDegradedReason = prefetchedSearchIndex.degradedReason;
+    let usePostgresVector =
+      this.searchIndex.driver === 'postgres' ||
+      (this.searchIndex.driver === 'qdrant' && prefetchedSearchIndex.hits === null);
     const queryVector = embedding?.vectors[0];
-    if (embedding !== null && queryVector !== undefined) {
+    if (
+      embedding !== null &&
+      embeddingProfile !== null &&
+      queryVector !== undefined &&
+      this.searchIndex.driver === 'qdrant'
+    ) {
+      try {
+        const hits = prefetchedSearchIndex.hits ?? [];
+        if (hits.length > 0) {
+          const maximumScore = Math.max(...hits.map((hit) => hit.score), Number.EPSILON);
+          const scoredChunks = Prisma.join(
+            hits.map(
+              (hit, index) =>
+                Prisma.sql`(${hit.chunkId}::uuid, ${hit.score / maximumScore}::double precision, ${index + 1}::int)`,
+            ),
+          );
+          vectorRows = await transaction.$queryRaw<VectorCandidateRow[]>(Prisma.sql`
+            SELECT
+              chunk."id" AS chunk_id,
+              chunk."knowledge_base_id" AS knowledge_base_id,
+              knowledge_base."name" AS knowledge_base_name,
+              chunk."document_id" AS document_id,
+              chunk."document_version_id" AS document_version_id,
+              version."version_number" AS document_version,
+              document."title" AS title,
+              chunk."heading_path" AS heading_path,
+              chunk."content" AS content,
+              chunk."content_hash" AS content_hash,
+              version."source_type"::text AS source_type,
+              version."classification"::text AS knowledge_classification,
+              version."governance_hash" AS governance_hash,
+              coalesce(version."published_at", version."created_at") AS updated_at,
+              chunk."metadata" AS metadata,
+              ${versionPolicySql} AS resource_policy,
+              0.0::double precision AS keyword_score,
+              0.0::double precision AS fuzzy_score,
+              scored.semantic_score
+            FROM (VALUES ${scoredChunks}) AS scored(chunk_id, semantic_score, search_rank)
+            JOIN public."knowledge_chunks" AS chunk
+              ON chunk."tenant_id" = ${input.tenantId}::uuid
+             AND chunk."id" = scored.chunk_id
+            JOIN public."knowledge_bases" AS knowledge_base
+              ON knowledge_base."tenant_id" = chunk."tenant_id"
+             AND knowledge_base."id" = chunk."knowledge_base_id"
+             AND ${knowledgeBaseStatusSql}
+            JOIN public."knowledge_documents" AS document
+              ON document."tenant_id" = chunk."tenant_id"
+             AND document."knowledge_base_id" = chunk."knowledge_base_id"
+             AND document."id" = chunk."document_id"
+             AND document."status" = 'READY'
+             AND ${documentVersionScopeSql}
+            JOIN public."knowledge_document_versions" AS version
+              ON version."tenant_id" = chunk."tenant_id"
+             AND version."knowledge_base_id" = chunk."knowledge_base_id"
+             AND version."document_id" = chunk."document_id"
+             AND version."id" = chunk."document_version_id"
+             AND version."status" = 'READY'
+            WHERE chunk."knowledge_base_id" IN (${accessibleKnowledgeBaseIdSql})
+              AND ${resourceFilterSql}
+            ORDER BY scored.search_rank, chunk."id"
+            LIMIT ${CANDIDATE_LIMIT}
+          `);
+        }
+      } catch {
+        searchIndexDegradedReason = 'KNOWLEDGE_QDRANT_UNAVAILABLE';
+        usePostgresVector = true;
+      }
+    }
+    if (
+      embedding !== null &&
+      embeddingProfile !== null &&
+      queryVector !== undefined &&
+      usePostgresVector
+    ) {
       if (this.semantic.vectorSearchMode === 'exact') {
         // Exact cosine is the correctness baseline for the initial tenant scale.
         // Disabling ANN avoids cross-tenant recall interference from a shared HNSW graph.
@@ -575,6 +907,9 @@ export class KnowledgeRetrievalService {
         await transaction.$executeRawUnsafe('SET LOCAL hnsw.ef_search = 100');
       }
       const literal = vectorLiteral(queryVector);
+      const embeddingIndexVersionIdSql = Prisma.join(
+        embeddingProfile.indexVersionIds.map((id) => Prisma.sql`${id}::uuid`),
+      );
       vectorRows = await transaction.$queryRaw<VectorCandidateRow[]>(Prisma.sql`
         SELECT
           chunk."id" AS chunk_id,
@@ -617,7 +952,9 @@ export class KnowledgeRetrievalService {
          AND version."id" = chunk."document_version_id"
          AND version."status" = 'READY'
         WHERE embedding."tenant_id" = ${input.tenantId}::uuid
+          AND embedding."embedding_index_version_id" IN (${embeddingIndexVersionIdSql})
           AND embedding."embedding_model" = ${embedding.model}
+          AND embedding."embedding_dimension" = ${embeddingProfile.dimensions}
           AND chunk."knowledge_base_id" IN (${accessibleKnowledgeBaseIdSql})
           AND ${resourceFilterSql}
         ORDER BY embedding."embedding" <=> ${literal}::vector, chunk."id" ASC
@@ -628,20 +965,55 @@ export class KnowledgeRetrievalService {
     const authorizedLexicalRows = lexicalRows.filter((row) =>
       knowledgeVersionResourcePolicyAllowed(row.resource_policy, resolvedAuthorization.filters),
     );
-    const authorizedVectorRows = vectorRows.filter((row) =>
-      knowledgeVersionResourcePolicyAllowed(row.resource_policy, resolvedAuthorization.filters),
+    const authorizedVectorRows = vectorRows.filter(
+      (row) =>
+        knowledgeVersionResourcePolicyAllowed(row.resource_policy, resolvedAuthorization.filters) &&
+        retrievalPolicy(policyByKnowledgeBaseId, row.knowledge_base_id).mode !== 'FULL_TEXT',
     );
+    const knowledgeBasesWithVectorCandidates = new Set(
+      authorizedVectorRows.map((row) => row.knowledge_base_id),
+    );
+    const effectiveLexicalRows = authorizedLexicalRows.filter((row) => {
+      const policy = retrievalPolicy(policyByKnowledgeBaseId, row.knowledge_base_id);
+      return (
+        policy.mode !== 'VECTOR' || !knowledgeBasesWithVectorCandidates.has(row.knowledge_base_id)
+      );
+    });
     const baseCandidates = mergeCandidates(
-      authorizedLexicalRows,
+      effectiveLexicalRows,
       authorizedVectorRows,
       terms.length,
+      policyByKnowledgeBaseId,
     );
     const seeds = relationshipSeeds(baseCandidates);
+
+    const relationshipKnowledgeBaseIds = accessibleIds.filter(
+      (knowledgeBaseId) =>
+        retrievalPolicy(policyByKnowledgeBaseId, knowledgeBaseId).relationshipRetrievalEnabled,
+    );
+    if (relationshipKnowledgeBaseIds.length === 0) {
+      return {
+        accessibleKnowledgeBaseIds: accessibleIds,
+        candidates: baseCandidates,
+        lexicalCandidateCount: effectiveLexicalRows.length,
+        vectorCandidateCount: authorizedVectorRows.length,
+        relationshipCandidateCount: 0,
+        relationshipExpandedCount: 0,
+        relationshipDiagnostic: relationshipDiagnostic(
+          'SKIPPED',
+          'KNOWLEDGE_RELATIONSHIP_RETRIEVAL_DISABLED',
+          0,
+        ),
+        relationshipDegradedReason: null,
+        searchIndexDegradedReason,
+        policies,
+      };
+    }
 
     try {
       const relationshipTargets = await this.relationships.expand(transaction, {
         tenantId: input.tenantId,
-        accessibleKnowledgeBaseIds: accessibleIds,
+        accessibleKnowledgeBaseIds: relationshipKnowledgeBaseIds,
         previewDraftKnowledgeBaseIds: previewDraftIds,
         previewKnowledgeVersionIds: previewVersionIds,
         seedChunkIds: seeds.map((seed) => seed.chunkId),
@@ -655,13 +1027,17 @@ export class KnowledgeRetrievalService {
       const rankedTargets = rankKnowledgeRelationshipTargets({
         seeds: augmentRelationshipSeeds(seeds, authorizedRelationshipTargets),
         targets: authorizedRelationshipTargets,
-        accessibleKnowledgeBaseIds: accessibleIds,
+        accessibleKnowledgeBaseIds: relationshipKnowledgeBaseIds,
       });
       const baseIds = new Set(baseCandidates.map((candidate) => candidate.row.chunk_id));
       return {
         accessibleKnowledgeBaseIds: accessibleIds,
-        candidates: mergeRelationshipCandidates(baseCandidates, rankedTargets),
-        lexicalCandidateCount: authorizedLexicalRows.length,
+        candidates: mergeRelationshipCandidates(
+          baseCandidates,
+          rankedTargets,
+          policyByKnowledgeBaseId,
+        ),
+        lexicalCandidateCount: effectiveLexicalRows.length,
         vectorCandidateCount: authorizedVectorRows.length,
         relationshipCandidateCount: new Set(
           authorizedRelationshipTargets.map((target) => target.chunkId),
@@ -684,12 +1060,14 @@ export class KnowledgeRetrievalService {
                 rankedTargets.length,
               ),
         relationshipDegradedReason: null,
+        searchIndexDegradedReason,
+        policies,
       };
     } catch {
       return {
         accessibleKnowledgeBaseIds: accessibleIds,
         candidates: baseCandidates,
-        lexicalCandidateCount: authorizedLexicalRows.length,
+        lexicalCandidateCount: effectiveLexicalRows.length,
         vectorCandidateCount: authorizedVectorRows.length,
         relationshipCandidateCount: 0,
         relationshipExpandedCount: 0,
@@ -699,12 +1077,53 @@ export class KnowledgeRetrievalService {
           0,
         ),
         relationshipDegradedReason: 'KNOWLEDGE_RELATIONSHIP_GRAPH_UNAVAILABLE',
+        searchIndexDegradedReason,
+        policies,
       };
     }
   }
 
+  /**
+   * External search must finish before opening the tenant transaction. Holding an
+   * interactive Prisma transaction across an HTTP call makes database availability
+   * depend on Qdrant latency and can expire the transaction before ACL verification.
+   * PostgreSQL still performs the authoritative tenant, publication and resource-policy
+   * checks for every returned chunk id.
+   */
+  private async prefetchSearchIndex(
+    input: KnowledgeSearchInput,
+    query: string,
+    embedding: KnowledgeEmbeddingBatch | null,
+    embeddingProfile: ResolvedEmbeddingIndexProfile | null,
+  ): Promise<PrefetchedSearchIndexCandidates> {
+    const vector = embedding?.vectors[0];
+    if (this.searchIndex.driver !== 'qdrant' || vector === undefined || embeddingProfile === null) {
+      return { hits: null, degradedReason: null };
+    }
+    try {
+      const knowledgeBaseIds = [...new Set(input.knowledgeBaseIds)].slice(0, 50);
+      if (knowledgeBaseIds.length === 0) return { hits: [], degradedReason: null };
+      const previewDocumentVersionIds = [...new Set(input.previewKnowledgeVersionIds ?? [])].slice(
+        0,
+        20,
+      );
+      const hits = await this.searchIndex.query({
+        profile: embeddingProfile.searchIndexProfile,
+        tenantId: input.tenantId,
+        knowledgeBaseIds,
+        ...(previewDocumentVersionIds.length === 0 ? {} : { previewDocumentVersionIds }),
+        query,
+        vector,
+        limit: CANDIDATE_LIMIT,
+      });
+      return { hits, degradedReason: null };
+    } catch {
+      return { hits: null, degradedReason: 'KNOWLEDGE_QDRANT_UNAVAILABLE' };
+    }
+  }
+
   private async rankCandidates(
-    input: SearchInput,
+    input: KnowledgeSearchInput,
     query: string,
     loaded: LoadedCandidates,
     embedding: KnowledgeEmbeddingBatch | null,
@@ -723,7 +1142,9 @@ export class KnowledgeRetrievalService {
         null,
       );
     }
-    const eligible = eligibleHybridCandidates(loaded.candidates);
+    const eligible = eligibleHybridCandidates(loaded.candidates)
+      .filter((candidate) => candidate.policy.rerankEnabled)
+      .slice(0, RERANK_CANDIDATE_LIMIT);
     if (!this.semantic.rerankEnabled || eligible.length === 0) {
       return this.rankWithoutRemote(input, loaded, embedding, degradedReason);
     }
@@ -753,6 +1174,14 @@ export class KnowledgeRetrievalService {
         Math.min(20, eligible.length),
         rerankClassification,
       );
+      if (reranked.results.every((item) => item.relevanceScore < MINIMUM_RERANK_SCORE)) {
+        return this.rankWithoutRemote(
+          input,
+          loaded,
+          embedding,
+          'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK',
+        );
+      }
       const scoreById = new Map(reranked.results.map((item) => [item.id, item.relevanceScore]));
       const crossEncoderResponse = buildResponse(
         input,
@@ -778,7 +1207,7 @@ export class KnowledgeRetrievalService {
   }
 
   private rankWithoutRemote(
-    input: SearchInput,
+    input: KnowledgeSearchInput,
     loaded: LoadedCandidates,
     embedding: KnowledgeEmbeddingBatch | null,
     degradedReason: string | null,
@@ -787,7 +1216,7 @@ export class KnowledgeRetrievalService {
       input,
       loaded,
       embedding,
-      embedding === null ? 'LEXICAL' : 'RRF',
+      embedding === null ? 'LEXICAL' : 'WEIGHTED_SCORE',
       null,
       degradedReason,
       null,
@@ -887,6 +1316,7 @@ function mergeCandidates(
   lexicalRows: readonly CandidateRow[],
   vectorRows: readonly VectorCandidateRow[],
   termCount: number,
+  policyByKnowledgeBaseId: ReadonlyMap<string, KnowledgeBaseRetrievalPolicy>,
 ): CandidateState[] {
   const byId = new Map<
     string,
@@ -896,16 +1326,18 @@ function mergeCandidates(
       vectorRank: number | null;
       lexicalScore: number;
       semanticScore: number | null;
+      policy: KnowledgeBaseRetrievalPolicy;
     }
   >();
   lexicalRows.forEach((row, index) => {
-    const normalizedKeyword = Math.min(1, row.keyword_score / Math.max(1, termCount * 6));
+    const normalizedKeyword = Math.min(1, row.keyword_score / Math.max(1, Math.min(termCount, 6)));
     byId.set(row.chunk_id, {
       row,
       lexicalRank: index + 1,
       vectorRank: null,
       lexicalScore: normalizedKeyword * 0.65 + row.fuzzy_score * 0.35,
       semanticScore: null,
+      policy: retrievalPolicy(policyByKnowledgeBaseId, row.knowledge_base_id),
     });
   });
   vectorRows.forEach((row, index) => {
@@ -917,6 +1349,7 @@ function mergeCandidates(
         vectorRank: index + 1,
         lexicalScore: 0,
         semanticScore: clampScore(row.semantic_score),
+        policy: retrievalPolicy(policyByKnowledgeBaseId, row.knowledge_base_id),
       });
     } else {
       existing.vectorRank = index + 1;
@@ -925,7 +1358,11 @@ function mergeCandidates(
   });
   return [...byId.values()].map((candidate) => ({
     ...candidate,
-    fusionScore: normalizedRrf(candidate.lexicalRank, candidate.vectorRank),
+    fusionScore: weightedFusionScore(
+      candidate.lexicalScore,
+      candidate.semanticScore,
+      candidate.policy,
+    ),
     relationshipScore: 0,
     relationshipEvidence: [],
   }));
@@ -977,6 +1414,7 @@ function augmentRelationshipSeeds(
 function mergeRelationshipCandidates(
   baseCandidates: readonly CandidateState[],
   relationshipTargets: ReturnType<typeof rankKnowledgeRelationshipTargets>,
+  policyByKnowledgeBaseId: ReadonlyMap<string, KnowledgeBaseRetrievalPolicy>,
 ): CandidateState[] {
   const candidates = new Map(
     baseCandidates.map((candidate) => [candidate.row.chunk_id, candidate]),
@@ -1019,13 +1457,14 @@ function mergeRelationshipCandidates(
       fusionScore: 0,
       relationshipScore: relationship.relationshipScore,
       relationshipEvidence: relationship.evidence,
+      policy: retrievalPolicy(policyByKnowledgeBaseId, relationship.target.knowledgeBaseId),
     });
   }
   return [...candidates.values()];
 }
 
 function buildResponse(
-  input: SearchInput,
+  input: KnowledgeSearchInput,
   loaded: LoadedCandidates,
   embedding: KnowledgeEmbeddingBatch | null,
   reranker: KnowledgeReranker,
@@ -1033,31 +1472,70 @@ function buildResponse(
   degradedReason: string | null,
   rerankerScores: ReadonlyMap<string, number> | null,
 ): KnowledgeRetrievalResponse {
-  const maximumPerDocument = 3;
   const documentCounts = new Map<string, number>();
-  const limit = Math.min(20, Math.max(1, input.limit ?? 8));
+  const configuredTopK =
+    loaded.policies.length === 0
+      ? DEFAULT_RETRIEVAL_CONFIG.topK
+      : loaded.policies.reduce((maximum, policy) => Math.max(maximum, policy.topK), 1);
+  const limit = Math.min(20, Math.max(1, input.limit ?? configuredTopK));
   const hybrid = embedding !== null && loaded.vectorCandidateCount > 0;
+  const evidenceTerms = queryTerms(input.query);
   const items = loaded.candidates
     .map((candidate) => {
       const rerankerScore = rerankerScores?.get(candidate.row.chunk_id) ?? null;
-      const baseScore = hybrid ? candidate.fusionScore : candidate.lexicalScore;
-      const relationshipWeight = hybrid ? 0.24 : 0.3;
+      const usesWeightedHybridFusion = hybrid && candidate.policy.mode === 'HYBRID';
+      const candidateHasSemanticScore = candidate.semanticScore !== null;
+      const baseScore = usesWeightedHybridFusion
+        ? candidate.fusionScore
+        : candidateHasSemanticScore
+          ? candidate.fusionScore
+          : candidate.lexicalScore;
+      const relationshipWeight = usesWeightedHybridFusion || candidateHasSemanticScore ? 0.24 : 0.3;
       const relationshipEnhancedScore =
         1 -
         (1 - clampUnitScore(baseScore)) * (1 - candidate.relationshipScore * relationshipWeight);
       const finalScore =
         rerankerScore === null
           ? relationshipEnhancedScore
-          : rerankerScore * 0.75 + candidate.fusionScore * 0.15 + candidate.relationshipScore * 0.1;
-      return { candidate, rerankerScore, finalScore };
+          : Math.max(
+              rerankerScore * 0.65 + relationshipEnhancedScore * 0.35,
+              // A compact CPU reranker can under-score tables, identifiers and formulas.
+              // Preserve strong hybrid evidence as a floor so reranking refines recall
+              // instead of deleting an exact lexical/vector match.
+              relationshipEnhancedScore * 0.9,
+            );
+      const directEvidence = directEvidenceStrength(candidate, evidenceTerms);
+      return { candidate, rerankerScore, relationshipEnhancedScore, directEvidence, finalScore };
     })
-    .filter(({ candidate, rerankerScore }) =>
-      rerankerScores === null
-        ? hybrid
-          ? isEligibleHybrid(candidate)
-          : candidate.lexicalScore >= MINIMUM_LEXICAL_SCORE ||
-            candidate.relationshipScore >= MINIMUM_RELATIONSHIP_SCORE
-        : rerankerScore !== null && rerankerScore >= MINIMUM_RERANK_SCORE,
+    .filter(
+      ({ candidate, rerankerScore, relationshipEnhancedScore, directEvidence, finalScore }) => {
+        const baseEligible =
+          candidate.semanticScore !== null
+            ? isEligibleHybrid(candidate)
+            : candidate.lexicalScore >= MINIMUM_LEXICAL_SCORE ||
+              candidate.relationshipScore >= MINIMUM_RELATIONSHIP_SCORE;
+        const rerankEligible =
+          rerankerScore === null ||
+          rerankerScore >= MINIMUM_RERANK_SCORE ||
+          relationshipEnhancedScore >= 0.5;
+        const hasRelationshipEvidence =
+          candidate.relationshipScore >= MINIMUM_RELATIONSHIP_SCORE &&
+          candidate.relationshipEvidence.some((evidence) => evidence.sourceSeedScore > 0);
+        const hasExactChineseTerm =
+          /\p{Script=Han}/u.test(input.query) && candidate.row.keyword_score > 0;
+        const evidenceEligible =
+          (rerankerScore !== null && rerankerScore >= MINIMUM_RERANK_SCORE) ||
+          directEvidence.termCoverage >= MINIMUM_DIRECT_TERM_COVERAGE ||
+          directEvidence.fuzzyScore >= MINIMUM_DIRECT_FUZZY_SCORE ||
+          hasRelationshipEvidence ||
+          hasExactChineseTerm;
+        return (
+          baseEligible &&
+          rerankEligible &&
+          evidenceEligible &&
+          finalScore >= candidate.policy.scoreThreshold
+        );
+      },
     )
     .sort(
       (left, right) =>
@@ -1066,35 +1544,41 @@ function buildResponse(
     )
     .filter(({ candidate }) => {
       const count = documentCounts.get(candidate.row.document_id) ?? 0;
-      if (count >= maximumPerDocument) return false;
+      if (count >= candidate.policy.maxChunksPerDocument) return false;
       documentCounts.set(candidate.row.document_id, count + 1);
       return true;
     })
     .slice(0, limit)
-    .map(({ candidate, rerankerScore, finalScore }) => ({
-      chunkId: candidate.row.chunk_id,
-      knowledgeBaseId: candidate.row.knowledge_base_id,
-      knowledgeBaseName: candidate.row.knowledge_base_name,
-      documentId: candidate.row.document_id,
-      documentVersionId: candidate.row.document_version_id,
-      documentVersion: candidate.row.document_version,
-      title: candidate.row.title,
-      headingPath: candidate.row.heading_path,
-      content: candidate.row.content,
-      sourceType: candidate.row.source_type,
-      classification: knowledgeClassificationToAi(candidate.row.knowledge_classification),
-      governanceHash: candidate.row.governance_hash,
-      contentHash: candidate.row.content_hash,
-      updatedAt: candidate.row.updated_at,
-      keywordScore: candidate.row.keyword_score,
-      fuzzyScore: candidate.row.fuzzy_score,
-      semanticScore: candidate.semanticScore,
-      fusionScore: candidate.fusionScore,
-      rerankerScore,
-      relationshipScore: candidate.relationshipScore,
-      relationshipEvidence: candidate.relationshipEvidence,
-      finalScore,
-    }));
+    .map(({ candidate, rerankerScore, finalScore }) => {
+      const locator = readRetrievalSourceLocator(candidate.row.metadata);
+      return {
+        chunkId: candidate.row.chunk_id,
+        knowledgeBaseId: candidate.row.knowledge_base_id,
+        knowledgeBaseName: candidate.row.knowledge_base_name,
+        documentId: candidate.row.document_id,
+        documentVersionId: candidate.row.document_version_id,
+        documentVersion: candidate.row.document_version,
+        title: candidate.row.title,
+        headingPath: candidate.row.heading_path,
+        pageStart: locator.pageStart,
+        pageEnd: locator.pageEnd,
+        sheetName: locator.sheetName,
+        content: candidate.row.content,
+        sourceType: candidate.row.source_type,
+        classification: knowledgeClassificationToAi(candidate.row.knowledge_classification),
+        governanceHash: candidate.row.governance_hash,
+        contentHash: candidate.row.content_hash,
+        updatedAt: candidate.row.updated_at,
+        keywordScore: candidate.row.keyword_score,
+        fuzzyScore: candidate.row.fuzzy_score,
+        semanticScore: candidate.semanticScore,
+        fusionScore: candidate.fusionScore,
+        rerankerScore,
+        relationshipScore: candidate.relationshipScore,
+        relationshipEvidence: candidate.relationshipEvidence,
+        finalScore,
+      };
+    });
   return {
     accessibleKnowledgeBaseIds: loaded.accessibleKnowledgeBaseIds,
     mode: hybrid ? 'HYBRID' : 'LEXICAL',
@@ -1117,7 +1601,7 @@ function buildResponse(
 }
 
 function resolveOutboundClassification(
-  input: SearchInput,
+  input: KnowledgeSearchInput,
   normalizedQuery: string,
 ): AiDataClassification {
   return maximumAiDataClassification(
@@ -1159,11 +1643,102 @@ function baseCandidateScore(candidate: CandidateState): number {
   );
 }
 
-function normalizedRrf(lexicalRank: number | null, vectorRank: number | null): number {
-  const raw =
-    (lexicalRank === null ? 0 : 1 / (RRF_K + lexicalRank)) +
-    (vectorRank === null ? 0 : 1 / (RRF_K + vectorRank));
-  return raw / (2 / (RRF_K + 1));
+function weightedFusionScore(
+  lexicalScore: number,
+  semanticScore: number | null,
+  policy: KnowledgeBaseRetrievalPolicy,
+): number {
+  if (policy.mode === 'FULL_TEXT') return clampUnitScore(lexicalScore);
+  if (policy.mode === 'VECTOR') {
+    return clampUnitScore(semanticScore ?? lexicalScore);
+  }
+  return clampUnitScore(
+    lexicalScore * policy.keywordWeight + (semanticScore ?? 0) * policy.semanticWeight,
+  );
+}
+
+function retrievalPolicy(
+  policies: ReadonlyMap<string, KnowledgeBaseRetrievalPolicy>,
+  knowledgeBaseId: string,
+): KnowledgeBaseRetrievalPolicy {
+  return policies.get(knowledgeBaseId) ?? { knowledgeBaseId, ...DEFAULT_RETRIEVAL_CONFIG };
+}
+
+function resolveKnowledgeBaseRetrievalPolicy(knowledgeBase: {
+  readonly id: string;
+  readonly retrievalMode?: string;
+  readonly retrievalTopK?: number;
+  readonly retrievalScoreThreshold?: Prisma.Decimal | number;
+  readonly retrievalSemanticWeight?: Prisma.Decimal | number;
+  readonly retrievalKeywordWeight?: Prisma.Decimal | number;
+  readonly retrievalRerankEnabled?: boolean;
+  readonly relationshipRetrievalEnabled?: boolean;
+  readonly maxChunksPerDocument?: number;
+}): KnowledgeBaseRetrievalPolicy {
+  const mode = isConfiguredRetrievalMode(knowledgeBase.retrievalMode)
+    ? knowledgeBase.retrievalMode
+    : DEFAULT_RETRIEVAL_CONFIG.mode;
+  return {
+    knowledgeBaseId: knowledgeBase.id,
+    mode,
+    topK: boundedInteger(knowledgeBase.retrievalTopK, 1, 20, DEFAULT_RETRIEVAL_CONFIG.topK),
+    scoreThreshold: boundedNumber(
+      knowledgeBase.retrievalScoreThreshold,
+      0,
+      1,
+      DEFAULT_RETRIEVAL_CONFIG.scoreThreshold,
+    ),
+    semanticWeight: boundedNumber(
+      knowledgeBase.retrievalSemanticWeight,
+      0,
+      1,
+      DEFAULT_RETRIEVAL_CONFIG.semanticWeight,
+    ),
+    keywordWeight: boundedNumber(
+      knowledgeBase.retrievalKeywordWeight,
+      0,
+      1,
+      DEFAULT_RETRIEVAL_CONFIG.keywordWeight,
+    ),
+    rerankEnabled: knowledgeBase.retrievalRerankEnabled ?? DEFAULT_RETRIEVAL_CONFIG.rerankEnabled,
+    relationshipRetrievalEnabled:
+      knowledgeBase.relationshipRetrievalEnabled ??
+      DEFAULT_RETRIEVAL_CONFIG.relationshipRetrievalEnabled,
+    maxChunksPerDocument: boundedInteger(
+      knowledgeBase.maxChunksPerDocument,
+      1,
+      10,
+      DEFAULT_RETRIEVAL_CONFIG.maxChunksPerDocument,
+    ),
+  };
+}
+
+function isConfiguredRetrievalMode(
+  value: string | undefined,
+): value is ConfiguredKnowledgeRetrievalMode {
+  return value === 'HYBRID' || value === 'VECTOR' || value === 'FULL_TEXT';
+}
+
+function boundedInteger(
+  value: number | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  return Number.isInteger(value) && value !== undefined && value >= minimum && value <= maximum
+    ? value
+    : fallback;
+}
+
+function boundedNumber(
+  value: Prisma.Decimal | number | undefined,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric >= minimum && numeric <= maximum ? numeric : fallback;
 }
 
 function buildDiagnostics(
@@ -1202,8 +1777,8 @@ function buildDiagnostics(
     reranker === 'LEXICAL' ? 'SKIPPED' : 'APPLIED',
     reranker === 'CROSS_ENCODER'
       ? 'KNOWLEDGE_CROSS_ENCODER_APPLIED'
-      : reranker === 'RRF'
-        ? 'KNOWLEDGE_RRF_APPLIED'
+      : reranker === 'WEIGHTED_SCORE'
+        ? 'KNOWLEDGE_WEIGHTED_FUSION_APPLIED'
         : 'KNOWLEDGE_RERANK_NOT_APPLICABLE',
     loaded.candidates.length,
     'RERANK',
@@ -1264,12 +1839,39 @@ function normalizeQuery(value: string): string {
 
 function queryTerms(value: string): string[] {
   const lowered = value.toLowerCase();
-  const words = lowered.match(/[a-z0-9][a-z0-9._-]{1,31}/g) ?? [];
+  const words = (lowered.match(/[a-z0-9][a-z0-9._-]{1,31}/g) ?? []).filter(
+    (word) => !ENGLISH_QUERY_STOP_WORDS.has(word),
+  );
   const chineseRuns = lowered.match(/[\p{Script=Han}]+/gu) ?? [];
+  const completeRuns = chineseRuns.filter((run) => run.length >= 2 && run.length <= 16);
   const bigrams = chineseRuns.flatMap((run) =>
     Array.from({ length: Math.max(0, run.length - 1) }, (_, index) => run.slice(index, index + 2)),
   );
-  return [...new Set([...words, ...bigrams])].slice(0, 24);
+  const trigrams = chineseRuns.flatMap((run) =>
+    Array.from({ length: Math.max(0, run.length - 2) }, (_, index) => run.slice(index, index + 3)),
+  );
+  return [...new Set([...words, ...completeRuns, ...trigrams, ...bigrams])].slice(0, 64);
+}
+
+function directEvidenceStrength(
+  candidate: CandidateState,
+  terms: readonly string[],
+): { readonly termCoverage: number; readonly fuzzyScore: number } {
+  if (terms.length === 0) {
+    return { termCoverage: 0, fuzzyScore: clampUnitScore(candidate.row.fuzzy_score) };
+  }
+  const searchable = [
+    candidate.row.title,
+    candidate.row.heading_path.join(' '),
+    candidate.row.content,
+  ]
+    .join('\n')
+    .toLowerCase();
+  const matchedTerms = terms.filter((term) => searchable.includes(term)).length;
+  return {
+    termCoverage: matchedTerms / terms.length,
+    fuzzyScore: clampUnitScore(candidate.row.fuzzy_score),
+  };
 }
 
 function escapeLike(value: string): string {
@@ -1291,6 +1893,27 @@ function clampScore(value: number): number {
 function clampUnitScore(value: number): number {
   if (!Number.isFinite(value)) return 0;
   return Math.min(1, Math.max(0, value));
+}
+
+function readRetrievalSourceLocator(metadata: Prisma.JsonValue): {
+  readonly pageStart: number | null;
+  readonly pageEnd: number | null;
+  readonly sheetName: string | null;
+} {
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) {
+    return { pageStart: null, pageEnd: null, sheetName: null };
+  }
+  const pageStart = positiveSourcePage(metadata.pageStart) ?? positiveSourcePage(metadata.page);
+  const pageEnd = positiveSourcePage(metadata.pageEnd) ?? pageStart;
+  const sheetName =
+    typeof metadata.sheetName === 'string' && metadata.sheetName.trim().length > 0
+      ? metadata.sheetName.trim().slice(0, 200)
+      : null;
+  return { pageStart, pageEnd, sheetName };
+}
+
+function positiveSourcePage(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null;
 }
 
 function safeSemanticErrorCode(error: unknown): string {

@@ -8,9 +8,10 @@ import { FeishuDirectorySyncService } from './feishu-directory-sync.service.js';
 import { FeishuDirectorySyncWorker } from './feishu-directory-sync.worker.js';
 import { FeishuDirectoryClient } from './feishu/feishu-directory.client.js';
 import { FeishuCredentialVault } from './feishu/feishu-credential-vault.js';
+import { KnowledgeGatewayModule } from '../knowledge-gateway/knowledge-gateway.module.js';
 
 @Module({
-  imports: [AuthModule, AgentControlModule, AdminAccessModule],
+  imports: [AuthModule, AgentControlModule, AdminAccessModule, KnowledgeGatewayModule],
   controllers: [FeishuDirectorySyncController],
   providers: [
     FeishuDirectoryClient,

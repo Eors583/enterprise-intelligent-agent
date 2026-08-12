@@ -2,7 +2,6 @@ import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AdminPrismaService } from '../../database/admin-prisma.service.js';
-import type { AiEvaluationService } from '../ai-evaluation/ai-evaluation.service.js';
 import type { AdminAccessService } from './admin-access.service.js';
 import { RoleBlueprintAdminService } from './role-blueprint-admin.service.js';
 
@@ -13,9 +12,6 @@ const BLUEPRINT_ID = '00000000-0000-7000-8000-000000000004';
 const VERSION_ID = '00000000-0000-7000-8000-000000000005';
 const CURRENT_VERSION_ID = '00000000-0000-7000-8000-000000000006';
 const ROLLBACK_ID = '00000000-0000-7000-8000-000000000007';
-const EVALUATION_RUN_ID = '00000000-0000-7000-8000-000000000008';
-const EVALUATION_DATASET_VERSION_ID = '00000000-0000-7000-8000-000000000009';
-const EVALUATION_SNAPSHOT_HASH = 'a'.repeat(64);
 
 describe('RoleBlueprintAdminService', () => {
   it('submits a draft for review using a revision CAS and audit event', async () => {
@@ -121,15 +117,11 @@ describe('RoleBlueprintAdminService', () => {
     expect(transaction.agentVersion.updateMany).not.toHaveBeenCalled();
   });
 
-  it('publishes only the approved revision and retires the former published version', async () => {
+  it('publishes a draft directly and retires the former published version', async () => {
     const approved = versionRecord({
-      status: 'TESTING',
-      reviewStatus: 'APPROVED',
+      status: 'DRAFT',
+      reviewStatus: 'NOT_SUBMITTED',
       revision: 3,
-      reviewedAt: new Date(),
-      reviewedById: REVIEWER_ID,
-      approvedAt: new Date(),
-      approvedById: REVIEWER_ID,
     });
     const published = versionRecord({
       status: 'PUBLISHED',
@@ -151,21 +143,13 @@ describe('RoleBlueprintAdminService', () => {
       agentInstance: { updateMany: vi.fn().mockResolvedValue({ count: 4 }) },
       auditEvent: { create: vi.fn().mockResolvedValue({}) },
     };
-    const evaluations = evaluationService();
-    const service = createService(transaction, REVIEWER_ID, evaluations);
+    const service = createService(transaction, REVIEWER_ID);
 
     await expect(
       service.publish(BLUEPRINT_ID, VERSION_ID, {
         expectedRevision: 3,
-        evaluationRunId: EVALUATION_RUN_ID,
       }),
     ).resolves.toMatchObject({ status: 'PUBLISHED', revision: 4 });
-    expect(evaluations.requireReferencedRunReady).toHaveBeenCalledWith({
-      evaluationRunId: EVALUATION_RUN_ID,
-      subjectType: 'AGENT_VERSION',
-      subjectId: VERSION_ID,
-      subjectVersion: 1,
-    });
     expect(transaction.agentVersion.updateMany).toHaveBeenNthCalledWith(
       1,
       expect.objectContaining({
@@ -191,43 +175,12 @@ describe('RoleBlueprintAdminService', () => {
         data: expect.objectContaining({
           status: 'PUBLISHED',
           publishedById: REVIEWER_ID,
-          evaluationRunId: EVALUATION_RUN_ID,
-          evaluationDatasetVersionId: EVALUATION_DATASET_VERSION_ID,
-          evaluationSnapshotHash: EVALUATION_SNAPSHOT_HASH,
+          evaluationRunId: null,
+          evaluationDatasetVersionId: null,
+          evaluationSnapshotHash: null,
         }),
       }),
     );
-  });
-
-  it('does not retire or publish versions when the referenced Evaluation Run is blocked', async () => {
-    const approved = versionRecord({
-      status: 'TESTING',
-      reviewStatus: 'APPROVED',
-      revision: 3,
-      reviewedAt: new Date(),
-      reviewedById: REVIEWER_ID,
-      approvedAt: new Date(),
-      approvedById: REVIEWER_ID,
-    });
-    const transaction = {
-      agentVersion: {
-        findFirst: vi.fn().mockResolvedValue(approved),
-        updateMany: vi.fn(),
-      },
-    };
-    const evaluations = evaluationService();
-    evaluations.requireReferencedRunReady.mockRejectedValueOnce(
-      new ConflictException('evaluation blocked'),
-    );
-    const service = createService(transaction, REVIEWER_ID, evaluations);
-
-    await expect(
-      service.publish(BLUEPRINT_ID, VERSION_ID, {
-        expectedRevision: 3,
-        evaluationRunId: EVALUATION_RUN_ID,
-      }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(transaction.agentVersion.updateMany).not.toHaveBeenCalled();
   });
 
   it('refuses an explicit retirement while current or scheduled assignments are pinned', async () => {
@@ -435,7 +388,10 @@ describe('RoleBlueprintAdminService', () => {
       knowledgeBase: { findMany: vi.fn().mockResolvedValue([]) },
       agentVersion: { findFirst: vi.fn(), create: vi.fn() },
     };
-    const service = createService(transaction, AUTHOR_ID);
+    const validateKnowledgeBaseSelection = vi
+      .fn()
+      .mockRejectedValue(new ConflictException('The knowledge selection is unavailable.'));
+    const service = createService(transaction, AUTHOR_ID, validateKnowledgeBaseSelection);
 
     await expect(
       service.createDraft(BLUEPRINT_ID, {
@@ -448,10 +404,15 @@ describe('RoleBlueprintAdminService', () => {
         changeSummary: 'Attempt an invalid knowledge binding.',
       }),
     ).rejects.toBeInstanceOf(ConflictException);
+    expect(validateKnowledgeBaseSelection).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      userId: AUTHOR_ID,
+      knowledgeBaseIds: ['00000000-0000-7000-8000-000000000109'],
+    });
     expect(transaction.agentVersion.create).not.toHaveBeenCalled();
   });
 
-  it('returns only assignment candidates that satisfy both maker-checker boundaries', async () => {
+  it('returns published assignment candidates with a valid immutable snapshot', async () => {
     const compliant = versionRecord({
       id: VERSION_ID,
       status: 'PUBLISHED',
@@ -466,14 +427,14 @@ describe('RoleBlueprintAdminService', () => {
       blueprintRevision: 3,
       template: { id: BLUEPRINT_ID, key: 'sales', name: 'Sales' },
     });
-    const requesterReviewedOwn = {
+    const invalidSnapshot = {
       ...compliant,
       id: CURRENT_VERSION_ID,
-      reviewedById: AUTHOR_ID,
+      roleDefinitionSnapshot: { mission: 'incomplete' },
     };
     const transaction = {
       agentVersion: {
-        findMany: vi.fn().mockResolvedValue([compliant, requesterReviewedOwn]),
+        findMany: vi.fn().mockResolvedValue([compliant, invalidSnapshot]),
       },
     };
     const service = createService(transaction, REVIEWER_ID);
@@ -493,7 +454,7 @@ describe('RoleBlueprintAdminService', () => {
 function createService(
   transaction: Record<string, unknown>,
   userId: string,
-  evaluations = evaluationService(),
+  validateKnowledgeBaseSelection = vi.fn().mockResolvedValue(undefined),
 ): RoleBlueprintAdminService {
   const prisma = {
     withTenant: vi.fn((_tenantId: string, operation: (value: unknown) => unknown) =>
@@ -511,19 +472,10 @@ function createService(
   return new RoleBlueprintAdminService(
     prisma as unknown as AdminPrismaService,
     access as unknown as AdminAccessService,
-    evaluations as unknown as AiEvaluationService,
+    {
+      validateKnowledgeBaseSelection,
+    } as never,
   );
-}
-
-function evaluationService() {
-  return {
-    requireReferencedRunReady: vi.fn().mockResolvedValue({
-      ready: true,
-      datasetVersionId: EVALUATION_DATASET_VERSION_ID,
-      currentSnapshotHash: EVALUATION_SNAPSHOT_HASH,
-      passingRunId: EVALUATION_RUN_ID,
-    }),
-  };
 }
 
 function versionRecord(overrides: Record<string, unknown> = {}) {

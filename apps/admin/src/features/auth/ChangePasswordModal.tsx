@@ -5,7 +5,7 @@ import {
 } from '@enterprise/contracts';
 import { useState, type FormEvent, type ReactNode } from 'react';
 
-import { changePassword } from '@/api/admin-api';
+import { changePassword } from '@/api/auth-api';
 import { messageFromError } from '@/api/client';
 import { FieldError, Modal, Notice, Spinner } from '@/components/ui';
 

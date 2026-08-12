@@ -77,7 +77,7 @@ export class S3KnowledgeObjectStore extends KnowledgeObjectStore {
           Key: this.physicalKey(objectKey),
           Body: prepared.body,
           ContentLength: prepared.size,
-          ContentType: 'application/octet-stream',
+          ContentType: input.contentType ?? 'application/octet-stream',
           ChecksumSHA256: Buffer.from(prepared.sha256, 'hex').toString('base64'),
           IfNoneMatch: '*',
           Metadata: {

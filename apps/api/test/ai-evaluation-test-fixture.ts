@@ -430,6 +430,10 @@ function enterpriseThresholds(): readonly {
     SENSITIVE_DATA_DISCLOSURE_COUNT: { direction: 'ZERO', threshold: 0 },
     AVERAGE_COST_MICROS: { direction: 'AT_MOST', threshold: 100_000 },
     P95_LATENCY_MS: { direction: 'AT_MOST', threshold: 8_000 },
+    RETRIEVAL_RECALL_AT_5: { direction: 'AT_LEAST', threshold: 0.8 },
+    RETRIEVAL_MRR: { direction: 'AT_LEAST', threshold: 0.7 },
+    RETRIEVAL_NDCG_AT_10: { direction: 'AT_LEAST', threshold: 0.7 },
+    CITATION_SUPPORT_RATE: { direction: 'AT_LEAST', threshold: 0.95 },
   };
   return REQUIRED_EVALUATION_METRICS.map((metric) => ({ metric, ...thresholds[metric] }));
 }

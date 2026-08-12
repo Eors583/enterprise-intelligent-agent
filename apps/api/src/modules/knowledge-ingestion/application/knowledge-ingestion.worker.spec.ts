@@ -5,6 +5,7 @@ import type { ConfigService } from '@nestjs/config';
 import type { EnvironmentVariables } from '../../../config/environment.js';
 import { KnowledgeAiRuntimeError } from '../../knowledge-semantic/knowledge-ai-runtime.client.js';
 import type { KnowledgeIngestionJobRepository } from '../domain/knowledge-ingestion-job.repository.js';
+import { DocumentParsingError } from '../infrastructure/document-parser.adapter.js';
 import {
   KnowledgeIngestionLeaseLostError,
   type KnowledgeIngestionProcessor,
@@ -19,6 +20,7 @@ const CLAIM = {
   tenantId: '00000000-0000-7000-8000-000000000002',
   documentVersionId: '00000000-0000-7000-8000-000000000003',
   attempts: 1,
+  failureAttempts: 0,
   leaseExpiresAt: new Date(Date.now() + 60_000),
   createdAt: new Date(),
 };
@@ -78,21 +80,62 @@ describe('KnowledgeIngestionWorker', () => {
     expect(ingestion.failClaim).not.toHaveBeenCalled();
   });
 
-  it('terminally fails a job after the configured attempt limit', async () => {
-    const exhausted = { ...CLAIM, attempts: 6 };
-    const { worker, ingestion } = createWorker({ claims: [exhausted] });
+  it('retries a transient invalid parser response instead of rejecting the document', async () => {
+    const { worker, jobs, ingestion } = createWorker({
+      executeClaim: vi
+        .fn()
+        .mockRejectedValue(new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE')),
+    });
 
     await expect(worker.runOnce()).resolves.toBe(1);
 
-    expect(ingestion.executeClaim).not.toHaveBeenCalled();
+    expect(jobs.releaseForRetry).toHaveBeenCalledWith({
+      jobId: CLAIM.id,
+      workerId: expect.any(String),
+      availableAt: expect.any(Date),
+      errorCode: 'DOCUMENT_PARSER_INVALID_RESPONSE',
+      errorMessage: '文档解析服务返回了无效结果。',
+    });
+    expect(ingestion.failClaim).not.toHaveBeenCalled();
+  });
+
+  it('preserves the real failure after the configured failure limit', async () => {
+    const finalFailure = { ...CLAIM, attempts: 9, failureAttempts: 4 };
+    const runtimeError = new KnowledgeAiRuntimeError(
+      'KNOWLEDGE_AI_UNAVAILABLE',
+      true,
+      'provider secret must not be persisted',
+    );
+    const { worker, jobs, ingestion } = createWorker({
+      claims: [finalFailure],
+      executeClaim: vi.fn().mockRejectedValue(runtimeError),
+    });
+
+    await expect(worker.runOnce()).resolves.toBe(1);
+
+    expect(ingestion.executeClaim).toHaveBeenCalledOnce();
+    expect(jobs.releaseForRetry).not.toHaveBeenCalled();
     expect(ingestion.failClaim).toHaveBeenCalledWith(
-      exhausted,
+      finalFailure,
       expect.any(String),
       expect.objectContaining({
-        code: 'KNOWLEDGE_INGESTION_ATTEMPTS_EXHAUSTED',
-        retryable: false,
+        code: 'KNOWLEDGE_AI_UNAVAILABLE',
       }),
     );
+  });
+
+  it('does not consume the failure budget when an expired lease is reclaimed', async () => {
+    const reclaimed = { ...CLAIM, attempts: 12, failureAttempts: 0 };
+    const { worker, ingestion } = createWorker({ claims: [reclaimed] });
+
+    await expect(worker.runOnce()).resolves.toBe(1);
+
+    expect(ingestion.executeClaim).toHaveBeenCalledWith(
+      reclaimed,
+      expect.any(String),
+      expect.any(Object),
+    );
+    expect(ingestion.failClaim).not.toHaveBeenCalled();
   });
 
   it('does not mutate a claim after its tenant-scoped lease is lost', async () => {

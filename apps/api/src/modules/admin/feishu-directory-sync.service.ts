@@ -44,6 +44,7 @@ import type {
   FeishuDirectoryUser,
 } from './feishu/feishu-directory.models.js';
 import { FeishuDirectoryError } from './feishu/feishu-directory.models.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 
 const APPLY_TRANSACTION_TIMEOUT_MS = 600_000;
 const REMOVAL_CONFIRMATION_DELAY_MS = 60 * 60_000;
@@ -120,6 +121,7 @@ export class FeishuDirectorySyncService {
     @Inject(FeishuCredentialVault) private readonly vault: FeishuCredentialVault,
     @Inject(DirectoryPersonalAgentProvisioner)
     private readonly personalAgents: DirectoryPersonalAgentProvisioner,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
     @Inject(ConfigService) config: ConfigService<EnvironmentVariables, true>,
   ) {
     this.leaseMs = config.get('FEISHU_SYNC_LEASE_MS', { infer: true });
@@ -1663,11 +1665,10 @@ export class FeishuDirectorySyncService {
             orgUnitId: binding.orgUnitId,
           },
         }),
-        transaction.knowledgeBaseOrgUnit.count({
-          where: {
-            tenantId: claim.principal.tenantId,
-            orgUnitId: binding.orgUnitId,
-          },
+        this.knowledge.countOrgUnitBindings({
+          tenantId: claim.principal.tenantId,
+          userId: claim.principal.userId,
+          orgUnitId: binding.orgUnitId,
         }),
       ]);
       if (activeChildren + activeEmployments + positions + knowledgeScopes > 0) {

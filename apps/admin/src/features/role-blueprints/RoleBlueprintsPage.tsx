@@ -99,7 +99,7 @@ export function RoleBlueprintsPage({ currentUserId }: { currentUserId: string })
         <div>
           <span className="eyebrow">ROLE BLUEPRINT GOVERNANCE</span>
           <h1>角色蓝图</h1>
-          <p>结构化定义企业角色，并通过独立审核、发布、停用与回滚治理 Agent 版本。</p>
+          <p>结构化定义企业角色并发布 Agent 版本；审核与评测可按需补充，不阻塞初版验证。</p>
         </div>
         <div className="page-actions">
           <button className="button secondary" type="button" onClick={reload} disabled={loading}>
@@ -298,9 +298,7 @@ export function RoleBlueprintsPage({ currentUserId }: { currentUserId: string })
           expectedPublishedVersionId={currentPublishedVersionId(selected)}
           onClose={() => setRollbackVersion(null)}
           onSaved={(version) =>
-            completedVersionAction(
-              `已创建 v${version.version} 回滚草稿；请提交审核，由另一位管理员审批后再发布。`,
-            )
+            completedVersionAction(`已创建 v${version.version} 回滚草稿；确认配置后可直接发布。`)
           }
         />
       ) : null}
@@ -423,7 +421,7 @@ export function RoleBlueprintDetail({
         {blueprint.versions.length === 0 ? (
           <EmptyState
             title="还没有角色版本"
-            description="创建草稿，完成独立审核后才能发布并用于角色任命。"
+            description="创建草稿，确认配置后可直接发布并用于角色任命。"
             action={
               <button className="button primary" type="button" onClick={onCreateDraft}>
                 创建版本草稿

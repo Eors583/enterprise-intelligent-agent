@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { PrismaService } from '../../../../database/prisma.service.js';
 import { AuthorizationDecisionService } from '../../../authorization/authorization-decision.service.js';
-import type { KnowledgeRetrievalService } from '../../../knowledge-retrieval/knowledge-retrieval.service.js';
+import type { KnowledgeRetrievalGateway } from '../../../knowledge-gateway/knowledge-gateway.port.js';
 import {
   exceedsConservativeInputBudget,
   isAgentVersionExecutableForRun,
@@ -115,7 +115,14 @@ describe('PrismaAgentRunRepository prepare', () => {
   });
 
   it('leaves a queued Run untouched when out-of-transaction knowledge retrieval fails', async () => {
-    const run = queuedRun();
+    const baseRun = queuedRun();
+    const run = {
+      ...baseRun,
+      agentVersion: {
+        ...baseRun.agentVersion,
+        knowledgeScope: { mode: 'owner-authorized' },
+      },
+    } as const;
     const findFirst = vi.fn().mockResolvedValueOnce(run).mockResolvedValueOnce(null);
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
@@ -164,12 +171,13 @@ describe('PrismaAgentRunRepository prepare', () => {
       ),
     };
     const retrieval = {
+      resolveAccessibleKnowledgeBaseIds: vi.fn().mockResolvedValue([KNOWLEDGE_BASE_ID]),
       search: vi.fn().mockRejectedValue(new Error('embedding provider unavailable')),
-      areChunksAccessibleInTransaction: vi.fn(),
+      areChunksAccessible: vi.fn(),
     };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
-      retrieval as unknown as KnowledgeRetrievalService,
+      retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
     );
 
@@ -178,6 +186,23 @@ describe('PrismaAgentRunRepository prepare', () => {
     );
 
     expect(prisma.withTenant).toHaveBeenCalledOnce();
+    expect(retrieval.resolveAccessibleKnowledgeBaseIds).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      userId: USER_ID,
+      authorization: {
+        tenantRole: 'MEMBER',
+        assignment: null,
+        taskContext: {
+          assignmentRequired: false,
+          resourceAgentId: AGENT_ID,
+          resourceOwnerUserId: null,
+          resourceVisibility: 'tenant',
+          requesterUserId: USER_ID,
+          participantUserIds: [USER_ID],
+          enforceActorMembership: true,
+        },
+      },
+    });
     expect(retrieval.search).toHaveBeenCalledWith({
       tenantId: TENANT_ID,
       userId: USER_ID,
@@ -197,7 +222,6 @@ describe('PrismaAgentRunRepository prepare', () => {
       },
       query: 'What is the leave policy?',
       maximumOutboundClassification: 'INTERNAL',
-      limit: 8,
     });
     expect(transaction.agentRun.update).not.toHaveBeenCalled();
     expect(transaction.agentRun.updateMany).not.toHaveBeenCalled();
@@ -248,11 +272,11 @@ describe('PrismaAgentRunRepository prepare', () => {
     };
     const retrieval = {
       search: vi.fn(),
-      areChunksAccessibleInTransaction: vi.fn(),
+      areChunksAccessible: vi.fn(),
     };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
-      retrieval as unknown as KnowledgeRetrievalService,
+      retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
     );
 
@@ -299,11 +323,11 @@ describe('PrismaAgentRunRepository prepare', () => {
     const prisma = tenantPrisma(transaction);
     const retrieval = {
       search: vi.fn().mockRejectedValue(new Error('stop after authorization')),
-      areChunksAccessibleInTransaction: vi.fn(),
+      areChunksAccessible: vi.fn(),
     };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
-      retrieval as unknown as KnowledgeRetrievalService,
+      retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
     );
 
@@ -329,11 +353,11 @@ describe('PrismaAgentRunRepository prepare', () => {
     const prisma = tenantPrisma(transaction);
     const retrieval = {
       search: vi.fn(),
-      areChunksAccessibleInTransaction: vi.fn(),
+      areChunksAccessible: vi.fn(),
     };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
-      retrieval as unknown as KnowledgeRetrievalService,
+      retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
     );
 
@@ -359,11 +383,11 @@ describe('PrismaAgentRunRepository prepare', () => {
     const prisma = tenantPrisma(transaction);
     const retrieval = {
       search: vi.fn(),
-      areChunksAccessibleInTransaction: vi.fn(),
+      areChunksAccessible: vi.fn(),
     };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
-      retrieval as unknown as KnowledgeRetrievalService,
+      retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
     );
 
@@ -461,11 +485,11 @@ describe('PrismaAgentRunRepository prepare', () => {
     };
     const retrieval = {
       search: vi.fn().mockResolvedValue({ items: [] }),
-      areChunksAccessibleInTransaction: vi.fn().mockResolvedValue(true),
+      areChunksAccessible: vi.fn().mockResolvedValue(true),
     };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
-      retrieval as unknown as KnowledgeRetrievalService,
+      retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
     );
 
@@ -713,11 +737,11 @@ function cancellationRepository(transaction: Record<string, unknown>) {
   };
   const retrieval = {
     search: vi.fn(),
-    areChunksAccessibleInTransaction: vi.fn(),
+    areChunksAccessible: vi.fn(),
   };
   return new PrismaAgentRunRepository(
     prisma as unknown as PrismaService,
-    retrieval as unknown as KnowledgeRetrievalService,
+    retrieval as unknown as KnowledgeRetrievalGateway,
     new AuthorizationDecisionService(),
   );
 }

@@ -51,6 +51,7 @@ describe('validateEnvironment', () => {
       IM_OUTBOX_ENABLED: false,
       IM_PROVIDER: 'local',
       IM_OUTBOX_MAX_ATTEMPTS: 8,
+      AGENT_RUN_WORKER_CONCURRENCY: 4,
       TENCENT_IM_API_BASE_URL: 'https://console.tim.qq.com',
       TENCENT_IM_HTTP_TIMEOUT_MS: 5_000,
       KNOWLEDGE_OBJECT_STORE_DRIVER: 'local',
@@ -889,7 +890,7 @@ describe('validateEnvironment', () => {
         NODE_ENV: 'test',
         KNOWLEDGE_OBJECT_STORE_MAX_BYTES: '1024',
       }),
-    ).toThrow('must be an integer between 1048576 and 536870912');
+    ).toThrow('must be an integer between 1048576 and 2147483647');
     expect(() =>
       validateEnvironment({
         ...productionKnowledgeEnvironment(),

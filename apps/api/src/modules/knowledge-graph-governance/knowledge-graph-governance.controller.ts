@@ -5,12 +5,14 @@ import {
   createKnowledgeOntologyRequestSchema,
   createKnowledgeOntologyVersionRequestSchema,
   transitionKnowledgeGraphCorrectionRequestSchema,
+  transitionKnowledgeGraphCorrectionBatchRequestSchema,
   transitionKnowledgeOntologyVersionRequestSchema,
   type CreateKnowledgeGraphConflictRequest,
   type CreateKnowledgeGraphCorrectionRequest,
   type CreateKnowledgeOntologyRequest,
   type CreateKnowledgeOntologyVersionRequest,
   type TransitionKnowledgeGraphCorrectionRequest,
+  type TransitionKnowledgeGraphCorrectionBatchRequest,
   type TransitionKnowledgeOntologyVersionRequest,
 } from '@enterprise/contracts';
 
@@ -84,5 +86,14 @@ export class KnowledgeGraphGovernanceController {
     request: TransitionKnowledgeGraphCorrectionRequest,
   ) {
     return this.governance.transitionCorrection(knowledgeBaseId, correctionId, request);
+  }
+
+  @Post('relation-corrections/batch-transitions')
+  transitionRelationCorrections(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Body(new SchemaValidationPipe(transitionKnowledgeGraphCorrectionBatchRequestSchema))
+    request: TransitionKnowledgeGraphCorrectionBatchRequest,
+  ) {
+    return this.governance.transitionRelationCorrectionBatch(knowledgeBaseId, request);
   }
 }

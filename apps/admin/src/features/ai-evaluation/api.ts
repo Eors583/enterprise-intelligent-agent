@@ -16,12 +16,17 @@ import {
   aiEvaluationRunnerSchema,
   aiEvaluationRunSchema,
   annotateAiEvaluationCaseRequestSchema,
+  bulkImportKnowledgeRetrievalEvaluationCasesRequestSchema,
+  bulkImportKnowledgeRetrievalEvaluationCasesResultSchema,
   createAiEvaluationCaseRequestSchema,
   createAiEvaluationDatasetRequestSchema,
   createAiEvaluationDatasetVersionRequestSchema,
   createAiEvaluationRunnerRequestSchema,
   createAiEvaluationRunRequestSchema,
   ingestAiEvaluationBadCaseRequestSchema,
+  knowledgeRetrievalBenchmarkRunListResponseSchema,
+  knowledgeRetrievalBenchmarkRunSchema,
+  runKnowledgeRetrievalBenchmarkRequestSchema,
   startAiEvaluationRunRequestSchema,
   submitAiEvaluationRunRequestSchema,
   transitionAiEvaluationDatasetVersionRequestSchema,
@@ -44,12 +49,17 @@ import {
   type AiEvaluationRunner,
   type AiEvaluationRunnerListResponse,
   type AnnotateAiEvaluationCaseRequest,
+  type BulkImportKnowledgeRetrievalEvaluationCasesRequest,
+  type BulkImportKnowledgeRetrievalEvaluationCasesResult,
   type CreateAiEvaluationCaseRequest,
   type CreateAiEvaluationDatasetRequest,
   type CreateAiEvaluationDatasetVersionRequest,
   type CreateAiEvaluationRunnerRequest,
   type CreateAiEvaluationRunRequest,
   type IngestAiEvaluationBadCaseRequest,
+  type KnowledgeRetrievalBenchmarkRun,
+  type KnowledgeRetrievalBenchmarkRunListResponse,
+  type RunKnowledgeRetrievalBenchmarkRequest,
   type StartAiEvaluationRunRequest,
   type SubmitAiEvaluationRunRequest,
   type TransitionAiEvaluationDatasetVersionRequest,
@@ -199,6 +209,46 @@ export function annotateEvaluationCase(
     method: 'POST',
     schema: acceptedSchema,
     body: annotateAiEvaluationCaseRequestSchema.parse(input),
+  });
+}
+
+export function bulkImportKnowledgeRetrievalEvaluationCases(
+  versionId: string,
+  input: BulkImportKnowledgeRetrievalEvaluationCasesRequest,
+): Promise<BulkImportKnowledgeRetrievalEvaluationCasesResult> {
+  return request(
+    `/admin/ai-evaluations/dataset-versions/${versionId}/retrieval-cases/bulk-import`,
+    {
+      method: 'POST',
+      schema: bulkImportKnowledgeRetrievalEvaluationCasesResultSchema,
+      body: bulkImportKnowledgeRetrievalEvaluationCasesRequestSchema.parse(input),
+    },
+  );
+}
+
+export function listKnowledgeRetrievalBenchmarks(
+  versionId: string,
+  input: AiEvaluationListQuery = { limit: 20 },
+  signal?: AbortSignal,
+): Promise<KnowledgeRetrievalBenchmarkRunListResponse> {
+  const query = aiEvaluationListQuerySchema.parse(input);
+  return request(
+    `/admin/ai-evaluations/dataset-versions/${versionId}/retrieval-benchmarks?${queryString(query)}`,
+    {
+      schema: knowledgeRetrievalBenchmarkRunListResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function runKnowledgeRetrievalBenchmark(
+  versionId: string,
+  input: RunKnowledgeRetrievalBenchmarkRequest,
+): Promise<KnowledgeRetrievalBenchmarkRun> {
+  return request(`/admin/ai-evaluations/dataset-versions/${versionId}/retrieval-benchmarks`, {
+    method: 'POST',
+    schema: knowledgeRetrievalBenchmarkRunSchema,
+    body: runKnowledgeRetrievalBenchmarkRequestSchema.parse(input),
   });
 }
 

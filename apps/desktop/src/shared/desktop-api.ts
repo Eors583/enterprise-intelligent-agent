@@ -11,6 +11,7 @@ export const DESKTOP_IPC_CHANNELS = {
   switchAccount: 'desktop:switch-account',
   logout: 'desktop:logout',
   apiRequest: 'desktop:api-request',
+  openKnowledgeSource: 'desktop:open-knowledge-source',
   startAgentRunStream: 'desktop:start-agent-run-stream',
   stopAgentRunStream: 'desktop:stop-agent-run-stream',
   agentRunStreamUpdate: 'desktop:agent-run-stream-update',
@@ -60,6 +61,14 @@ export interface DesktopApiResponse {
   readonly status: number;
   readonly requestId?: string;
   readonly body: unknown;
+}
+
+export interface DesktopOpenKnowledgeSourceRequest {
+  readonly expectedSessionId: string;
+  readonly messageId: string;
+  readonly documentVersionId: string;
+  readonly chunkId: string;
+  readonly fileName: string;
 }
 
 export interface DesktopAgentRunStreamRequest {
@@ -133,6 +142,7 @@ export interface DesktopBridge {
   switchAccount(sessionId: string): Promise<DesktopAuthState>;
   logout(sessionId?: string): Promise<DesktopAuthState>;
   apiRequest(request: DesktopApiRequest): Promise<DesktopApiResponse>;
+  openKnowledgeSource(request: DesktopOpenKnowledgeSourceRequest): Promise<void>;
   subscribeAgentRunStream(
     request: DesktopAgentRunStreamRequest,
     listener: (update: DesktopAgentRunStreamUpdate) => void,

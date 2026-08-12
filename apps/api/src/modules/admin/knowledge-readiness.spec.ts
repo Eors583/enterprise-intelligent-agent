@@ -32,7 +32,7 @@ describe('knowledge readiness', () => {
     ).toBe('processing');
   });
 
-  it('marks a fully embedded, reranked knowledge base enterprise ready', () => {
+  it('reports hybrid retrieval when published chunks are fully embedded', () => {
     expect(
       deriveKnowledgeBaseIndexReadiness({
         knowledgeBaseId: KNOWLEDGE_BASE_ID,
@@ -81,12 +81,10 @@ describe('knowledge readiness', () => {
       },
       retrievalMode: 'HYBRID',
       degradedReason: null,
-      activationAllowed: true,
-      activationBlockers: [],
     });
   });
 
-  it('reports safe lexical degradation and every activation blocker without provider details', () => {
+  it('reports safe lexical degradation without exposing provider details', () => {
     const result = deriveKnowledgeBaseIndexReadiness({
       knowledgeBaseId: KNOWLEDGE_BASE_ID,
       documents: [document({ currentVersionStatus: 'READY', currentChunkCount: 4 })],
@@ -109,14 +107,12 @@ describe('knowledge readiness', () => {
       retrievalMode: 'LEXICAL',
       degradedReason: 'EMBEDDING_COVERAGE_INCOMPLETE',
       semanticCoverage: 0.5,
-      activationAllowed: false,
-      activationBlockers: ['EMBEDDING_COVERAGE_INCOMPLETE', 'RERANK_PROVIDER_UNAVAILABLE'],
     });
     expect(JSON.stringify(result)).not.toContain('http');
     expect(JSON.stringify(result)).not.toContain('secret');
   });
 
-  it('blocks activation while any document is processing or failed', () => {
+  it('reports document processing and failures without changing available retrieval mode', () => {
     const result = deriveKnowledgeBaseIndexReadiness({
       knowledgeBaseId: KNOWLEDGE_BASE_ID,
       documents: [
@@ -150,8 +146,7 @@ describe('knowledge readiness', () => {
     });
 
     expect(result).toMatchObject({
-      activationAllowed: false,
-      activationBlockers: ['DOCUMENTS_PROCESSING', 'DOCUMENTS_FAILED'],
+      documents: { processing: 1, failed: 1, ready: 1 },
       retrievalMode: 'HYBRID',
       degradedReason: null,
     });

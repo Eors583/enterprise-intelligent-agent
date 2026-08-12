@@ -388,12 +388,25 @@ describe.runIf(enabled)('PostgreSQL knowledge graph governance integration', () 
         createdById: owner.account.userId,
       },
     });
+    const sourceParent = await administrator.knowledgeParentChunk.create({
+      data: {
+        tenantId: owner.account.tenantId,
+        knowledgeBaseId: knowledgeBase.id,
+        documentId: sourceDocument.id,
+        documentVersionId: sourceVersion.id,
+        parentIndex: 0,
+        content: 'Employee source identity belongs to Platform Department.',
+        tokenCount: 8,
+        contentHash: 'b'.repeat(64),
+      },
+    });
     const sourceChunk = await administrator.knowledgeChunk.create({
       data: {
         tenantId: owner.account.tenantId,
         knowledgeBaseId: knowledgeBase.id,
         documentId: sourceDocument.id,
         documentVersionId: sourceVersion.id,
+        parentChunkId: sourceParent.id,
         chunkIndex: 0,
         content: 'Employee source identity belongs to Platform Department.',
         tokenCount: 8,
@@ -488,7 +501,13 @@ describe.runIf(enabled)('PostgreSQL knowledge graph governance integration', () 
       ).body,
     );
     expect(conflict.status).toBe('OPEN');
-    expect(await readEligibleRelations(owner.account.tenantId)).toEqual([]);
+    expect(await readEligibleRelations(owner.account.tenantId)).toEqual([
+      {
+        id: relation.id,
+        subjectEntityId: sourceEmployee.id,
+        objectEntityId: department.id,
+      },
+    ]);
 
     await createAndApproveCorrection(
       ownerAuthorization,

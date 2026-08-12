@@ -31,7 +31,7 @@ AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD=true
 AI_RUNTIME_LOCAL_MODEL_THREADS=2
 ```
 
-中文 Embedding 原生输出 512 维归一化向量，适配器以零填充方式保持现有 1536 维
+本地 Embedding 输出会归一化，并按配置维度校验或补齐；知识库把实际输出维度绑定到索引版本
 pgvector 契约，余弦相似度不变。Reranker 使用真实 BGE Cross Encoder，并将模型
 logit 通过 sigmoid 归一化为 0～1 相关性分数。生产环境禁止运行时下载，必须提前
 准备模型缓存并设置 `AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD=false`。
@@ -47,33 +47,33 @@ uv run ruff check .
 
 开发或测试启动时，模块会查找仓库根 `pnpm-workspace.yaml`，然后从同目录 `.env` 非覆盖式加载 `AI_RUNTIME_*` 与 `MANUS_*` 变量。数据库、认证等其他服务的变量不会进入 AI Runtime 进程；已经由当前进程、容器或 Secret 注入的值优先，dotenv 不会覆盖。`AI_RUNTIME_ENVIRONMENT=production` 时完全跳过 dotenv；dotenv 文件自身也不允许把进程切换为生产模式。仓库根 `.env.example` 仅是配置清单，不得填真实密钥。
 
-| 变量                                   | 默认值                 | 说明                                             |
-| -------------------------------------- | ---------------------- | ------------------------------------------------ |
-| `AI_RUNTIME_ENVIRONMENT`               | `development`          | `development`、`test` 或 `production`            |
-| `AI_RUNTIME_DRIVER`                    | `noop`                 | `noop`、`openai_compatible` 或 `manus`           |
-| `AI_RUNTIME_STORE_DRIVER`              | `memory`               | `memory` 或持久化适配器 `postgres`               |
-| `AI_RUNTIME_POSTGRES_DSN`              | 无                     | PostgreSQL RunStore 专用连接，选择 postgres 必填 |
-| `AI_RUNTIME_SERVICE_TOKEN`             | 无                     | API→Runtime Bearer 凭据，生产至少 32 字符        |
-| `AI_RUNTIME_OPENAI_BASE_URL`           | 无                     | OpenAI-compatible `/v1` 根地址                   |
-| `AI_RUNTIME_OPENAI_API_KEY`            | 无                     | OpenAI-compatible Secret                         |
-| `AI_RUNTIME_OPENAI_MODEL`              | 无                     | 模型或部署名称                                   |
-| `AI_RUNTIME_EMBEDDING_DRIVER`          | `disabled`             | `disabled` 或 `openai_compatible`                |
-| `AI_RUNTIME_EMBEDDING_BASE_URL`        | 无                     | OpenAI-compatible Embedding API 根地址           |
-| `AI_RUNTIME_EMBEDDING_API_KEY`         | 无                     | Embedding Secret，仅供本服务使用                 |
-| `AI_RUNTIME_EMBEDDING_MODEL`           | 无                     | Embedding 模型或部署名称                         |
-| `AI_RUNTIME_EMBEDDING_DIMENSIONS`      | `1536`                 | 固定为 1536，与 pgvector 数据契约一致            |
-| `AI_RUNTIME_EMBEDDING_TIMEOUT_SECONDS` | `30`                   | Embedding 超时，允许 0.1～300 秒                 |
-| `AI_RUNTIME_RERANK_DRIVER`             | `disabled`             | `disabled` 或 `cohere_compatible`                |
-| `AI_RUNTIME_RERANK_BASE_URL`           | 无                     | Cohere-compatible Rerank API 根地址              |
-| `AI_RUNTIME_RERANK_API_KEY`            | 无                     | Rerank Secret，仅供本服务使用                    |
-| `AI_RUNTIME_RERANK_MODEL`              | 无                     | Rerank 模型或部署名称                            |
-| `AI_RUNTIME_RERANK_TIMEOUT_SECONDS`    | `30`                   | Rerank 超时，允许 0.1～300 秒                    |
-| `MANUS_API_KEY`                        | 无                     | Manus Secret，仅供后端运行时使用                 |
-| `MANUS_API_BASE_URL`                   | `https://api.manus.ai` | 固定为 Manus 官方 HTTPS API 根地址               |
-| `MANUS_AGENT_PROFILE`                  | `manus-1.6-lite`       | `manus-1.6`、`manus-1.6-lite` 或 `manus-1.6-max` |
-| `MANUS_PROJECT_ID`                     | 无                     | 可选的已批准 Manus Project ID                    |
-| `MANUS_POLL_INTERVAL_SECONDS`          | `2`                    | 状态轮询间隔，允许 1～60 秒                      |
-| `MANUS_MAX_WAIT_SECONDS`               | `120`                  | 不小于轮询间隔，最大 3600 秒                     |
+| 变量                                   | 默认值                 | 说明                                               |
+| -------------------------------------- | ---------------------- | -------------------------------------------------- |
+| `AI_RUNTIME_ENVIRONMENT`               | `development`          | `development`、`test` 或 `production`              |
+| `AI_RUNTIME_DRIVER`                    | `noop`                 | `noop`、`openai_compatible` 或 `manus`             |
+| `AI_RUNTIME_STORE_DRIVER`              | `memory`               | `memory` 或持久化适配器 `postgres`                 |
+| `AI_RUNTIME_POSTGRES_DSN`              | 无                     | PostgreSQL RunStore 专用连接，选择 postgres 必填   |
+| `AI_RUNTIME_SERVICE_TOKEN`             | 无                     | API→Runtime Bearer 凭据，生产至少 32 字符          |
+| `AI_RUNTIME_OPENAI_BASE_URL`           | 无                     | OpenAI-compatible `/v1` 根地址                     |
+| `AI_RUNTIME_OPENAI_API_KEY`            | 无                     | OpenAI-compatible Secret                           |
+| `AI_RUNTIME_OPENAI_MODEL`              | 无                     | 模型或部署名称                                     |
+| `AI_RUNTIME_EMBEDDING_DRIVER`          | `disabled`             | `disabled` 或 `openai_compatible`                  |
+| `AI_RUNTIME_EMBEDDING_BASE_URL`        | 无                     | OpenAI-compatible Embedding API 根地址             |
+| `AI_RUNTIME_EMBEDDING_API_KEY`         | 无                     | Embedding Secret，仅供本服务使用                   |
+| `AI_RUNTIME_EMBEDDING_MODEL`           | 无                     | Embedding 模型或部署名称                           |
+| `AI_RUNTIME_EMBEDDING_DIMENSIONS`      | `1536`                 | 当前模型输出维度（1～16000）；变更后创建新索引版本 |
+| `AI_RUNTIME_EMBEDDING_TIMEOUT_SECONDS` | `30`                   | Embedding 超时，允许 0.1～300 秒                   |
+| `AI_RUNTIME_RERANK_DRIVER`             | `disabled`             | `disabled` 或 `cohere_compatible`                  |
+| `AI_RUNTIME_RERANK_BASE_URL`           | 无                     | Cohere-compatible Rerank API 根地址                |
+| `AI_RUNTIME_RERANK_API_KEY`            | 无                     | Rerank Secret，仅供本服务使用                      |
+| `AI_RUNTIME_RERANK_MODEL`              | 无                     | Rerank 模型或部署名称                              |
+| `AI_RUNTIME_RERANK_TIMEOUT_SECONDS`    | `30`                   | Rerank 超时，允许 0.1～300 秒                      |
+| `MANUS_API_KEY`                        | 无                     | Manus Secret，仅供后端运行时使用                   |
+| `MANUS_API_BASE_URL`                   | `https://api.manus.ai` | 固定为 Manus 官方 HTTPS API 根地址                 |
+| `MANUS_AGENT_PROFILE`                  | `manus-1.6-lite`       | `manus-1.6`、`manus-1.6-lite` 或 `manus-1.6-max`   |
+| `MANUS_PROJECT_ID`                     | 无                     | 可选的已批准 Manus Project ID                      |
+| `MANUS_POLL_INTERVAL_SECONDS`          | `2`                    | 状态轮询间隔，允许 1～60 秒                        |
+| `MANUS_MAX_WAIT_SECONDS`               | `120`                  | 不小于轮询间隔，最大 3600 秒                       |
 
 安全规则：
 
@@ -84,7 +84,7 @@ uv run ruff check .
 - `openai_compatible` 缺少 URL、API Key 或模型名称时启动失败。
 - `manus` 缺少 `MANUS_API_KEY` 时启动失败；API Base URL 只接受 `https://api.manus.ai`，防止将高权限密钥发送到可配置的第三方主机。
 - Embedding 与 Rerank 独立于对话 Run 驱动，默认均为 `disabled`；启用任一能力但缺少 URL、API Key 或模型名称时启动失败。
-- Embedding 输出必须恰好 1536 维、覆盖全部输入索引、仅含有限数且不是零向量；Rerank 必须恰好返回 `top_n` 个、只引用请求内唯一索引、分数位于 0～1 并按相关性降序排列。
+- Embedding 输出必须与请求的索引版本维度一致、覆盖全部输入索引、仅含有限数且不是零向量；Rerank 必须恰好返回 `top_n` 个、只引用请求内唯一索引、分数位于 0～1 并按相关性降序排列。
 - 生产环境 Provider URL 必须使用 HTTPS，URL 中不得包含用户名或密码。
 - OpenAI-compatible Key、Embedding Key 与 Rerank Key 只进入各自的 `Authorization` 请求头；Manus Key 只进入 `x-manus-api-key`。Provider 异常均经过脱敏映射，不返回响应正文、密钥或底层异常。
 - Provider 就绪检查只检查本地配置与生命周期，不发起可能计费的探测请求。
@@ -116,7 +116,7 @@ POST /internal/v1/knowledge/rerank
 -> {"model":"rerank-model","results":[{"id":"chunk-1","index":0,"relevance_score":0.93}]}
 ```
 
-示例中的 Embedding 数组为便于阅读而省略；真实响应始终包含 1536 个分量。错误统一返回 `detail: {code, message, retryable}`：上游超时为 HTTP 504，429 保持 HTTP 429，鉴权、请求拒绝、5xx 或无效结构通过 502 脱敏返回；能力未启用时为 503 `KNOWLEDGE_CAPABILITY_DISABLED`。
+示例中的 Embedding 数组为便于阅读而省略；真实响应分量数由索引版本配置决定。错误统一返回 `detail: {code, message, retryable}`：上游超时为 HTTP 504，429 保持 HTTP 429，鉴权、请求拒绝、5xx 或无效结构通过 502 脱敏返回；能力未启用时为 503 `KNOWLEDGE_CAPABILITY_DISABLED`，请求模型/维度与 Runtime 不一致时为 409 `KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH`。
 
 执行接口是幂等的：
 

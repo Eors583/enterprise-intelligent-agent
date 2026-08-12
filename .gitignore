@@ -63,6 +63,19 @@ data/
 .data/
 logs/
 tmp/
+uploads/
+.cache/
+*.dump
+*.bak
+*.backup
+
+# Local model weights and large runtime artifacts
+*.onnx
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.pth
 
 # IDE / OS
 .idea/

@@ -26,7 +26,7 @@ describe('role blueprint view model', () => {
       canEdit: true,
       canSubmit: true,
       canReview: false,
-      canPublish: false,
+      canPublish: true,
       canRetire: false,
       canRollback: false,
     });

@@ -1,4 +1,5 @@
 import type {
+  AiEvaluationAnswerFeedbackSource,
   AiEvaluationBadCaseStatus,
   AiEvaluationCategory,
   AiEvaluationDatasetStatus,
@@ -25,6 +26,22 @@ export const EVALUATION_CATEGORIES: ReadonlyArray<{
   { value: 'COST', label: '成本' },
 ];
 
+export function evaluationCategoryLabel(category: AiEvaluationCategory): string {
+  return EVALUATION_CATEGORIES.find((item) => item.value === category)?.label ?? category;
+}
+
+export function answerFeedbackReasonLabel(
+  reason: AiEvaluationAnswerFeedbackSource['feedbackReason'],
+): string {
+  return {
+    INCORRECT: '内容不正确',
+    IRRELEVANT_CITATION: '引用与回答无关',
+    OUTDATED: '信息已过期',
+    MISSING_KNOWLEDGE: '缺少关键知识',
+    OTHER: '其他原因',
+  }[reason];
+}
+
 export const EVALUATION_METRICS: ReadonlyArray<{
   value: AiEvaluationMetric;
   label: string;
@@ -43,6 +60,10 @@ export const EVALUATION_METRICS: ReadonlyArray<{
   { value: 'SENSITIVE_DATA_DISCLOSURE_COUNT', label: '敏感数据披露数' },
   { value: 'AVERAGE_COST_MICROS', label: '平均成本（微单位）' },
   { value: 'P95_LATENCY_MS', label: 'P95 延迟' },
+  { value: 'RETRIEVAL_RECALL_AT_5', label: 'Recall@5（召回率）' },
+  { value: 'RETRIEVAL_MRR', label: 'MRR（首个正确来源排名）' },
+  { value: 'RETRIEVAL_NDCG_AT_10', label: 'nDCG@10（排序质量）' },
+  { value: 'CITATION_SUPPORT_RATE', label: '引用支持率' },
 ];
 
 export const SUBJECT_TYPES: ReadonlyArray<{

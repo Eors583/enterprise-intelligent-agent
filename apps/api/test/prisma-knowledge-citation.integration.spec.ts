@@ -4,6 +4,7 @@ import { knowledgeCitationDetailSchema } from '@enterprise/contracts';
 import request from 'supertest';
 
 import { PrismaAiEvaluationRepository } from '../src/modules/ai-evaluation/infrastructure/prisma-ai-evaluation.repository.js';
+import { KnowledgeBoundaryReadService } from '../src/modules/knowledge-gateway/knowledge-boundary-read.service.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
 import {
   seedPassingEvaluationRun,
@@ -30,6 +31,7 @@ const allowedChunkId = '10000000-0000-7000-8000-000000000404';
 const wrongLabelChunkId = '10000000-0000-7000-8000-000000000405';
 const wrongProjectChunkId = '10000000-0000-7000-8000-000000000406';
 const nonCitedChunkId = '10000000-0000-7000-8000-000000000407';
+const parentChunkId = '10000000-0000-7000-8000-000000000408';
 const conversationId = '10000000-0000-7000-8000-000000000501';
 const inputMessageId = '10000000-0000-7000-8000-000000000502';
 const outputMessageId = '10000000-0000-7000-8000-000000000503';
@@ -302,6 +304,8 @@ describe.runIf(enabled)('PostgreSQL knowledge citation authorization', () => {
         key: 'citation-governed-knowledge',
         name: 'Citation Governed Knowledge',
         status: 'ACTIVE',
+        spaceTargetId: tenantId,
+        spaceTargetName: 'Citation Governance Tenant',
         createdById: requesterId,
         orgUnits: { create: { orgUnitId, includeChildren: true } },
       },
@@ -352,6 +356,19 @@ describe.runIf(enabled)('PostgreSQL knowledge citation authorization', () => {
       },
     });
     await publishKnowledgeVersion();
+    await administrator.knowledgeParentChunk.create({
+      data: {
+        id: parentChunkId,
+        tenantId,
+        knowledgeBaseId,
+        documentId,
+        documentVersionId,
+        parentIndex: 0,
+        content: 'Only the governed role may use this policy.',
+        tokenCount: 10,
+        contentHash: 'e'.repeat(64),
+      },
+    });
     await administrator.knowledgeChunk.createMany({
       data: [
         chunk(allowedChunkId, 0, { orgUnitId, projectId, taskId, dataLabels: ['role:governed'] }),
@@ -496,6 +513,7 @@ describe.runIf(enabled)('PostgreSQL knowledge citation authorization', () => {
       knowledgeBaseId,
       documentId,
       documentVersionId,
+      parentChunkId,
       chunkIndex,
       content:
         id === allowedChunkId
@@ -606,7 +624,7 @@ describe.runIf(enabled)('PostgreSQL knowledge citation authorization', () => {
       subjectVersion: 1,
       fixtureName,
     });
-    const repository = new PrismaAiEvaluationRepository({
+    const knowledgePrisma = {
       withTenant: <T>(
         scopedTenantId: string,
         operation: (transaction: Prisma.TransactionClient) => Promise<T>,
@@ -617,7 +635,11 @@ describe.runIf(enabled)('PostgreSQL knowledge citation authorization', () => {
           );
           return operation(transaction);
         }),
-    } as never);
+    } as never;
+    const repository = new PrismaAiEvaluationRepository(
+      knowledgePrisma,
+      new KnowledgeBoundaryReadService(knowledgePrisma),
+    );
     const principal = {
       tenantId,
       userId: otherRoleUserId,

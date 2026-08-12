@@ -8,6 +8,7 @@ import {
   AgentRunStreamingBubble,
   agentRunStreamPhaseLabel,
   agentRunWaitingMessage,
+  answerFeedbackUnavailable,
   answerFeedbackReasonLabel,
   agentRunFailureMessage,
   citationDisplayMetadata,
@@ -239,6 +240,27 @@ describe('answer feedback presentation', () => {
     ['OTHER', '其他原因'],
   ] as const)('maps %s to a clear employee-facing reason', (reason, label) => {
     expect(answerFeedbackReasonLabel(reason)).toBe(label);
+  });
+
+  it('treats an unrated historical answer as unavailable instead of exposing a technical error', () => {
+    expect(
+      answerFeedbackUnavailable(
+        new ApiClientError('http', 'The Agent answer was not found or cannot be rated.', {
+          status: 404,
+        }),
+      ),
+    ).toBe(true);
+    expect(answerFeedbackUnavailable({ kind: 'http', status: 404 })).toBe(true);
+    expect(
+      answerFeedbackUnavailable(
+        new Error('The Agent answer was not found or cannot be rated.（请求 ID：legacy）'),
+      ),
+    ).toBe(true);
+    expect(
+      answerFeedbackUnavailable(
+        new ApiClientError('http', 'Service unavailable.', { status: 503 }),
+      ),
+    ).toBe(false);
   });
 });
 

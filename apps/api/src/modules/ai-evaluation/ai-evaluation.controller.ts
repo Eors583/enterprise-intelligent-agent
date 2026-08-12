@@ -4,6 +4,7 @@ import {
   aiEvaluationRunListQuerySchema,
   aiEvaluationReadinessQuerySchema,
   annotateAiEvaluationCaseRequestSchema,
+  bulkImportKnowledgeRetrievalEvaluationCasesRequestSchema,
   createAiEvaluationCaseRequestSchema,
   createAiEvaluationDatasetRequestSchema,
   createAiEvaluationDatasetVersionRequestSchema,
@@ -14,11 +15,13 @@ import {
   submitAiEvaluationRunRequestSchema,
   transitionAiEvaluationDatasetVersionRequestSchema,
   triageAiEvaluationBadCaseRequestSchema,
+  runKnowledgeRetrievalBenchmarkRequestSchema,
   verifyAiEvaluationRunRequestSchema,
   type AiEvaluationListQuery,
   type AiEvaluationRunListQuery,
   type AiEvaluationReadinessQuery,
   type AnnotateAiEvaluationCaseRequest,
+  type BulkImportKnowledgeRetrievalEvaluationCasesRequest,
   type CreateAiEvaluationCaseRequest,
   type CreateAiEvaluationDatasetRequest,
   type CreateAiEvaluationDatasetVersionRequest,
@@ -29,10 +32,12 @@ import {
   type SubmitAiEvaluationRunRequest,
   type TransitionAiEvaluationDatasetVersionRequest,
   type TriageAiEvaluationBadCaseRequest,
+  type RunKnowledgeRetrievalBenchmarkRequest,
   type VerifyAiEvaluationRunRequest,
 } from '@enterprise/contracts';
 
 import { AiEvaluationService } from './ai-evaluation.service.js';
+import { KnowledgeRetrievalBenchmarkService } from './knowledge-retrieval-benchmark.service.js';
 import { SchemaValidationPipe } from '../../common/pipes/schema-validation.pipe.js';
 
 @Controller('admin/ai-evaluations')
@@ -40,6 +45,8 @@ export class AiEvaluationController {
   constructor(
     @Inject(AiEvaluationService)
     private readonly evaluations: AiEvaluationService,
+    @Inject(KnowledgeRetrievalBenchmarkService)
+    private readonly retrievalBenchmarks: KnowledgeRetrievalBenchmarkService,
   ) {}
 
   @Get('datasets')
@@ -97,6 +104,37 @@ export class AiEvaluationController {
     request: CreateAiEvaluationCaseRequest,
   ) {
     return this.evaluations.createCase(versionId, request);
+  }
+
+  @Post('dataset-versions/:versionId/retrieval-cases/bulk-import')
+  bulkImportRetrievalCases(
+    @Param('versionId', new ParseUUIDPipe()) versionId: string,
+    @Body(new SchemaValidationPipe(bulkImportKnowledgeRetrievalEvaluationCasesRequestSchema))
+    request: BulkImportKnowledgeRetrievalEvaluationCasesRequest,
+  ) {
+    return this.retrievalBenchmarks.bulkImport(versionId, request);
+  }
+
+  @Get('dataset-versions/:versionId/retrieval-benchmarks')
+  listRetrievalBenchmarks(
+    @Param('versionId', new ParseUUIDPipe()) versionId: string,
+    @Query(new SchemaValidationPipe(aiEvaluationListQuerySchema)) query: AiEvaluationListQuery,
+  ) {
+    return this.retrievalBenchmarks.listRuns(versionId, query);
+  }
+
+  @Post('dataset-versions/:versionId/retrieval-benchmarks')
+  runRetrievalBenchmark(
+    @Param('versionId', new ParseUUIDPipe()) versionId: string,
+    @Body(new SchemaValidationPipe(runKnowledgeRetrievalBenchmarkRequestSchema))
+    request: RunKnowledgeRetrievalBenchmarkRequest,
+  ) {
+    return this.retrievalBenchmarks.run(versionId, request);
+  }
+
+  @Get('retrieval-benchmarks/:runId')
+  getRetrievalBenchmark(@Param('runId', new ParseUUIDPipe()) runId: string) {
+    return this.retrievalBenchmarks.getRun(runId);
   }
 
   @Get('dataset-versions/:versionId/cases')

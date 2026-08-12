@@ -15,7 +15,9 @@ const otherRoleTemplateId = randomUUID();
 const knowledgeBaseId = randomUUID();
 const documentId = randomUUID();
 const documentVersionId = randomUUID();
+const parentChunkId = randomUUID();
 const chunkId = randomUUID();
+const embeddingIndexVersionId = randomUUID();
 const experienceId = randomUUID();
 const projectionId = randomUUID();
 
@@ -151,10 +153,11 @@ describe.runIf(enabled)('PostgreSQL Experience to Knowledge projection integrati
 
     await administrator.$executeRaw(Prisma.sql`
       INSERT INTO public."knowledge_chunk_embeddings" (
-        "id", "tenant_id", "chunk_id", "embedding_model",
+        "id", "tenant_id", "chunk_id", "embedding_index_version_id", "embedding_model",
         "embedding_dimension", "content_hash", "embedding"
       ) VALUES (
         ${randomUUID()}::uuid, ${tenantId}::uuid, ${chunkId}::uuid,
+        ${embeddingIndexVersionId}::uuid,
         'experience-projection-integration', 1536, ${'c'.repeat(64)},
         array_fill(0::real, ARRAY[1536])::vector
       )
@@ -253,6 +256,22 @@ async function seedGovernedProjectionFixtures(): Promise<void> {
       )
     `);
     await transaction.$executeRaw(Prisma.sql`
+      INSERT INTO public."knowledge_embedding_index_versions" (
+        "id", "tenant_id", "knowledge_base_id", "version", "status",
+        "provider", "model", "dimensions", "created_by_id", "activated_at"
+      ) VALUES (
+        ${embeddingIndexVersionId}::uuid, ${tenantId}::uuid, ${knowledgeBaseId}::uuid,
+        1, 'ACTIVE', 'local_fastembed', 'experience-projection-integration', 1536,
+        ${makerId}::uuid, statement_timestamp()
+      )
+    `);
+    await transaction.$executeRaw(Prisma.sql`
+      UPDATE public."knowledge_bases"
+      SET "active_embedding_index_version_id" = ${embeddingIndexVersionId}::uuid
+      WHERE "tenant_id" = ${tenantId}::uuid
+        AND "id" = ${knowledgeBaseId}::uuid
+    `);
+    await transaction.$executeRaw(Prisma.sql`
       INSERT INTO public."knowledge_documents" (
         "id", "tenant_id", "knowledge_base_id", "title", "source_type",
         "status", "document_version", "created_by_id"
@@ -279,13 +298,24 @@ async function seedGovernedProjectionFixtures(): Promise<void> {
       )
     `);
     await transaction.$executeRaw(Prisma.sql`
-      INSERT INTO public."knowledge_chunks" (
+      INSERT INTO public."knowledge_parent_chunks" (
         "id", "tenant_id", "knowledge_base_id", "document_id",
-        "document_version_id", "chunk_index", "content", "token_count",
+        "document_version_id", "parent_index", "content", "token_count",
         "content_hash"
       ) VALUES (
-        ${chunkId}::uuid, ${tenantId}::uuid, ${knowledgeBaseId}::uuid,
+        ${parentChunkId}::uuid, ${tenantId}::uuid, ${knowledgeBaseId}::uuid,
         ${documentId}::uuid, ${documentVersionId}::uuid, 0,
+        'A validated and governed Experience projection.', 8, ${'c'.repeat(64)}
+      )
+    `);
+    await transaction.$executeRaw(Prisma.sql`
+      INSERT INTO public."knowledge_chunks" (
+        "id", "tenant_id", "knowledge_base_id", "document_id",
+        "document_version_id", "parent_chunk_id", "chunk_index", "content",
+        "token_count", "content_hash"
+      ) VALUES (
+        ${chunkId}::uuid, ${tenantId}::uuid, ${knowledgeBaseId}::uuid,
+        ${documentId}::uuid, ${documentVersionId}::uuid, ${parentChunkId}::uuid, 0,
         'A validated and governed Experience projection.', 8, ${'c'.repeat(64)}
       )
     `);

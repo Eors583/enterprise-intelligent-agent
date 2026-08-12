@@ -19,7 +19,7 @@ ModelFactory = Callable[[], Any]
 
 
 class LocalFastembedEmbeddingProvider:
-    """CPU-local FastEmbed adapter that preserves the existing pgvector dimension contract."""
+    """CPU-local FastEmbed adapter with a configurable output dimension contract."""
 
     provider = "local_fastembed"
 

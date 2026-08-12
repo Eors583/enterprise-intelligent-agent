@@ -14,11 +14,8 @@ const PROJECTION_ID = '00000000-0000-7000-8000-000000000005';
 const GRAPH_HASH = 'a'.repeat(64);
 
 describe('knowledge graph projection publication lifecycle', () => {
-  it('atomically retires the old active projection and activates the governed candidate', async () => {
-    const transaction = fakeTransaction([
-      [{ id: PROJECTION_ID, graph_hash: GRAPH_HASH }],
-      [{ open_schema_gap_count: 0, ungoverned_relation_count: 0 }],
-    ]);
+  it('atomically retires the old active projection and activates the candidate', async () => {
+    const transaction = fakeTransaction([[{ id: PROJECTION_ID, graph_hash: GRAPH_HASH }]]);
 
     await expect(activateKnowledgeGraphProjection(transaction.value, IDENTITY)).resolves.toEqual({
       projectionId: PROJECTION_ID,
@@ -29,8 +26,6 @@ describe('knowledge graph projection publication lifecycle', () => {
     const mutations = transaction.executeSql.join('\n');
     expect(queries).toContain(`"status" = 'CANDIDATE'`);
     expect(queries).toContain('FOR UPDATE');
-    expect(queries).toContain('open_schema_gap_count');
-    expect(queries).toContain('ungoverned_relation_count');
     expect(mutations).toContain(`"status" = 'OBSOLETE'`);
     expect(mutations).toContain(`"status" = 'ACTIVE'`);
     expect(mutations.indexOf(`"status" = 'OBSOLETE'`)).toBeLessThan(
@@ -38,27 +33,27 @@ describe('knowledge graph projection publication lifecycle', () => {
     );
   });
 
-  it('refuses to activate a candidate with an open projection-bound schema gap', async () => {
+  it('returns null without mutations when the document version has no candidate projection', async () => {
+    const transaction = fakeTransaction([[]]);
+
+    await expect(activateKnowledgeGraphProjection(transaction.value, IDENTITY)).resolves.toBeNull();
+    expect(transaction.executeSql).toHaveLength(0);
+  });
+
+  it('refuses ambiguous activation when a document version has multiple candidate projections', async () => {
     const transaction = fakeTransaction([
-      [{ id: PROJECTION_ID, graph_hash: GRAPH_HASH }],
-      [{ open_schema_gap_count: 1, ungoverned_relation_count: 0 }],
+      [
+        { id: PROJECTION_ID, graph_hash: GRAPH_HASH },
+        {
+          id: '00000000-0000-7000-8000-000000000006',
+          graph_hash: 'b'.repeat(64),
+        },
+      ],
     ]);
 
     await expect(
       activateKnowledgeGraphProjection(transaction.value, IDENTITY),
     ).rejects.toBeInstanceOf(ConflictException);
-    expect(transaction.executeSql).toHaveLength(0);
-  });
-
-  it('refuses to activate extracted relations before independent ontology governance', async () => {
-    const transaction = fakeTransaction([
-      [{ id: PROJECTION_ID, graph_hash: GRAPH_HASH }],
-      [{ open_schema_gap_count: 0, ungoverned_relation_count: 2 }],
-    ]);
-
-    await expect(activateKnowledgeGraphProjection(transaction.value, IDENTITY)).rejects.toThrow(
-      'independently approved ontology governance',
-    );
     expect(transaction.executeSql).toHaveLength(0);
   });
 });

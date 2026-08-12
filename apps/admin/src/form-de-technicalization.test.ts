@@ -22,6 +22,10 @@ function joinedUiSource(): string {
 }
 
 describe('non-technical user form guard', () => {
+  it('does not hide page action buttons behind a generic advanced disclosure', () => {
+    expect(joinedUiSource()).not.toContain('page-action-advanced');
+  });
+
   it('does not expose raw JSON, hashes, UUIDs or delimited arrays as editable fields', () => {
     const source = joinedUiSource();
     expect(source).not.toMatch(/结构化请求 JSON|原始 JSON|JSON 兼容模式|变更内容（JSON）/u);
@@ -48,9 +52,11 @@ describe('non-technical user form guard', () => {
       'utf8',
     );
     expect(upload).toContain('type="file"');
-    expect(upload).toContain('.pdf,.docx,.xlsx,.txt,.md');
+    expect(upload).toContain('.pdf,.docx,.xlsx,.ppt,.pptx,.png');
+    expect(upload).toContain('.txt,.md');
     expect(documents).toContain('上传文件');
-    expect(documents).toContain('knowledge-source-more');
+    expect(documents).not.toContain('knowledge-source-more');
+    expect(documents).not.toContain('更多录入方式');
     expect(documents).toContain('粘贴文本');
   });
 });

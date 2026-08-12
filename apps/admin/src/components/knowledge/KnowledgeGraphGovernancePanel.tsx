@@ -12,6 +12,7 @@ import {
   createKnowledgeOntology,
   getKnowledgeGraphGovernance,
   transitionKnowledgeGraphCorrection,
+  transitionKnowledgeGraphRelationCorrectionBatch,
   transitionKnowledgeOntologyVersion,
 } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
@@ -78,6 +79,8 @@ export function KnowledgeGraphGovernancePanel({
   const [notice, setNotice] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [mutating, setMutating] = useState<string | null>(null);
+  const [actionComment, setActionComment] = useState('已核对当前知识图谱及来源证据。');
+  const [conflictResolutions, setConflictResolutions] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const controller = new AbortController();
@@ -100,7 +103,7 @@ export function KnowledgeGraphGovernancePanel({
     version: KnowledgeOntologyVersion,
     action: 'SUBMIT' | 'REQUEST_CHANGES' | 'PUBLISH' | 'RETIRE',
   ): Promise<void> => {
-    const comment = window.prompt('填写本次治理变更、复核或发布说明：')?.trim();
+    const comment = actionComment.trim();
     if (!comment) return;
     setMutating(`version:${version.id}`);
     setError(null);
@@ -113,7 +116,7 @@ export function KnowledgeGraphGovernancePanel({
       });
       setNotice(
         action === 'PUBLISH'
-          ? '本体版本已由独立复核人发布，检索读模型会立即使用已发布版本。'
+          ? '本体版本已发布；存量关系已自动形成待独立复核批次，模式缺口已按发布证据关闭。'
           : '本体版本状态已更新。',
       );
       reload();
@@ -129,7 +132,7 @@ export function KnowledgeGraphGovernancePanel({
     revision: number,
     action: 'SUBMIT' | 'APPROVE' | 'REJECT' | 'APPLY',
   ): Promise<void> => {
-    const comment = window.prompt('填写人工复核证据或执行说明：')?.trim();
+    const comment = actionComment.trim();
     if (!comment) return;
     setMutating(`correction:${correctionId}`);
     setError(null);
@@ -151,10 +154,36 @@ export function KnowledgeGraphGovernancePanel({
     }
   };
 
+  const transitionRelationBatch = async (
+    ontologyVersionId: string,
+    action: 'APPROVE' | 'APPLY',
+  ): Promise<void> => {
+    const comment = actionComment.trim();
+    if (!comment) return;
+    setMutating(`relation-batch:${ontologyVersionId}:${action}`);
+    setError(null);
+    try {
+      const result = await transitionKnowledgeGraphRelationCorrectionBatch(knowledgeBaseId, {
+        ontologyVersionId,
+        action,
+        comment,
+        idempotencyKey: governanceKey(`relation-batch-${ontologyVersionId}-${action}`),
+      });
+      setNotice(
+        action === 'APPROVE'
+          ? `已独立复核 ${result.transitionedCount} 条关系；${result.skippedCount} 条因状态或复核人限制未变更。`
+          : `已应用 ${result.transitionedCount} 条关系并写入受治理检索读模型。`,
+      );
+      reload();
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setMutating(null);
+    }
+  };
+
   const proposeConflictResolution = async (conflict: KnowledgeGraphConflict): Promise<void> => {
-    const resolution = window
-      .prompt('填写冲突裁决结论、保留事实及依据；该操作只创建草稿，不会直接改变检索：')
-      ?.trim();
+    const resolution = conflictResolutions[conflict.id]?.trim();
     if (!resolution) return;
     setMutating(`conflict:${conflict.id}`);
     setError(null);
@@ -201,6 +230,12 @@ export function KnowledgeGraphGovernancePanel({
   const openConflicts = overview.conflicts.filter((item) =>
     ['OPEN', 'IN_REVIEW'].includes(item.status),
   );
+  const publishedVersion = overview.ontologies
+    .flatMap((ontology) => ontology.versions)
+    .find((version) => version.status === 'PUBLISHED');
+  const hasUserOntology = overview.ontologies.some((ontology) =>
+    ontology.versions.some((version) => !version.systemBootstrap),
+  );
   return (
     <section className="card knowledge-tab-panel knowledge-graph-governance">
       <header className="card-header">
@@ -227,6 +262,85 @@ export function KnowledgeGraphGovernancePanel({
       ) : null}
       {error ? <Notice tone="info">{error}</Notice> : null}
 
+      <section className="knowledge-governance-journey" aria-label="关系治理三步流程">
+        <header>
+          <div>
+            <h3>按三步启用可信关系检索</h3>
+            <p>系统已根据当前图谱归纳实体和关系，不需要手写技术字段。</p>
+          </div>
+          <span>
+            {overview.suggestedOntology.sourceEntityCount} 个实体 ·{' '}
+            {overview.suggestedOntology.sourceRelationCount} 条关系
+          </span>
+        </header>
+        <ol>
+          <li className={hasUserOntology ? 'done' : 'current'}>
+            <strong>1. 创建本体草稿</strong>
+            <span>
+              系统建议 {overview.suggestedOntology.entityTypes.length} 类实体、
+              {overview.suggestedOntology.predicates.length} 类关系
+            </span>
+          </li>
+          <li
+            className={publishedVersion !== undefined ? 'done' : hasUserOntology ? 'current' : ''}
+          >
+            <strong>2. 另一位管理员复核发布</strong>
+            <span>发布后自动覆盖存量模式缺口并生成关系复核批次</span>
+          </li>
+          <li
+            className={
+              overview.retrieval.ungovernedRelationCount === 0 && publishedVersion !== undefined
+                ? 'done'
+                : publishedVersion !== undefined
+                  ? 'current'
+                  : ''
+            }
+          >
+            <strong>3. 批量复核并应用关系</strong>
+            <span>
+              待复核 {overview.retrieval.pendingReviewRelationCount} 条 · 待应用{' '}
+              {overview.retrieval.approvedRelationCount} 条
+            </span>
+          </li>
+        </ol>
+        <label className="knowledge-governance-comment">
+          <span>本次操作说明（会进入审计记录）</span>
+          <input
+            value={actionComment}
+            onChange={(event) => setActionComment(event.target.value)}
+            placeholder="例如：已核对关系类型和抽样来源证据"
+          />
+        </label>
+        {publishedVersion ? (
+          <div className="button-row">
+            <button
+              className="button primary"
+              type="button"
+              disabled={
+                mutating !== null ||
+                actionComment.trim() === '' ||
+                overview.retrieval.pendingReviewRelationCount === 0
+              }
+              onClick={() => void transitionRelationBatch(publishedVersion.id, 'APPROVE')}
+            >
+              批量独立复核 {overview.retrieval.pendingReviewRelationCount} 条
+            </button>
+            <button
+              className="button primary"
+              type="button"
+              disabled={
+                mutating !== null ||
+                actionComment.trim() === '' ||
+                overview.retrieval.approvedRelationCount === 0
+              }
+              onClick={() => void transitionRelationBatch(publishedVersion.id, 'APPLY')}
+            >
+              批量应用 {overview.retrieval.approvedRelationCount} 条
+            </button>
+          </div>
+        ) : null}
+      </section>
+
       <div className="knowledge-graph-metrics">
         <GovernanceMetric
           label="已发布本体版本"
@@ -234,6 +348,11 @@ export function KnowledgeGraphGovernancePanel({
         />
         <GovernanceMetric label="可检索关系" value={overview.retrieval.eligibleRelationCount} />
         <GovernanceMetric label="规范实体合并" value={overview.retrieval.mergedEntityCount} />
+        <GovernanceMetric
+          label="尚未治理关系"
+          value={overview.retrieval.ungovernedRelationCount}
+          warning={overview.retrieval.ungovernedRelationCount > 0}
+        />
         <GovernanceMetric
           label="冲突排除"
           value={overview.retrieval.excludedConflictCount}
@@ -252,7 +371,7 @@ export function KnowledgeGraphGovernancePanel({
       <div className="knowledge-governance-grid">
         <section>
           <h3>本体版本</h3>
-          {overview.ontologies.length === 0 ? (
+          {!hasUserOntology ? (
             <EmptyState
               title="尚未创建业务本体"
               description="先定义实体类型与谓词约束，再提交另一位管理员复核发布。"
@@ -283,7 +402,7 @@ export function KnowledgeGraphGovernancePanel({
                         <button
                           className="button secondary compact"
                           type="button"
-                          disabled={mutating !== null}
+                          disabled={mutating !== null || actionComment.trim() === ''}
                           onClick={() => void transitionVersion(version, 'SUBMIT')}
                         >
                           提交复核
@@ -294,7 +413,7 @@ export function KnowledgeGraphGovernancePanel({
                           <button
                             className="button secondary compact"
                             type="button"
-                            disabled={mutating !== null}
+                            disabled={mutating !== null || actionComment.trim() === ''}
                             onClick={() => void transitionVersion(version, 'REQUEST_CHANGES')}
                           >
                             退回修改
@@ -302,7 +421,7 @@ export function KnowledgeGraphGovernancePanel({
                           <button
                             className="button primary compact"
                             type="button"
-                            disabled={mutating !== null}
+                            disabled={mutating !== null || actionComment.trim() === ''}
                             onClick={() => void transitionVersion(version, 'PUBLISH')}
                           >
                             独立复核并发布
@@ -313,7 +432,7 @@ export function KnowledgeGraphGovernancePanel({
                         <button
                           className="button secondary compact"
                           type="button"
-                          disabled={mutating !== null}
+                          disabled={mutating !== null || actionComment.trim() === ''}
                           onClick={() => void transitionVersion(version, 'RETIRE')}
                         >
                           退役版本
@@ -349,7 +468,7 @@ export function KnowledgeGraphGovernancePanel({
                     <button
                       className="button secondary compact"
                       type="button"
-                      disabled={mutating !== null}
+                      disabled={mutating !== null || actionComment.trim() === ''}
                       onClick={() =>
                         void transitionCorrection(correction.id, correction.revision, 'SUBMIT')
                       }
@@ -362,7 +481,7 @@ export function KnowledgeGraphGovernancePanel({
                       <button
                         className="button secondary compact"
                         type="button"
-                        disabled={mutating !== null}
+                        disabled={mutating !== null || actionComment.trim() === ''}
                         onClick={() =>
                           void transitionCorrection(correction.id, correction.revision, 'REJECT')
                         }
@@ -372,7 +491,7 @@ export function KnowledgeGraphGovernancePanel({
                       <button
                         className="button primary compact"
                         type="button"
-                        disabled={mutating !== null}
+                        disabled={mutating !== null || actionComment.trim() === ''}
                         onClick={() =>
                           void transitionCorrection(correction.id, correction.revision, 'APPROVE')
                         }
@@ -385,7 +504,7 @@ export function KnowledgeGraphGovernancePanel({
                     <button
                       className="button primary compact"
                       type="button"
-                      disabled={mutating !== null}
+                      disabled={mutating !== null || actionComment.trim() === ''}
                       onClick={() =>
                         void transitionCorrection(correction.id, correction.revision, 'APPLY')
                       }
@@ -417,10 +536,26 @@ export function KnowledgeGraphGovernancePanel({
                   {conflict.targetType} · {conflict.targetId} · revision {conflict.revision}
                 </small>
                 <pre>{JSON.stringify(conflict.details, null, 2)}</pre>
+                <label className="knowledge-conflict-resolution">
+                  <span>裁决结论与依据</span>
+                  <textarea
+                    rows={2}
+                    value={conflictResolutions[conflict.id] ?? ''}
+                    onChange={(event) =>
+                      setConflictResolutions((current) => ({
+                        ...current,
+                        [conflict.id]: event.target.value,
+                      }))
+                    }
+                    placeholder="说明保留、合并或排除该关系的理由"
+                  />
+                </label>
                 <button
                   className="button primary compact"
                   type="button"
-                  disabled={mutating !== null}
+                  disabled={
+                    mutating !== null || (conflictResolutions[conflict.id]?.trim() ?? '') === ''
+                  }
                   onClick={() => void proposeConflictResolution(conflict)}
                 >
                   创建裁决草稿
@@ -435,6 +570,7 @@ export function KnowledgeGraphGovernancePanel({
         <summary>创建受治理的本体版本</summary>
         <CreateOntologyForm
           knowledgeBaseId={knowledgeBaseId}
+          suggestion={overview.suggestedOntology}
           onCreated={() => {
             setNotice('本体草稿已创建；发布前必须由另一位管理员独立复核。');
             reload();
@@ -451,17 +587,21 @@ export function KnowledgeGraphGovernancePanel({
 
 function CreateOntologyForm({
   knowledgeBaseId,
+  suggestion,
   onCreated,
 }: {
   knowledgeBaseId: string;
+  suggestion: KnowledgeGraphGovernanceOverview['suggestedOntology'];
   onCreated: () => void;
 }): ReactNode {
-  const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
-  const [changeSummary, setChangeSummary] = useState('');
-  const [template, setTemplate] = useState<'DOCUMENT_OWNERSHIP' | 'DOCUMENT_ONLY'>(
-    'DOCUMENT_OWNERSHIP',
+  const [name, setName] = useState('企业知识关系本体');
+  const [description, setDescription] = useState(
+    '根据当前知识库实体和关系自动归纳的业务语义模型。',
   );
+  const [changeSummary, setChangeSummary] = useState('建立首版关系检索实体类型和关系约束。');
+  const [template, setTemplate] = useState<
+    'GRAPH_SUGGESTION' | 'DOCUMENT_OWNERSHIP' | 'DOCUMENT_ONLY'
+  >(suggestion.entityTypes.length > 0 ? 'GRAPH_SUGGESTION' : 'DOCUMENT_OWNERSHIP');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -470,14 +610,25 @@ function CreateOntologyForm({
     setSubmitting(true);
     setError(null);
     try {
+      const entityTypes =
+        template === 'GRAPH_SUGGESTION'
+          ? suggestion.entityTypes
+          : template === 'DOCUMENT_ONLY'
+            ? [DEFAULT_ENTITY_TYPES[0]!]
+            : [...DEFAULT_ENTITY_TYPES];
+      const predicates =
+        template === 'GRAPH_SUGGESTION'
+          ? suggestion.predicates
+          : template === 'DOCUMENT_ONLY'
+            ? []
+            : [...DEFAULT_PREDICATES];
       await createKnowledgeOntology(knowledgeBaseId, {
         code: generatedOntologyCode(name),
         name,
         description: description.trim() || null,
         changeSummary,
-        entityTypes:
-          template === 'DOCUMENT_ONLY' ? [DEFAULT_ENTITY_TYPES[0]!] : [...DEFAULT_ENTITY_TYPES],
-        predicates: template === 'DOCUMENT_ONLY' ? [] : [...DEFAULT_PREDICATES],
+        entityTypes,
+        predicates,
         idempotencyKey: governanceKey('ontology-create'),
       });
       onCreated();
@@ -496,10 +647,19 @@ function CreateOntologyForm({
           value={template}
           onChange={(event) => setTemplate(event.target.value as typeof template)}
         >
+          {suggestion.entityTypes.length > 0 ? (
+            <option value="GRAPH_SUGGESTION">
+              根据当前图谱自动生成（{suggestion.entityTypes.length} 类实体 /{' '}
+              {suggestion.predicates.length} 类关系）
+            </option>
+          ) : null}
           <option value="DOCUMENT_OWNERSHIP">文档、人员与组织责任关系</option>
           <option value="DOCUMENT_ONLY">仅管理文档实体</option>
         </select>
-        <small>实体类型、关系方向和约束由系统模板生成。</small>
+        <small>
+          推荐使用当前图谱建议；系统会把 {suggestion.sourceRelationCount}{' '}
+          条已识别关系归纳为可复核定义。
+        </small>
       </label>
       <label>
         <span>本体名称</span>
@@ -548,9 +708,9 @@ function GovernanceMetric({
 function generatedOntologyCode(name: string): string {
   const normalized = name
     .normalize('NFKC')
-    .replace(/[^\p{L}\p{N}]+/gu, '_')
-    .replace(/^_+|_+$/gu, '')
     .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, '_')
+    .replace(/^_+|_+$/gu, '')
     .slice(0, 48);
   return `ONTOLOGY_${normalized || 'KNOWLEDGE'}_${Date.now().toString(36).toUpperCase()}`;
 }

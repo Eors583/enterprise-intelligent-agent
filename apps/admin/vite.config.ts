@@ -55,6 +55,12 @@ export function createAdminViteConfig(input: AdminViteConfigInput) {
       }),
       proxy,
     },
+    build: {
+      target: 'es2022',
+      minify: 'esbuild' as const,
+      cssMinify: true,
+      sourcemap: false,
+    },
   };
 }
 
@@ -103,7 +109,7 @@ export function adminSecurityHeaders(
     ? ` ws://127.0.0.1:${port} ws://localhost:${port}`
     : '';
   return {
-    'Cache-Control': 'no-store',
+    'Cache-Control': input.development ? 'no-store' : 'no-cache, max-age=0, must-revalidate',
     'Content-Security-Policy': [
       "default-src 'self'",
       "base-uri 'self'",

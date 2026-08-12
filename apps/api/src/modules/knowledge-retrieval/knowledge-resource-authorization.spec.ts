@@ -11,11 +11,18 @@ import {
 const NOW = new Date('2026-07-28T12:00:00.000Z');
 
 describe('knowledge version resource authorization', () => {
-  it('fails closed for missing, malformed, unreviewed and expired policies', () => {
+  it('allows pending initial content while failing closed for malformed, rejected and expired policies', () => {
     expect(knowledgeVersionResourcePolicyAllowed({}, unrestricted(), NOW)).toBe(false);
     expect(
       knowledgeVersionResourcePolicyAllowed(
         policy({ reviewStatus: 'PENDING' }),
+        unrestricted(),
+        NOW,
+      ),
+    ).toBe(true);
+    expect(
+      knowledgeVersionResourcePolicyAllowed(
+        policy({ reviewStatus: 'REJECTED' }),
         unrestricted(),
         NOW,
       ),
@@ -106,12 +113,71 @@ describe('knowledge version resource authorization', () => {
     ).toBe(true);
   });
 
+  it('allows any explicitly selected member without requiring every selected member identity', () => {
+    const memberRestricted = policy({
+      scopeMode: 'RESTRICTED',
+      dataLabels: [
+        'USER:00000000-0000-7000-8000-000000000501',
+        'USER:00000000-0000-7000-8000-000000000502',
+      ],
+    });
+    expect(
+      knowledgeVersionResourcePolicyAllowed(
+        memberRestricted,
+        {
+          ...unrestricted(),
+          principalDataLabels: ['USER:00000000-0000-7000-8000-000000000502'],
+        },
+        NOW,
+      ),
+    ).toBe(true);
+    expect(
+      knowledgeVersionResourcePolicyAllowed(
+        memberRestricted,
+        {
+          ...unrestricted(),
+          principalDataLabels: ['USER:00000000-0000-7000-8000-000000000503'],
+        },
+        NOW,
+      ),
+    ).toBe(false);
+  });
+
+  it('treats selected departments and selected members as alternative people scopes', () => {
+    const departmentOrMember = policy({
+      scopeMode: 'RESTRICTED',
+      organizationScopeIds: ['00000000-0000-7000-8000-000000000510'],
+      dataLabels: ['USER:00000000-0000-7000-8000-000000000511'],
+    });
+    expect(
+      knowledgeVersionResourcePolicyAllowed(
+        departmentOrMember,
+        {
+          ...unrestricted(),
+          organizationIds: ['00000000-0000-7000-8000-000000000510'],
+        },
+        NOW,
+      ),
+    ).toBe(true);
+    expect(
+      knowledgeVersionResourcePolicyAllowed(
+        departmentOrMember,
+        {
+          ...unrestricted(),
+          principalDataLabels: ['USER:00000000-0000-7000-8000-000000000511'],
+        },
+        NOW,
+      ),
+    ).toBe(true);
+  });
+
   it('builds pre-retrieval SQL from version governance columns, not chunk metadata', () => {
     const predicate = knowledgeVersionResourcePolicySql(Prisma.sql`version`, unrestricted()).sql;
     const snapshot = knowledgeVersionResourcePolicySnapshotSql(Prisma.sql`version`).sql;
     expect(predicate).toContain('governance_review_status');
     expect(predicate).toContain('effective_from');
     expect(predicate).toContain('scope_mode');
+    expect(predicate).toContain('USER:%');
     expect(predicate).not.toContain('metadata');
     expect(snapshot).toContain('governance_hash');
   });

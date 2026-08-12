@@ -338,6 +338,15 @@ describe('DesktopAuthManager account isolation', () => {
         body: { expectedRevision: 1, action: 'ACKNOWLEDGE' },
       },
       {
+        path: '/api/v1/workbench/people/me/personal-manual',
+        method: 'GET' as const,
+      },
+      {
+        path: '/api/v1/workbench/people/me/personal-manual',
+        method: 'PUT' as const,
+        body: { expectedUpdatedAt: null, manual: { faqs: [] } },
+      },
+      {
         path: '/api/v1/workbench/memories?limit=100&scope=EMPLOYEE_PRIVATE&purpose=assist',
         method: 'GET' as const,
       },

@@ -97,6 +97,46 @@ describe('ConversationService operational Agent boundary', () => {
     ).rejects.toBeInstanceOf(ServiceUnavailableException);
     expect(conversations.createDirect).not.toHaveBeenCalled();
   });
+
+  it('commits an Agent-targeted message without a duplicate Runtime readiness round trip', async () => {
+    const createdMessage = {
+      id: '00000000-0000-7000-8000-000000000301',
+      conversationId: '00000000-0000-7000-8000-000000000302',
+    };
+    const conversations = {
+      createUserMessage: vi.fn().mockResolvedValue(createdMessage),
+    };
+    const inspectAgents = vi.fn();
+    const service = new ConversationService(
+      {
+        getCurrentIdentity: vi.fn().mockResolvedValue({
+          user: { id: USER_ID, tenantId: TENANT_ID, name: 'Requester' },
+        }),
+      } as unknown as IdentityService,
+      {} as IdentityRepository,
+      {} as AgentControlService,
+      conversations as unknown as ConversationRepository,
+      { requireCurrent: vi.fn() } as unknown as AuthorizationService,
+      { inspectAgents } as never,
+    );
+
+    await expect(
+      service.createMessage(createdMessage.conversationId, {
+        clientMessageId: '00000000-0000-7000-8000-000000000303',
+        content: { type: 'text', text: '请根据企业知识回答。' },
+        responseTarget: { type: 'agent', agentId: AGENT_ID },
+      }),
+    ).resolves.toBe(createdMessage);
+
+    expect(inspectAgents).not.toHaveBeenCalled();
+    expect(conversations.createUserMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tenantId: TENANT_ID,
+        senderUserId: USER_ID,
+        responseTarget: { type: 'agent', agentId: AGENT_ID },
+      }),
+    );
+  });
 });
 
 describe('ConversationService shared member and Agent channel', () => {

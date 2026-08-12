@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from enterprise_ai_runtime.domain.errors import KnowledgeCapabilityDisabledError
+from enterprise_ai_runtime.domain.errors import (
+    KnowledgeCapabilityDisabledError,
+    KnowledgeEmbeddingProfileMismatchError,
+)
 from enterprise_ai_runtime.domain.knowledge_models import (
     CapabilityStatus,
     EmbeddingCapability,
@@ -41,10 +44,26 @@ class KnowledgeService:
         ) as span:
             if self._embedding_provider is None:
                 raise KnowledgeCapabilityDisabledError("embeddings")
+            if (
+                command.expected_model is not None
+                and command.expected_model != self._embedding_provider.model
+            ) or (
+                command.expected_dimensions is not None
+                and command.expected_dimensions != self._embedding_dimensions
+            ):
+                raise KnowledgeEmbeddingProfileMismatchError()
             response = await self._embedding_provider.embed(
                 command.inputs,
                 request_id=request_id,
             )
+            if (
+                command.expected_model is not None
+                and command.expected_model != response.model
+            ) or (
+                command.expected_dimensions is not None
+                and command.expected_dimensions != response.dimensions
+            ):
+                raise KnowledgeEmbeddingProfileMismatchError()
             span.set_attribute("gen_ai.request.model", response.model)
             mark_span_result(span, status="succeeded")
             return response

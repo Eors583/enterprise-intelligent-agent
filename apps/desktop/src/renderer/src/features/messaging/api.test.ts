@@ -218,6 +218,26 @@ describe('conversation API', () => {
       chunkId,
       headingPath: ['人事制度', '年假'],
       sourceType: 'MARKDOWN',
+      sourceFileName: 'leave-policy.md',
+      sourceMimeType: 'text/markdown',
+      sourceUri: null,
+      sourceDownloadAvailable: true,
+      sourceLocator: {
+        kind: 'SECTION',
+        pageStart: null,
+        pageEnd: null,
+        sheetName: null,
+        headingPath: ['人事制度', '年假'],
+      },
+      structuralContext: {
+        parent: {
+          id: '00000000-0000-7000-8000-000000000605',
+          headingPath: ['人事制度', '年假'],
+          excerpt: '年假申请需至少提前一天发起。',
+        },
+        previous: null,
+        next: null,
+      },
       content: '年假申请需至少提前一天发起。',
       updatedAt: '2026-07-20T02:00:00.000Z',
     };

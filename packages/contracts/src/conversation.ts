@@ -243,6 +243,32 @@ export const knowledgeCitationDetailSchema = z
     chunkId: z.string().uuid(),
     headingPath: z.array(z.string()),
     sourceType: z.enum(['TEXT', 'MARKDOWN', 'FILE', 'WEB']),
+    sourceFileName: z.string().min(1).max(300).nullable(),
+    sourceMimeType: z.string().min(1).max(160).nullable(),
+    sourceUri: z.url().max(2_048).nullable(),
+    sourceDownloadAvailable: z.boolean(),
+    sourceLocator: z
+      .object({
+        kind: z.enum(['PAGE', 'SHEET', 'SECTION', 'DOCUMENT']),
+        pageStart: z.number().int().positive().nullable(),
+        pageEnd: z.number().int().positive().nullable(),
+        sheetName: z.string().min(1).max(200).nullable(),
+        headingPath: z.array(z.string()),
+      })
+      .strict(),
+    structuralContext: z
+      .object({
+        parent: z
+          .object({
+            id: z.string().uuid(),
+            headingPath: z.array(z.string()),
+            excerpt: z.string(),
+          })
+          .strict(),
+        previous: z.object({ id: z.string().uuid(), excerpt: z.string() }).strict().nullable(),
+        next: z.object({ id: z.string().uuid(), excerpt: z.string() }).strict().nullable(),
+      })
+      .strict(),
     content: z.string().min(1),
     updatedAt: z.iso.datetime(),
   })

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Prisma, PrismaClient } from '@prisma/client';
 
 import { PrismaAiEvaluationRepository } from '../src/modules/ai-evaluation/infrastructure/prisma-ai-evaluation.repository.js';
+import { KnowledgeBoundaryReadService } from '../src/modules/knowledge-gateway/knowledge-boundary-read.service.js';
 import {
   type KnowledgeResourceAuthorizationFilters,
   knowledgeVersionResourcePolicySql,
@@ -49,6 +50,8 @@ describe.runIf(enabled)('PostgreSQL Knowledge Version governance integration', (
         key: 'governed-policy',
         name: 'Governed Policy',
         status: 'ACTIVE',
+        spaceTargetId: tenantId,
+        spaceTargetName: 'Knowledge Version Governance Integration',
         createdById: makerId,
       },
     });
@@ -279,17 +282,22 @@ describe.runIf(enabled)('PostgreSQL Knowledge Version governance integration', (
       administrator.knowledgeDocumentVersion.count({ where: { id: restrictedVersionId } }),
     ).resolves.toBe(1);
 
-    const unapprovedPublication = await captureDatabaseError(() =>
-      insertVersion({
-        id: randomUUID(),
-        documentId,
-        versionNumber: 3,
-        publishedAt: new Date(),
+    const directlyPublishedVersionId = randomUUID();
+    await insertVersion({
+      id: directlyPublishedVersionId,
+      documentId,
+      versionNumber: 3,
+      publishedAt: new Date(),
+    });
+    await expect(
+      administrator.knowledgeDocumentVersion.findUniqueOrThrow({
+        where: { id: directlyPublishedVersionId },
+        select: { governanceReviewStatus: true, publishedAt: true },
       }),
-    );
-    expect(unapprovedPublication.databaseMessage).toContain(
-      'KNOWLEDGE_GOVERNANCE_APPROVAL_REQUIRED',
-    );
+    ).resolves.toMatchObject({
+      governanceReviewStatus: 'PENDING',
+      publishedAt: expect.any(Date),
+    });
 
     const forgedInitialApproval = await captureDatabaseError(() =>
       insertVersion({
@@ -449,12 +457,25 @@ describe.runIf(enabled)('PostgreSQL Knowledge Version governance integration', (
     documentVersionId: string,
     content: string,
   ): Promise<void> {
+    const parent = await administrator.knowledgeParentChunk.create({
+      data: {
+        tenantId,
+        knowledgeBaseId,
+        documentId,
+        documentVersionId,
+        parentIndex: 0,
+        content,
+        tokenCount: 4,
+        contentHash: 'b'.repeat(64),
+      },
+    });
     await administrator.knowledgeChunk.create({
       data: {
         tenantId,
         knowledgeBaseId,
         documentId,
         documentVersionId,
+        parentChunkId: parent.id,
         chunkIndex: 0,
         content,
         tokenCount: 4,
@@ -538,7 +559,7 @@ describe.runIf(enabled)('PostgreSQL Knowledge Version governance integration', (
       subjectVersion: input.versionNumber,
       fixtureName,
     });
-    const repository = new PrismaAiEvaluationRepository({
+    const knowledgePrisma = {
       withTenant: <T>(
         scopedTenantId: string,
         operation: (transaction: Prisma.TransactionClient) => Promise<T>,
@@ -549,7 +570,11 @@ describe.runIf(enabled)('PostgreSQL Knowledge Version governance integration', (
           );
           return operation(transaction);
         }),
-    } as never);
+    } as never;
+    const repository = new PrismaAiEvaluationRepository(
+      knowledgePrisma,
+      new KnowledgeBoundaryReadService(knowledgePrisma),
+    );
     const principal = {
       tenantId,
       userId: reviewerId,

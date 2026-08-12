@@ -7,7 +7,9 @@ export const DEFAULT_KNOWLEDGE_OBJECT_MAX_BYTES = 50 * 1024 * 1024;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/i;
 const OBJECT_KEY_PATTERN =
-  /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/i;
+  /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})(\.bin|\.structured\.json)$/i;
+
+export type KnowledgeObjectArtifactKind = 'source' | 'structured';
 
 export type KnowledgeObjectBody = Buffer | Uint8Array | Readable | AsyncIterable<Uint8Array>;
 
@@ -16,6 +18,8 @@ export interface PutKnowledgeObjectInput {
   readonly documentId: string;
   readonly versionId: string;
   readonly body: KnowledgeObjectBody;
+  readonly artifactKind?: KnowledgeObjectArtifactKind;
+  readonly contentType?: string;
   /**
    * Required for a streaming body. Buffers are measured and hashed by the
    * implementation before any persistent write starts.
@@ -122,11 +126,13 @@ export function buildKnowledgeObjectKey(input: {
   readonly tenantId: string;
   readonly documentId: string;
   readonly versionId: string;
+  readonly artifactKind?: KnowledgeObjectArtifactKind;
 }): string {
   const tenantId = normalizeUuid(input.tenantId);
   const documentId = normalizeUuid(input.documentId);
   const versionId = normalizeUuid(input.versionId);
-  return `${tenantId}/${documentId}/${versionId}.bin`;
+  const suffix = input.artifactKind === 'structured' ? '.structured.json' : '.bin';
+  return `${tenantId}/${documentId}/${versionId}${suffix}`;
 }
 
 export function assertKnowledgeObjectKey(objectKey: string): string {
@@ -136,11 +142,12 @@ export function assertKnowledgeObjectKey(objectKey: string): string {
     match === null ||
     match[1] === undefined ||
     match[2] === undefined ||
-    match[3] === undefined
+    match[3] === undefined ||
+    match[4] === undefined
   ) {
     throw new KnowledgeObjectValidationError('Invalid knowledge object key.');
   }
-  return `${match[1].toLowerCase()}/${match[2].toLowerCase()}/${match[3].toLowerCase()}.bin`;
+  return `${match[1].toLowerCase()}/${match[2].toLowerCase()}/${match[3].toLowerCase()}${match[4].toLowerCase()}`;
 }
 
 export function normalizeSha256(value: string): string {

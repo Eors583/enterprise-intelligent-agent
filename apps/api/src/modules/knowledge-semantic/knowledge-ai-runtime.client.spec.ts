@@ -62,6 +62,36 @@ describe('KnowledgeAiRuntimeClient', () => {
     });
   });
 
+  it('uses an index-version profile as the model and dimension contract', async () => {
+    const dimensions = 768;
+    const embedding = Array<number>(dimensions).fill(0.25);
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        model: 'bge-index-v2',
+        dimensions,
+        items: [{ index: 0, embedding }],
+        usage: null,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = createClient({ dimensions });
+
+    await expect(
+      client.embed(TENANT_ID, ['input'], 'INTERNAL', undefined, {
+        model: 'bge-index-v2',
+        dimensions,
+      }),
+    ).resolves.toMatchObject({ model: 'bge-index-v2', dimensions });
+
+    const [, request] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({
+      tenant_id: TENANT_ID,
+      inputs: ['input'],
+      expected_model: 'bge-index-v2',
+      expected_dimensions: dimensions,
+    });
+  });
+
   it.each([
     [
       'an empty model',
@@ -373,6 +403,37 @@ describe('KnowledgeAiRuntimeClient', () => {
     });
   });
 
+  it('runs at most two embedding batches concurrently and preserves input order', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const fetchMock = vi.fn(async (_url: URL, request: RequestInit) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const inputs = (JSON.parse(String(request.body)) as { inputs: string[] }).inputs;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return jsonResponse({
+        model: 'embedding-model-v1',
+        dimensions: DIMENSIONS,
+        items: inputs.map((input, index) => ({ index, embedding: vector(Number(input)) })),
+        usage: { input_tokens: inputs.length },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await createClient().embedAll(
+      TENANT_ID,
+      Array.from({ length: 129 }, (_, index) => String(index + 1)),
+      'INTERNAL',
+    );
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(maximumActive).toBe(2);
+    expect(result.vectors.map((item) => item[0])).toEqual(
+      Array.from({ length: 129 }, (_, index) => index + 1),
+    );
+  });
+
   it('blocks confidential embedding and rerank payloads before any provider request', async () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
@@ -404,13 +465,14 @@ function createClient(
     rerankEnabled?: boolean;
     timeoutMs?: number;
     serviceToken?: string;
+    dimensions?: number;
   } = {},
 ): KnowledgeAiRuntimeClient {
   const values = {
     AI_RUNTIME_URL: 'http://127.0.0.1:8100',
     AI_RUNTIME_SERVICE_TOKEN: overrides.serviceToken,
     KNOWLEDGE_AI_TIMEOUT_MS: overrides.timeoutMs ?? 1_000,
-    KNOWLEDGE_EMBEDDING_DIMENSIONS: DIMENSIONS,
+    KNOWLEDGE_EMBEDDING_DIMENSIONS: overrides.dimensions ?? DIMENSIONS,
     KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: overrides.semanticEnabled ?? true,
     KNOWLEDGE_RERANK_ENABLED: overrides.rerankEnabled ?? false,
     KNOWLEDGE_VECTOR_SEARCH_MODE: 'exact',

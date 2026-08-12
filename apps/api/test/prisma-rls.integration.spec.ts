@@ -67,6 +67,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'competency_levels',
     'competency_versions',
     'conversation_participants',
+    'conversation_user_states',
     'conversations',
     'correction_case_evidence',
     'correction_cases',
@@ -116,11 +117,13 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'finops_roi_formula_versions',
     'finops_roi_snapshots',
     'knowledge_base_org_units',
+    'knowledge_base_members',
     'knowledge_bases',
     'knowledge_chunk_embeddings',
     'knowledge_chunks',
     'knowledge_document_versions',
     'knowledge_documents',
+    'knowledge_embedding_index_versions',
     'knowledge_entities',
     'knowledge_entity_aliases',
     'knowledge_entity_mentions',
@@ -135,6 +138,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'knowledge_ontology_entity_types',
     'knowledge_ontology_predicates',
     'knowledge_ontology_versions',
+    'knowledge_parent_chunks',
     'knowledge_relation_evidence',
     'knowledge_relation_governance',
     'knowledge_relations',
@@ -214,6 +218,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     directory_sync_runs: ['enterprise_agent_admin'],
     directory_user_bindings: ['enterprise_agent_admin'],
     knowledge_base_org_units: ['enterprise_agent_admin', 'enterprise_agent_app'],
+    knowledge_base_members: ['enterprise_agent_admin', 'enterprise_agent_app'],
     knowledge_bases: ['enterprise_agent_admin', 'enterprise_agent_app'],
     knowledge_documents: ['enterprise_agent_admin', 'enterprise_agent_app'],
     knowledge_ingestion_jobs: ['enterprise_agent_admin', 'enterprise_agent_app'],
@@ -240,6 +245,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
   // either the generic or a domain-specific RLS regression gate.
   const specializedTenantPolicyTables = [
     'ai_governance_commands',
+    'ai_knowledge_retrieval_benchmark_runs',
     'ai_model_attempt_receipts',
     'ai_model_catalog_versions',
     'ai_model_circuit_states',
@@ -256,6 +262,9 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'identity_devices',
     'identity_governance_commands',
     'identity_provider_secrets',
+    'knowledge_source_connectors',
+    'knowledge_source_items',
+    'knowledge_source_sync_runs',
     'mfa_recovery_codes',
     'oidc_account_bindings',
     'oidc_auth_transactions',
@@ -296,6 +305,8 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'conversation_participants_tenant_id_agent_id_fkey',
     'conversation_participants_tenant_id_conversation_id_fkey',
     'conversation_participants_tenant_id_user_id_fkey',
+    'conversation_user_states_conversation_fkey',
+    'conversation_user_states_user_fkey',
     'conversations_tenant_id_created_by_id_fkey',
     'conversations_tenant_id_relay_agent_a_id_fkey',
     'conversations_tenant_id_relay_agent_b_id_fkey',
@@ -387,9 +398,13 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'knowledge_bases_tenant_id_created_by_id_fkey',
     'knowledge_base_org_units_tenant_id_knowledge_base_id_fkey',
     'knowledge_base_org_units_tenant_id_org_unit_id_fkey',
+    'knowledge_base_members_tenant_id_knowledge_base_id_fkey',
+    'knowledge_base_members_tenant_id_user_id_fkey',
     'knowledge_documents_tenant_id_created_by_id_fkey',
     'knowledge_documents_tenant_id_knowledge_base_id_fkey',
     'knowledge_documents_current_version_fkey',
+    'knowledge_bases_active_embedding_index_version_fkey',
+    'knowledge_bases_pending_embedding_index_version_fkey',
     'knowledge_document_versions_knowledge_base_fkey',
     'knowledge_document_versions_document_fkey',
     'knowledge_document_versions_created_by_fkey',
@@ -398,7 +413,16 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'knowledge_chunks_knowledge_base_fkey',
     'knowledge_chunks_document_fkey',
     'knowledge_chunks_document_version_fkey',
+    'knowledge_chunks_parent_chunk_fkey',
+    'knowledge_parent_chunks_tenant_id_fkey',
+    'knowledge_parent_chunks_knowledge_base_fkey',
+    'knowledge_parent_chunks_document_fkey',
+    'knowledge_parent_chunks_document_version_fkey',
     'knowledge_chunk_embeddings_chunk_fkey',
+    'knowledge_chunk_embeddings_index_version_fkey',
+    'knowledge_embedding_index_versions_tenant_id_fkey',
+    'knowledge_embedding_index_versions_knowledge_base_fkey',
+    'knowledge_embedding_index_versions_created_by_fkey',
     'knowledge_entities_knowledge_base_fkey',
     'knowledge_entity_mentions_knowledge_base_fkey',
     'knowledge_entity_mentions_entity_fkey',
@@ -519,6 +543,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
 
   const tenantRootForeignKeys = new Set([
     'ai_runtime_runs_tenant_id_fkey',
+    'auth_recovery_deliveries_tenant_id_fkey',
     'business_events_tenant_fkey',
     'business_event_deliveries_tenant_fkey',
     'business_event_effects_tenant_fkey',
@@ -534,6 +559,8 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'process_step_commands_tenant_fkey',
     'ai_evaluation_datasets_tenant_fkey',
     'ai_evaluation_runner_attestations_tenant_fkey',
+    'knowledge_parent_chunks_tenant_id_fkey',
+    'knowledge_embedding_index_versions_tenant_id_fkey',
   ]);
 
   const processTableAclBaseline = {
@@ -696,6 +723,14 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
   } as const;
 
   const knowledgeIdentityForeignKeys = {
+    knowledge_bases_active_embedding_index_version_fkey: {
+      local: ['tenant_id', 'id', 'active_embedding_index_version_id'],
+      referenced: ['tenant_id', 'knowledge_base_id', 'id'],
+    },
+    knowledge_bases_pending_embedding_index_version_fkey: {
+      local: ['tenant_id', 'id', 'pending_embedding_index_version_id'],
+      referenced: ['tenant_id', 'knowledge_base_id', 'id'],
+    },
     knowledge_documents_current_version_fkey: {
       local: ['tenant_id', 'knowledge_base_id', 'id', 'current_version_id'],
       referenced: ['tenant_id', 'knowledge_base_id', 'document_id', 'id'],
@@ -714,6 +749,14 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     },
     knowledge_chunk_embeddings_chunk_fkey: {
       local: ['tenant_id', 'chunk_id'],
+      referenced: ['tenant_id', 'id'],
+    },
+    knowledge_chunk_embeddings_index_version_fkey: {
+      local: ['tenant_id', 'embedding_index_version_id'],
+      referenced: ['tenant_id', 'id'],
+    },
+    knowledge_embedding_index_versions_knowledge_base_fkey: {
+      local: ['tenant_id', 'knowledge_base_id'],
       referenced: ['tenant_id', 'id'],
     },
     knowledge_entity_mentions_entity_fkey: {
@@ -1431,9 +1474,12 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
             format('public.%I', table_name),
             'DELETE'
           )
-        ) AS "appHasAnyPrivilege"
+      ) AS "appHasAnyPrivilege"
       FROM unnest(ARRAY[${Prisma.join(aiEvaluationTables)}]::text[]) AS protected(table_name)
-      ORDER BY table_name
+      ORDER BY array_position(
+        ARRAY[${Prisma.join(aiEvaluationTables)}]::text[],
+        table_name
+      )
     `);
     expect(roleCapabilities).toEqual(
       aiEvaluationTables.map((tableName) => ({
@@ -2544,22 +2590,36 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     expect(rejected.databaseMessage).toContain('knowledge_documents_current_version_fkey');
   });
 
-  it('rejects a chunk whose knowledge base disagrees with its document and version', async () => {
+  it('rejects a chunk whose parent, knowledge base, document, and version scope disagree', async () => {
     const rejected = await captureDatabaseError(() =>
       prisma.$transaction(async (transaction) => {
         const fixture = await createKnowledgeIdentityFixture(transaction, tenantId);
+        await transaction.knowledgeParentChunk.create({
+          data: {
+            id: '00000000-0000-7000-8000-00000000d903',
+            tenantId,
+            knowledgeBaseId: fixture.knowledgeBaseBId,
+            documentId: fixture.documentBId,
+            documentVersionId: fixture.versionBId,
+            parentIndex: 0,
+            content: 'Knowledge identity parent B',
+            tokenCount: 4,
+            contentHash: 'b'.repeat(64),
+          },
+        });
         await transaction.$executeRawUnsafe('SET LOCAL ROLE enterprise_agent_admin');
         await transaction.$queryRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
         await transaction.$executeRaw`
           INSERT INTO knowledge_chunks (
             id, tenant_id, knowledge_base_id, document_id, document_version_id,
-            chunk_index, content, token_count, content_hash
+            parent_chunk_id, chunk_index, content, token_count, content_hash
           ) VALUES (
             '00000000-0000-7000-8000-00000000d902'::uuid,
             ${tenantId}::uuid,
-            ${fixture.knowledgeBaseBId}::uuid,
+            ${fixture.knowledgeBaseAId}::uuid,
             ${fixture.documentAId}::uuid,
             ${fixture.versionAId}::uuid,
+            '00000000-0000-7000-8000-00000000d903'::uuid,
             0,
             'must be rejected',
             3,
@@ -2571,13 +2631,39 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     );
 
     expect(rejected).toMatchObject({ prismaCode: 'P2010', sqlState: '23503' });
-    expect(rejected.databaseMessage).toContain('knowledge_chunks_document_fkey');
+    expect(rejected.databaseMessage).toContain('knowledge_chunks_parent_chunk_fkey');
   });
 
-  it('rejects relationship evidence that relabels a chunk from another knowledge base', async () => {
+  it('rejects relationship evidence whose projection and chunk scopes disagree', async () => {
     const rejected = await captureDatabaseError(() =>
       prisma.$transaction(async (transaction) => {
         const fixture = await createKnowledgeIdentityFixture(transaction, tenantId);
+        await transaction.knowledgeParentChunk.createMany({
+          data: [
+            {
+              id: '00000000-0000-7000-8000-00000000d913',
+              tenantId,
+              knowledgeBaseId: fixture.knowledgeBaseAId,
+              documentId: fixture.documentAId,
+              documentVersionId: fixture.versionAId,
+              parentIndex: 0,
+              content: 'Knowledge graph evidence A',
+              tokenCount: 4,
+              contentHash: 'f'.repeat(64),
+            },
+            {
+              id: '00000000-0000-7000-8000-00000000d914',
+              tenantId,
+              knowledgeBaseId: fixture.knowledgeBaseBId,
+              documentId: fixture.documentBId,
+              documentVersionId: fixture.versionBId,
+              parentIndex: 0,
+              content: 'Knowledge graph evidence B',
+              tokenCount: 4,
+              contentHash: '0'.repeat(64),
+            },
+          ],
+        });
         await transaction.knowledgeChunk.createMany({
           data: [
             {
@@ -2586,6 +2672,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
               knowledgeBaseId: fixture.knowledgeBaseAId,
               documentId: fixture.documentAId,
               documentVersionId: fixture.versionAId,
+              parentChunkId: '00000000-0000-7000-8000-00000000d913',
               chunkIndex: 0,
               content: 'Knowledge graph evidence A',
               tokenCount: 4,
@@ -2597,6 +2684,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
               knowledgeBaseId: fixture.knowledgeBaseBId,
               documentId: fixture.documentBId,
               documentVersionId: fixture.versionBId,
+              parentChunkId: '00000000-0000-7000-8000-00000000d914',
               chunkIndex: 0,
               content: 'Knowledge graph evidence B',
               tokenCount: 4,
@@ -2648,9 +2736,9 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
             ${fixture.knowledgeBaseAId}::uuid,
             ${fixture.projectionBId}::uuid,
             '00000000-0000-7000-8000-00000000d931'::uuid,
-            ${fixture.documentBId}::uuid,
-            ${fixture.versionBId}::uuid,
-            '00000000-0000-7000-8000-00000000d912'::uuid,
+            ${fixture.documentAId}::uuid,
+            ${fixture.versionAId}::uuid,
+            '00000000-0000-7000-8000-00000000d911'::uuid,
             'must be rejected',
             'database_negative_test'
           )
@@ -2660,7 +2748,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     );
 
     expect(rejected).toMatchObject({ prismaCode: 'P2010', sqlState: '23503' });
-    expect(rejected.databaseMessage).toContain('knowledge_relation_evidence_document_fkey');
+    expect(rejected.databaseMessage).toContain('knowledge_relation_evidence_projection_fkey');
   });
 
   it('allows only one active ingestion job per version', async () => {
@@ -3059,11 +3147,12 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
           for (const [index, tenantId] of fixture.tenantIds.entries()) {
             await transaction.$executeRaw`
               INSERT INTO public."knowledge_chunk_embeddings" (
-                "tenant_id", "chunk_id", "embedding_model", "embedding_dimension",
-                "content_hash", "embedding"
+                "tenant_id", "chunk_id", "embedding_index_version_id",
+                "embedding_model", "embedding_dimension", "content_hash", "embedding"
               ) VALUES (
                 ${tenantId}::uuid,
                 ${fixture.chunkIds[index]}::uuid,
+                ${fixture.embeddingIndexVersionIds[index]}::uuid,
                 'rls-test-embedding-model',
                 1536,
                 ${String(index === 0 ? 'a' : 'b').repeat(64)},
@@ -3110,11 +3199,12 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
         await transaction.$queryRaw`SELECT set_config('app.tenant_id', ${fixture.tenantAId}, true)`;
         await transaction.$executeRaw`
           INSERT INTO public."knowledge_chunk_embeddings" (
-            "tenant_id", "chunk_id", "embedding_model", "embedding_dimension",
-            "content_hash", "embedding"
+            "tenant_id", "chunk_id", "embedding_index_version_id",
+            "embedding_model", "embedding_dimension", "content_hash", "embedding"
           ) VALUES (
             ${fixture.tenantAId}::uuid,
             ${fixture.chunkIds[1]}::uuid,
+            ${fixture.embeddingIndexVersionIds[0]}::uuid,
             'cross-tenant-negative-test',
             1536,
             ${'c'.repeat(64)},
@@ -3350,6 +3440,8 @@ async function createKnowledgeIdentityFixture(
         key: 'knowledge-identity-negative-a',
         name: 'Knowledge identity negative A',
         status: 'ACTIVE',
+        spaceTargetId: tenantId,
+        spaceTargetName: 'Knowledge identity tenant',
         createdById: userId,
       },
       {
@@ -3358,6 +3450,8 @@ async function createKnowledgeIdentityFixture(
         key: 'knowledge-identity-negative-b',
         name: 'Knowledge identity negative B',
         status: 'ACTIVE',
+        spaceTargetId: tenantId,
+        spaceTargetName: 'Knowledge identity tenant',
         createdById: userId,
       },
     ],
@@ -3446,6 +3540,7 @@ async function createTwoTenantKnowledgeFixture(transaction: Prisma.TransactionCl
   documentIds: string[];
   versionIds: string[];
   chunkIds: string[];
+  embeddingIndexVersionIds: string[];
   projectionIds: string[];
 }> {
   const tenantAId = '00000000-0000-7000-8000-00000000c001';
@@ -3465,6 +3560,10 @@ async function createTwoTenantKnowledgeFixture(transaction: Prisma.TransactionCl
     '00000000-0000-7000-8000-00000000c402',
   ];
   const chunkIds = ['00000000-0000-7000-8000-00000000c501', '00000000-0000-7000-8000-00000000c502'];
+  const embeddingIndexVersionIds = [
+    '00000000-0000-7000-8000-00000000c521',
+    '00000000-0000-7000-8000-00000000c522',
+  ];
   const projectionIds = [
     '00000000-0000-7000-8000-00000000c551',
     '00000000-0000-7000-8000-00000000c552',
@@ -3495,7 +3594,23 @@ async function createTwoTenantKnowledgeFixture(transaction: Prisma.TransactionCl
       key: 'knowledge-rls-fixture',
       name: `Knowledge RLS base ${index + 1}`,
       status: 'ACTIVE' as const,
+      spaceTargetId: tenantId,
+      spaceTargetName: `Knowledge RLS tenant ${index + 1}`,
       createdById: userIds[index]!,
+    })),
+  });
+  await transaction.knowledgeEmbeddingIndexVersion.createMany({
+    data: tenantIds.map((tenantId, index) => ({
+      id: embeddingIndexVersionIds[index]!,
+      tenantId,
+      knowledgeBaseId: knowledgeBaseIds[index]!,
+      version: 1,
+      status: 'ACTIVE' as const,
+      provider: 'local_fastembed',
+      model: 'rls-test-embedding-model',
+      dimensions: 1536,
+      createdById: userIds[index]!,
+      activatedAt: new Date(),
     })),
   });
   await transaction.knowledgeDocument.createMany({
@@ -3529,6 +3644,24 @@ async function createTwoTenantKnowledgeFixture(transaction: Prisma.TransactionCl
       where: { id: documentIds[index]! },
       data: { currentVersionId: versionIds[index]! },
     });
+    await transaction.knowledgeBase.update({
+      where: { id: knowledgeBaseIds[index]! },
+      data: { activeEmbeddingIndexVersionId: embeddingIndexVersionIds[index]! },
+    });
+    const parentChunkId = randomUUID();
+    await transaction.knowledgeParentChunk.create({
+      data: {
+        id: parentChunkId,
+        tenantId,
+        knowledgeBaseId: knowledgeBaseIds[index]!,
+        documentId: documentIds[index]!,
+        documentVersionId: versionIds[index]!,
+        parentIndex: 0,
+        content: `tenant ${index + 1}`,
+        tokenCount: 2,
+        contentHash: (index === 0 ? 'c' : 'd').repeat(64),
+      },
+    });
     await transaction.knowledgeChunk.create({
       data: {
         id: chunkIds[index]!,
@@ -3536,6 +3669,7 @@ async function createTwoTenantKnowledgeFixture(transaction: Prisma.TransactionCl
         knowledgeBaseId: knowledgeBaseIds[index]!,
         documentId: documentIds[index]!,
         documentVersionId: versionIds[index]!,
+        parentChunkId,
         chunkIndex: 0,
         content: `tenant ${index + 1}`,
         tokenCount: 2,
@@ -3582,6 +3716,7 @@ async function createTwoTenantKnowledgeFixture(transaction: Prisma.TransactionCl
     documentIds,
     versionIds,
     chunkIds,
+    embeddingIndexVersionIds,
     projectionIds,
   };
 }

@@ -17,7 +17,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
-import { ApiClientError } from '../../shared/api/client';
+import { ApiClientError, getExpectedDesktopSessionId } from '../../shared/api/client';
 import type { AgentCollaborationCandidate } from './agent-collaboration';
 import { getKnowledgeCitationOriginal } from './api';
 import { composerReducer, createClientMessageId, initialComposerState } from './composer-state';
@@ -429,16 +429,62 @@ function AgentSummary({
   return <small>{agent?.summary ?? `${agent?.ownerName ?? '成员'}的已授权个人智能体`}</small>;
 }
 
+function PendingConversationWorkspace({
+  contact,
+}: {
+  contact: NonNullable<ConversationWorkspaceProps['pendingContact']>;
+}): React.JSX.Element {
+  return (
+    <section className="conversation-workspace" aria-label={`与 ${contact.name} 的会话`}>
+      <header className="conversation-header">
+        <span className="conversation-avatar large" aria-hidden="true">
+          {contact.kind === 'agent' ? 'AI' : contact.name.trim().slice(-2)}
+        </span>
+        <div className="conversation-header-copy">
+          <div>
+            <h1>{contact.kind === 'agent' ? `询问 ${contact.name} 的智能体` : contact.name}</h1>
+            <span className={contact.kind === 'agent' ? 'identity-badge agent' : 'identity-badge human'}>
+              {contact.kind === 'agent' ? 'AI 智能体' : '真人'}
+            </span>
+          </div>
+          <p>{contact.status === 'pending' ? '正在连接消息服务…' : '消息服务暂时不可用'}</p>
+        </div>
+      </header>
+      <div className="pending-conversation-body">
+        {contact.status === 'error' ? (
+          <div role="alert">
+            <strong>暂时无法发送消息</strong>
+            <p>{contact.message ?? '请检查网络后重试。'}</p>
+            <button type="button" onClick={contact.onRetry}>重新连接</button>
+          </div>
+        ) : null}
+      </div>
+      <div className="pending-conversation-composer">
+        <input type="text" placeholder="连接完成后即可发送消息" disabled />
+        <button type="button" disabled>发送</button>
+      </div>
+    </section>
+  );
+}
+
 interface ConversationWorkspaceProps {
   conversation: Conversation | null;
   currentUserId: string;
   preferredResponseTargetKind?: 'human' | 'agent' | null;
+  pendingContact?: {
+    readonly name: string;
+    readonly kind: 'human' | 'agent';
+    readonly status: 'pending' | 'error';
+    readonly message?: string | undefined;
+    readonly onRetry: () => void;
+  } | null;
 }
 
 export function ConversationWorkspace({
   conversation,
   currentUserId,
   preferredResponseTargetKind = null,
+  pendingContact = null,
 }: ConversationWorkspaceProps): React.JSX.Element {
   useImRealtimeSync();
   const conversationId = conversation?.id ?? null;
@@ -488,6 +534,10 @@ export function ConversationWorkspace({
   useEffect(() => {
     listEndRef.current?.scrollIntoView({ block: 'end' });
   }, [messages.data?.items.length, runStream.content.length]);
+
+  if (!conversation && pendingContact !== null) {
+    return <PendingConversationWorkspace contact={pendingContact} />;
+  }
 
   if (!conversation) {
     return (
@@ -1043,6 +1093,7 @@ function AnswerFeedbackControls({ messageId }: { messageId: string }): React.JSX
   const feedbackQuery = useAnswerFeedback(messageId);
   const updateFeedback = useUpsertAnswerFeedback(messageId);
   const current = feedbackQuery.data?.feedback ?? null;
+  const isUnavailableForHistoricalAnswer = answerFeedbackUnavailable(feedbackQuery.error);
   const [isReasonDialogOpen, setIsReasonDialogOpen] = useState(false);
   const [reason, setReason] = useState<AnswerFeedbackReason>('INCORRECT');
   const [comment, setComment] = useState('');
@@ -1079,7 +1130,9 @@ function AnswerFeedbackControls({ messageId }: { messageId: string }): React.JSX
           type="button"
           className={current?.rating === 'HELPFUL' ? 'selected' : undefined}
           aria-pressed={current?.rating === 'HELPFUL'}
-          disabled={feedbackQuery.isLoading || updateFeedback.isPending}
+          disabled={
+            feedbackQuery.isLoading || updateFeedback.isPending || isUnavailableForHistoricalAnswer
+          }
           onClick={() => void submitHelpful()}
         >
           有帮助
@@ -1088,14 +1141,18 @@ function AnswerFeedbackControls({ messageId }: { messageId: string }): React.JSX
           type="button"
           className={current?.rating === 'NOT_HELPFUL' ? 'selected' : undefined}
           aria-pressed={current?.rating === 'NOT_HELPFUL'}
-          disabled={feedbackQuery.isLoading || updateFeedback.isPending}
+          disabled={
+            feedbackQuery.isLoading || updateFeedback.isPending || isUnavailableForHistoricalAnswer
+          }
           onClick={openNegativeFeedback}
         >
           没帮助
         </button>
       </div>
       {current !== null ? <small>已记录，可随时修改</small> : null}
-      {feedbackQuery.error !== null ? (
+      {isUnavailableForHistoricalAnswer ? (
+        <small>这条历史回答生成于反馈功能启用前，暂不支持评价。</small>
+      ) : feedbackQuery.error !== null ? (
         <p className="answer-feedback-error" role="alert">
           反馈状态加载失败：{readableError(feedbackQuery.error)}
         </p>
@@ -1177,6 +1234,16 @@ function AnswerFeedbackControls({ messageId }: { messageId: string }): React.JSX
   );
 }
 
+export function answerFeedbackUnavailable(error: unknown): boolean {
+  if (error === null || typeof error !== 'object') return false;
+  if (Reflect.get(error, 'kind') === 'http' && Reflect.get(error, 'status') === 404) return true;
+  const message = Reflect.get(error, 'message');
+  return (
+    typeof message === 'string' &&
+    message.includes('The Agent answer was not found or cannot be rated.')
+  );
+}
+
 const ANSWER_FEEDBACK_REASONS: readonly AnswerFeedbackReason[] = [
   'INCORRECT',
   'IRRELEVANT_CITATION',
@@ -1209,6 +1276,8 @@ export function MessageCitationCard({
   const [original, setOriginal] = useState<KnowledgeCitationDetail | null>(null);
   const [isLoadingOriginal, setIsLoadingOriginal] = useState(false);
   const [originalError, setOriginalError] = useState<unknown>(null);
+  const [isOpeningSource, setIsOpeningSource] = useState(false);
+  const [sourceOpenError, setSourceOpenError] = useState<string | null>(null);
   const requestRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -1252,6 +1321,30 @@ export function MessageCitationCard({
         requestRef.current = null;
         setIsLoadingOriginal(false);
       }
+    }
+  }
+
+  async function openSourceFile(): Promise<void> {
+    if (original === null || !original.sourceDownloadAvailable || isOpeningSource) return;
+    const expectedSessionId = getExpectedDesktopSessionId();
+    if (expectedSessionId === null) {
+      setSourceOpenError('当前账号上下文尚未就绪，请重新登录后再试。');
+      return;
+    }
+    setIsOpeningSource(true);
+    setSourceOpenError(null);
+    try {
+      await window.enterpriseDesktop.openKnowledgeSource({
+        expectedSessionId,
+        messageId,
+        documentVersionId: original.documentVersionId,
+        chunkId: original.chunkId,
+        fileName: original.sourceFileName ?? original.documentTitle,
+      });
+    } catch (error) {
+      setSourceOpenError(readableError(error));
+    } finally {
+      setIsOpeningSource(false);
     }
   }
 
@@ -1346,11 +1439,41 @@ export function MessageCitationCard({
                   <span>版本：v{original.documentVersion}</span>
                   <span>章节：{original.headingPath.join(' / ') || '未标注章节'}</span>
                   <span>类型：{knowledgeSourceTypeLabel(original.sourceType)}</span>
+                  <span>原文位置：{sourceLocatorLabel(original)}</span>
                   <time dateTime={original.updatedAt}>
                     更新时间：{fullDateTime(original.updatedAt)}
                   </time>
                 </div>
+                {original.sourceDownloadAvailable ? (
+                  <button
+                    type="button"
+                    className="message-citation-original-action"
+                    disabled={isOpeningSource}
+                    onClick={() => void openSourceFile()}
+                  >
+                    {isOpeningSource ? '正在打开源文件…' : '用系统程序打开源文件'}
+                  </button>
+                ) : null}
+                {sourceOpenError !== null ? (
+                  <p className="citation-source-open-error" role="alert">
+                    {sourceOpenError}
+                  </p>
+                ) : null}
                 <pre>{original.content}</pre>
+                <details className="citation-structural-context">
+                  <summary>查看引用上下文</summary>
+                  <p>
+                    父级章节：
+                    {original.structuralContext.parent.headingPath.join(' / ') || '整篇文档'}
+                  </p>
+                  <p>{original.structuralContext.parent.excerpt}</p>
+                  {original.structuralContext.previous ? (
+                    <p>上一段：{original.structuralContext.previous.excerpt}</p>
+                  ) : null}
+                  {original.structuralContext.next ? (
+                    <p>下一段：{original.structuralContext.next.excerpt}</p>
+                  ) : null}
+                </details>
               </>
             ) : null}
           </section>
@@ -1358,6 +1481,20 @@ export function MessageCitationCard({
       ) : null}
     </>
   );
+}
+
+function sourceLocatorLabel(original: KnowledgeCitationDetail): string {
+  const locator = original.sourceLocator;
+  if (locator.kind === 'PAGE' && locator.pageStart !== null) {
+    return locator.pageEnd === null || locator.pageEnd === locator.pageStart
+      ? `第 ${locator.pageStart} 页`
+      : `第 ${locator.pageStart}–${locator.pageEnd} 页`;
+  }
+  if (locator.kind === 'SHEET' && locator.sheetName !== null) {
+    return `工作表“${locator.sheetName}”`;
+  }
+  if (locator.headingPath.length > 0) return locator.headingPath.join(' / ');
+  return '整篇文档';
 }
 
 interface AgentRunFailureNoticeProps {

@@ -52,12 +52,16 @@ import {
   resolveTrustedModelRouteSnapshot,
 } from '../../ai-safety-model-routing/model-route-execution.js';
 import { runtimeHash } from '../../process-orchestration/infrastructure/prisma/runtime-prisma.support.js';
+import { KnowledgeEvaluationGateway } from '../../knowledge-gateway/knowledge-gateway.port.js';
 
 type Transaction = Parameters<Parameters<AdminPrismaService['withTenant']>[1]>[0];
 
 @Injectable()
 export class PrismaAiEvaluationRepository extends AiEvaluationRepository {
-  constructor(@Inject(AdminPrismaService) private readonly prisma: AdminPrismaService) {
+  constructor(
+    @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
+    @Inject(KnowledgeEvaluationGateway) private readonly knowledge: KnowledgeEvaluationGateway,
+  ) {
     super();
   }
 
@@ -903,7 +907,14 @@ export class PrismaAiEvaluationRepository extends AiEvaluationRepository {
           throw stale('Evaluation Run');
         }
         const nonce = run.execution_nonce ?? randomBytes(32).toString('hex');
-        const unsigned = await buildExecutionRequest(transaction, principal.tenantId, run, nonce);
+        const unsigned = await buildExecutionRequest(
+          transaction,
+          principal.tenantId,
+          principal.userId,
+          run,
+          nonce,
+          this.knowledge,
+        );
         const requestHash = evaluationExecutionRequestHash(unsigned);
         if (run.status === 'RUNNING') {
           if (run.execution_request_hash !== requestHash) {
@@ -1385,8 +1396,10 @@ export class PrismaAiEvaluationRepository extends AiEvaluationRepository {
       const currentSnapshotHash = await resolveSubjectSnapshotHash(
         transaction,
         principal.tenantId,
+        principal.userId,
         query,
         dataset,
+        this.knowledge,
       );
       return {
         dataset,
@@ -1461,8 +1474,10 @@ async function loadDatasetVersion(
 async function buildExecutionRequest(
   transaction: Transaction,
   tenantId: string,
+  userId: string,
   run: RunRow,
   nonce: string,
+  knowledge: KnowledgeEvaluationGateway,
 ): Promise<Omit<EvaluationRunnerExecutionRequest, 'requestHash'>> {
   const version = await loadDatasetVersion(transaction, tenantId, run.dataset_version_id);
   if (version.status !== 'PUBLISHED') {
@@ -1477,6 +1492,7 @@ async function buildExecutionRequest(
   const currentSubjectHash = await resolveSubjectSnapshotHash(
     transaction,
     tenantId,
+    userId,
     {
       subjectType: run.subject_type as AiEvaluationReadinessQuery['subjectType'],
       subjectId: run.subject_id,
@@ -1485,6 +1501,7 @@ async function buildExecutionRequest(
       currentSnapshotHash: run.subject_snapshot_hash,
     },
     version,
+    knowledge,
   );
   if (currentSubjectHash !== run.subject_snapshot_hash) {
     throw new ConflictException(
@@ -1535,7 +1552,14 @@ async function buildExecutionRequest(
       };
     }),
   );
-  const subject = await loadExecutionSubject(transaction, tenantId, run, version);
+  const subject = await loadExecutionSubject(
+    transaction,
+    tenantId,
+    userId,
+    run,
+    version,
+    knowledge,
+  );
   return {
     schemaVersion: 1,
     tenantId,
@@ -1601,8 +1625,10 @@ async function executionEvidenceIds(
 async function loadExecutionSubject(
   transaction: Transaction,
   tenantId: string,
+  userId: string,
   run: RunRow,
   dataset: AiEvaluationDatasetVersion,
+  knowledge: KnowledgeEvaluationGateway,
 ): Promise<{
   readonly systemPrompt: string | null;
   readonly knowledgeContext: string | null;
@@ -1611,7 +1637,13 @@ async function loadExecutionSubject(
   if (run.subject_type === 'KNOWLEDGE_VERSION') {
     return {
       systemPrompt: null,
-      knowledgeContext: await sealedKnowledgeContext(transaction, tenantId, [run.subject_id], true),
+      knowledgeContext: await knowledge.readEvaluationCorpus({
+        tenantId,
+        userId,
+        versionIds: [run.subject_id],
+        allowUnpublishedCandidate: true,
+        maximumBytes: 1_000_000,
+      }),
       modelRoute: null,
     };
   }
@@ -1642,65 +1674,15 @@ async function loadExecutionSubject(
     knowledgeContext:
       knowledgeIds.length === 0
         ? null
-        : await sealedKnowledgeContext(transaction, tenantId, knowledgeIds, false),
+        : await knowledge.readEvaluationCorpus({
+            tenantId,
+            userId,
+            versionIds: knowledgeIds,
+            allowUnpublishedCandidate: false,
+            maximumBytes: 1_000_000,
+          }),
     modelRoute,
   };
-}
-
-async function sealedKnowledgeContext(
-  transaction: Transaction,
-  tenantId: string,
-  versionIds: readonly string[],
-  allowUnpublishedCandidate: boolean,
-): Promise<string> {
-  const publicationBoundary = allowUnpublishedCandidate
-    ? Prisma.empty
-    : Prisma.sql`AND version."published_at" IS NOT NULL`;
-  const rows = await transaction.$queryRaw<
-    Array<{ document_version_id: string; chunk_index: number; content: string }>
-  >(Prisma.sql`
-    SELECT chunk."document_version_id", chunk."chunk_index", chunk."content"
-    FROM public."knowledge_chunks" chunk
-    JOIN public."knowledge_document_versions" version
-      ON version."tenant_id" = chunk."tenant_id"
-     AND version."id" = chunk."document_version_id"
-    WHERE chunk."tenant_id" = ${tenantId}::uuid
-      AND chunk."document_version_id" IN (
-        ${Prisma.join(versionIds.map((id) => Prisma.sql`${id}::uuid`))}
-      )
-      AND version."status" = 'READY'
-      AND version."governance_review_status" = 'APPROVED'
-      AND (
-        version."source_type" NOT IN ('FILE', 'WEB')
-        OR version."parse_review_status" = 'APPROVED'
-      )
-      ${publicationBoundary}
-      AND version."effective_from" <= CURRENT_TIMESTAMP
-      AND (version."expires_at" IS NULL OR version."expires_at" > CURRENT_TIMESTAMP)
-    ORDER BY chunk."document_version_id", chunk."chunk_index"
-  `);
-  if (
-    rows.length === 0 ||
-    new Set(rows.map(({ document_version_id }) => document_version_id)).size !== versionIds.length
-  ) {
-    throw new ConflictException(
-      allowUnpublishedCandidate
-        ? 'Knowledge evaluation requires an approved, effective, non-empty READY candidate.'
-        : 'Knowledge evaluation requires published, approved, non-empty knowledge chunks.',
-    );
-  }
-  const content = rows
-    .map(
-      ({ document_version_id, chunk_index, content: chunk }) =>
-        `[${document_version_id}:${chunk_index}]\n${chunk}`,
-    )
-    .join('\n\n');
-  if (Buffer.byteLength(content, 'utf8') > 1_000_000) {
-    throw new ConflictException(
-      'The sealed knowledge evaluation corpus exceeds the trusted runner payload limit.',
-    );
-  }
-  return content;
 }
 
 function evidenceBundleJson(attestation: EvaluationRunnerAttestation): unknown {
@@ -2015,35 +1997,20 @@ async function sealedDatasetHash(
 async function resolveSubjectSnapshotHash(
   transaction: Transaction,
   tenantId: string,
+  userId: string,
   query: AiEvaluationReadinessQuery,
   dataset: AiEvaluationDatasetVersion | null,
+  knowledgeGateway: KnowledgeEvaluationGateway,
 ): Promise<string> {
   if (query.subjectType === 'KNOWLEDGE_VERSION') {
-    const rows = await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-      SELECT version."id", version."version_number", version."checksum",
-             version."status"::text AS status, version."knowledge_base_id",
-             version."document_id", btrim(version."governance_hash") AS governance_hash,
-             version."governance_revision", version."governance_review_status",
-             version."governance_reviewed_by_id", version."governance_reviewed_at",
-             version."classification", version."scope_mode",
-             version."organization_scope_ids", version."project_scope_ids",
-             version."task_scope_ids", version."role_template_scope_ids",
-             version."data_labels", version."supersedes_version_id",
-             version."effective_from", version."expires_at",
-             version."retention_until", version."retention_action",
-             version."source_type"::text AS source_type, version."object_sha256",
-             version."parser_name", version."parse_quality_score"::text AS parse_quality_score,
-             version."parse_review_status"::text AS parse_review_status,
-             version."parse_review_revision", version."parse_reviewed_by_id",
-             version."parse_reviewed_at", version."parse_diagnostics"
-      FROM public."knowledge_document_versions" version
-      WHERE version."tenant_id" = ${tenantId}::uuid
-        AND version."id" = ${query.subjectId}::uuid
-        AND version."version_number" = ${query.subjectVersion}
-    `);
-    const version = required(rows[0], 'Knowledge Version was not found.');
-    const artifacts = await loadKnowledgeArtifacts(transaction, tenantId, [query.subjectId]);
-    return hashTrustedSnapshot({ version, ...artifacts });
+    const snapshot = await knowledgeGateway.captureEvaluationSnapshot({
+      tenantId,
+      userId,
+      versionIds: [query.subjectId],
+      mode: 'SUBJECT',
+      expectedSubjectVersion: query.subjectVersion,
+    });
+    return hashTrustedSnapshot(snapshot.components);
   }
   const agentRows = await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
     SELECT version."id", version."version",
@@ -2058,36 +2025,12 @@ async function resolveSubjectSnapshotHash(
   const agent = required(agentRows[0], 'Agent Version was not found.');
   if (query.subjectType === 'AGENT_VERSION') return hashTrustedSnapshot(agent);
   const knowledgeIds = dataset?.targets.knowledgeVersionIds ?? [];
-  const knowledge =
-    knowledgeIds.length === 0
-      ? []
-      : await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-        SELECT version."id", version."version_number", version."checksum",
-               version."status"::text AS status,
-               btrim(version."governance_hash") AS governance_hash,
-               version."governance_revision", version."governance_review_status",
-               version."governance_reviewed_by_id", version."governance_reviewed_at",
-               version."classification", version."scope_mode",
-               version."organization_scope_ids", version."project_scope_ids",
-               version."task_scope_ids", version."role_template_scope_ids",
-               version."data_labels", version."supersedes_version_id",
-               version."effective_from", version."expires_at",
-               version."retention_until", version."retention_action",
-               version."source_type"::text AS source_type, version."object_sha256",
-               version."parser_name", version."parse_quality_score"::text AS parse_quality_score,
-               version."parse_review_status"::text AS parse_review_status,
-               version."parse_review_revision", version."parse_reviewed_by_id",
-               version."parse_reviewed_at", version."parse_diagnostics"
-        FROM public."knowledge_document_versions" version
-        WHERE version."tenant_id" = ${tenantId}::uuid
-          AND version."id" IN (${Prisma.join(knowledgeIds.map((id) => Prisma.sql`${id}::uuid`))})
-        ORDER BY version."id"
-      `);
-  if (knowledge.length !== knowledgeIds.length) {
-    throw new NotFoundException(
-      'One or more Knowledge Versions in the composite release snapshot were not found.',
-    );
-  }
+  const knowledgeSnapshot = await knowledgeGateway.captureEvaluationSnapshot({
+    tenantId,
+    userId,
+    versionIds: knowledgeIds,
+    mode: 'COMPOSITE',
+  });
   const toolIds = dataset?.targets.toolVersionIds ?? [];
   const tools =
     toolIds.length === 0
@@ -2105,213 +2048,13 @@ async function resolveSubjectSnapshotHash(
       'One or more Tool Versions in the composite release snapshot were not found.',
     );
   }
-  const knowledgeArtifacts = await loadKnowledgeArtifacts(transaction, tenantId, knowledgeIds);
   return hashTrustedSnapshot({
     agent,
-    knowledge,
-    ...knowledgeArtifacts,
+    ...knowledgeSnapshot.components,
     tools,
     modelRoutes: [...(dataset?.targets.modelRoutes ?? [])].sort(),
     promptHashes: [...(dataset?.targets.promptHashes ?? [])].sort(),
   });
-}
-
-async function loadKnowledgeArtifacts(
-  transaction: Transaction,
-  tenantId: string,
-  versionIds: readonly string[],
-): Promise<{
-  readonly chunks: readonly Record<string, unknown>[];
-  readonly embeddings: readonly Record<string, unknown>[];
-  readonly graphConflicts: readonly Record<string, unknown>[];
-  readonly graphProjections: readonly Record<string, unknown>[];
-  readonly ontologyEntityTypes: readonly Record<string, unknown>[];
-  readonly ontologyPredicates: readonly Record<string, unknown>[];
-  readonly ontologyVersions: readonly Record<string, unknown>[];
-  readonly relations: readonly Record<string, unknown>[];
-  readonly relationGovernance: readonly Record<string, unknown>[];
-}> {
-  if (versionIds.length === 0) {
-    return {
-      chunks: [],
-      embeddings: [],
-      graphConflicts: [],
-      graphProjections: [],
-      ontologyEntityTypes: [],
-      ontologyPredicates: [],
-      ontologyVersions: [],
-      relations: [],
-      relationGovernance: [],
-    };
-  }
-  const ids = versionIds.map((id) => Prisma.sql`${id}::uuid`);
-  const chunks = await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-    SELECT chunk."id", chunk."document_version_id", chunk."chunk_index",
-           chunk."heading_path", chunk."content_hash", chunk."token_count",
-           chunk."metadata"
-    FROM public."knowledge_chunks" chunk
-    WHERE chunk."tenant_id" = ${tenantId}::uuid
-      AND chunk."document_version_id" IN (${Prisma.join(ids)})
-    ORDER BY chunk."document_version_id", chunk."chunk_index", chunk."id"
-  `);
-  const embeddings = await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-    SELECT embedding."chunk_id", chunk."document_version_id",
-           embedding."embedding_model", embedding."embedding_dimension",
-           embedding."content_hash",
-           encode(
-             digest(convert_to(embedding."embedding"::text, 'UTF8'), 'sha256'),
-             'hex'
-           ) AS embedding_hash
-    FROM public."knowledge_chunk_embeddings" embedding
-    JOIN public."knowledge_chunks" chunk
-      ON chunk."tenant_id" = embedding."tenant_id"
-     AND chunk."id" = embedding."chunk_id"
-    WHERE embedding."tenant_id" = ${tenantId}::uuid
-      AND chunk."document_version_id" IN (${Prisma.join(ids)})
-    ORDER BY chunk."document_version_id", embedding."chunk_id",
-             embedding."embedding_model"
-  `);
-  const graphProjections = await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-    SELECT projection."id", projection."knowledge_base_id",
-           projection."document_id", projection."document_version_id",
-           projection."status"::text AS status, btrim(projection."graph_hash") AS graph_hash,
-           projection."entity_count", projection."mention_count",
-           projection."relation_count", projection."evidence_count",
-           projection."candidate_at", projection."activated_at",
-           projection."obsoleted_at"
-    FROM public."knowledge_graph_projections" projection
-    WHERE projection."tenant_id" = ${tenantId}::uuid
-      AND projection."document_version_id" IN (${Prisma.join(ids)})
-    ORDER BY projection."document_version_id", projection."id"
-  `);
-  const relations = await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-    SELECT relation."id", relation_evidence."document_version_id",
-           relation_evidence."projection_id",
-           relation."subject_entity_id", relation."normalized_predicate",
-           relation."object_entity_id", relation."attributes",
-           relation."confidence"::text AS relation_confidence,
-           relation."status"::text AS relation_status,
-           relation_evidence."id" AS evidence_id,
-           relation_evidence."chunk_id", relation_evidence."excerpt",
-           relation_evidence."start_offset", relation_evidence."end_offset",
-           relation_evidence."confidence"::text AS evidence_confidence,
-           relation_evidence."extractor", relation_evidence."metadata"
-    FROM public."knowledge_relation_evidence" relation_evidence
-    JOIN public."knowledge_relations" relation
-      ON relation."tenant_id" = relation_evidence."tenant_id"
-     AND relation."knowledge_base_id" = relation_evidence."knowledge_base_id"
-     AND relation."id" = relation_evidence."relation_id"
-    WHERE relation_evidence."tenant_id" = ${tenantId}::uuid
-      AND relation_evidence."document_version_id" IN (${Prisma.join(ids)})
-    ORDER BY relation_evidence."document_version_id", relation."id",
-             relation_evidence."id"
-  `);
-  const relationGovernance = await transaction.$queryRaw<Array<Record<string, unknown>>>(
-    Prisma.sql`
-      SELECT DISTINCT governance."id", governance."knowledge_base_id",
-             governance."relation_id", governance."ontology_version_id",
-             governance."predicate_definition_id",
-             governance."valid_from", governance."valid_to",
-             governance."correction_id", governance."approved_by_user_id",
-             governance."revision"
-      FROM public."knowledge_relation_governance" governance
-      JOIN public."knowledge_relation_evidence" relation_evidence
-        ON relation_evidence."tenant_id" = governance."tenant_id"
-       AND relation_evidence."knowledge_base_id" = governance."knowledge_base_id"
-       AND relation_evidence."relation_id" = governance."relation_id"
-      WHERE governance."tenant_id" = ${tenantId}::uuid
-        AND relation_evidence."document_version_id" IN (${Prisma.join(ids)})
-      ORDER BY governance."knowledge_base_id", governance."relation_id",
-               governance."id"
-    `,
-  );
-  const ontologyVersionIds = relationGovernance
-    .map((row) => row.ontology_version_id)
-    .filter((id): id is string => typeof id === 'string');
-  const ontologyVersionSql = ontologyVersionIds.map((id) => Prisma.sql`${id}::uuid`);
-  const ontologyVersions =
-    ontologyVersionSql.length === 0
-      ? []
-      : await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-          SELECT version."id", version."knowledge_base_id", version."ontology_id",
-                 version."version_number", version."revision",
-                 version."status"::text AS status, version."change_summary",
-                 btrim(version."schema_hash") AS schema_hash,
-                 version."submitted_by_user_id", version."reviewed_by_user_id",
-                 version."review_comment", version."submitted_at",
-                 version."reviewed_at", version."published_at",
-                 version."retired_at", version."system_bootstrap"
-          FROM public."knowledge_ontology_versions" version
-          WHERE version."tenant_id" = ${tenantId}::uuid
-            AND version."id" IN (${Prisma.join(ontologyVersionSql)})
-          ORDER BY version."knowledge_base_id", version."ontology_id",
-                   version."version_number", version."id"
-        `);
-  const ontologyEntityTypes =
-    ontologyVersionSql.length === 0
-      ? []
-      : await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-          SELECT entity_type."id", entity_type."knowledge_base_id",
-                 entity_type."ontology_version_id", entity_type."key",
-                 entity_type."name", entity_type."description",
-                 entity_type."attributes_schema"
-          FROM public."knowledge_ontology_entity_types" entity_type
-          WHERE entity_type."tenant_id" = ${tenantId}::uuid
-            AND entity_type."ontology_version_id" IN (${Prisma.join(ontologyVersionSql)})
-          ORDER BY entity_type."ontology_version_id", entity_type."key",
-                   entity_type."id"
-        `);
-  const ontologyPredicates =
-    ontologyVersionSql.length === 0
-      ? []
-      : await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-          SELECT predicate."id", predicate."knowledge_base_id",
-                 predicate."ontology_version_id", predicate."key",
-                 predicate."predicate", predicate."label",
-                 predicate."domain_type_key", predicate."range_type_key",
-                 predicate."inverse_predicate_key", predicate."symmetric",
-                 predicate."functional", predicate."allow_self_loop",
-                 predicate."temporal", predicate."attributes_schema"
-          FROM public."knowledge_ontology_predicates" predicate
-          WHERE predicate."tenant_id" = ${tenantId}::uuid
-            AND predicate."ontology_version_id" IN (${Prisma.join(ontologyVersionSql)})
-          ORDER BY predicate."ontology_version_id", predicate."key",
-                   predicate."id"
-        `);
-  const projectionIds = graphProjections
-    .map((row) => row.id)
-    .filter((id): id is string => typeof id === 'string');
-  const projectionSql = projectionIds.map((id) => Prisma.sql`${id}::uuid`);
-  const graphConflicts =
-    projectionSql.length === 0
-      ? []
-      : await transaction.$queryRaw<Array<Record<string, unknown>>>(Prisma.sql`
-          SELECT conflict."id", conflict."knowledge_base_id",
-                 conflict."projection_id", conflict."document_version_id",
-                 conflict."conflict_key", conflict."conflict_type",
-                 conflict."schema_predicate", conflict."schema_subject_type",
-                 conflict."schema_object_type", conflict."occurrence_count",
-                 conflict."details", conflict."evidence",
-                 conflict."status"::text AS status, conflict."revision",
-                 conflict."resolution_correction_id", conflict."review_comment",
-                 conflict."resolved_at"
-          FROM public."knowledge_graph_conflicts" conflict
-          WHERE conflict."tenant_id" = ${tenantId}::uuid
-            AND conflict."projection_id" IN (${Prisma.join(projectionSql)})
-          ORDER BY conflict."projection_id", conflict."conflict_key",
-                   conflict."id"
-        `);
-  return {
-    chunks,
-    embeddings,
-    graphConflicts,
-    graphProjections,
-    ontologyEntityTypes,
-    ontologyPredicates,
-    ontologyVersions,
-    relations,
-    relationGovernance,
-  };
 }
 
 function hashTrustedSnapshot(value: unknown): string {

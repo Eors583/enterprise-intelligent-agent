@@ -17,9 +17,15 @@ export interface DerivedKnowledgeGraphReadiness {
   readonly status: KnowledgeGraphOverview['status'];
   readonly mentionCoverage: number;
   readonly evidenceCoverage: number;
-  readonly strongRetrievalReady: boolean;
-  readonly readinessBlockers: readonly KnowledgeGraphReadinessReason[];
+  readonly diagnostics: readonly KnowledgeGraphReadinessReason[];
 }
+
+// Not every published chunk should manufacture an entity merely to satisfy a
+// counter (for example, short checklists and separator-only fragments). A
+// production graph is considered sufficiently linked once at least 90% of
+// published chunks have an entity mention or relation evidence. The exact
+// percentage remains visible in the UI for ongoing quality improvement.
+const MINIMUM_READY_MENTION_COVERAGE = 0.9;
 
 export function deriveKnowledgeGraphReadiness(
   input: KnowledgeGraphReadinessInput,
@@ -29,25 +35,25 @@ export function deriveKnowledgeGraphReadiness(
     input.relationCount === 0
       ? 0
       : ratio(input.relationCount - input.relationsWithoutEvidenceCount, input.relationCount);
-  const readinessBlockers: KnowledgeGraphReadinessReason[] = [];
-  if (input.processingCount > 0) readinessBlockers.push('GRAPH_EXTRACTION_PROCESSING');
-  if (input.failedCount > 0) readinessBlockers.push('GRAPH_EXTRACTION_FAILED');
-  if (input.entityCount === 0) readinessBlockers.push('NO_ENTITIES');
-  if (input.relationCount === 0) readinessBlockers.push('NO_RELATIONS');
+  const diagnostics: KnowledgeGraphReadinessReason[] = [];
+  if (input.processingCount > 0) diagnostics.push('GRAPH_EXTRACTION_PROCESSING');
+  if (input.failedCount > 0) diagnostics.push('GRAPH_EXTRACTION_FAILED');
+  if (input.entityCount === 0) diagnostics.push('NO_ENTITIES');
+  if (input.relationCount === 0) diagnostics.push('NO_RELATIONS');
   if (input.publishedOntologyVersionCount === 0) {
-    readinessBlockers.push('NO_PUBLISHED_ONTOLOGY');
+    diagnostics.push('NO_PUBLISHED_ONTOLOGY');
   }
   if (input.ungovernedRelationCount > 0) {
-    readinessBlockers.push('UNGOVERNED_RELATIONS');
+    diagnostics.push('UNGOVERNED_RELATIONS');
   }
   if (input.openConflictCount > 0) {
-    readinessBlockers.push('OPEN_GRAPH_CONFLICTS');
+    diagnostics.push('OPEN_GRAPH_CONFLICTS');
   }
-  if (input.publishedChunkCount > 0 && mentionCoverage < 1) {
-    readinessBlockers.push('MENTION_COVERAGE_INCOMPLETE');
+  if (input.publishedChunkCount > 0 && mentionCoverage < MINIMUM_READY_MENTION_COVERAGE) {
+    diagnostics.push('MENTION_COVERAGE_INCOMPLETE');
   }
   if (input.relationsWithoutEvidenceCount > 0) {
-    readinessBlockers.push('RELATIONS_WITHOUT_EVIDENCE');
+    diagnostics.push('RELATIONS_WITHOUT_EVIDENCE');
   }
 
   const status: KnowledgeGraphOverview['status'] =
@@ -57,15 +63,14 @@ export function deriveKnowledgeGraphReadiness(
         ? 'FAILED'
         : input.entityCount === 0
           ? 'NOT_BUILT'
-          : readinessBlockers.length === 0
+          : diagnostics.length === 0
             ? 'READY'
             : 'DEGRADED';
   return {
     status,
     mentionCoverage,
     evidenceCoverage,
-    strongRetrievalReady: status === 'READY' && readinessBlockers.length === 0,
-    readinessBlockers,
+    diagnostics,
   };
 }
 

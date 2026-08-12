@@ -21,8 +21,10 @@ export interface DoclingDocumentParserOptions extends DocumentParserOptions {
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAXIMUM_RESPONSE_BYTES = 32 * 1024 * 1024;
-const DEFAULT_MAXIMUM_SOURCE_BYTES = 20 * 1024 * 1024;
+const DEFAULT_MAXIMUM_SOURCE_BYTES = 2_147_483_647;
 const UNSAFE_TEXT_CONTROL_CHARACTERS = /[\u0000-\u0008\u000b\u000e-\u001f\u007f]/u;
+const POWERPOINT_OPEN_XML_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 
 /**
  * Remote complex-document conversion boundary.
@@ -60,7 +62,7 @@ export class DoclingDocumentParserAdapter implements KnowledgeDocumentParser {
       options.maximumBytes,
       DEFAULT_MAXIMUM_SOURCE_BYTES,
       1,
-      100 * 1024 * 1024,
+      2_147_483_647,
       'Docling source limit',
     );
     this.fetchImplementation = options.fetchImplementation ?? fetch;
@@ -75,6 +77,7 @@ export class DoclingDocumentParserAdapter implements KnowledgeDocumentParser {
       throw new DocumentParsingError('DOCUMENT_TOO_LARGE');
     }
     requireSourceSignature(input.bytes, mimeType);
+    const includeStructuredJson = mimeType !== POWERPOINT_OPEN_XML_MIME_TYPE;
 
     const form = new FormData();
     form.append(
@@ -84,7 +87,11 @@ export class DoclingDocumentParserAdapter implements KnowledgeDocumentParser {
     );
     form.append('from_formats', doclingFormat(mimeType));
     form.append('to_formats', 'md');
-    form.append('do_ocr', 'true');
+    if (includeStructuredJson) form.append('to_formats', 'json');
+    // PPTX already exposes editable text through its XML. OCRing every embedded
+    // image in a large deck is both redundant and liable to exceed the bounded
+    // synchronous conversion window. Scanned PDFs and image uploads still use OCR.
+    form.append('do_ocr', mimeType === POWERPOINT_OPEN_XML_MIME_TYPE ? 'false' : 'true');
     form.append('table_mode', 'accurate');
     form.append('image_export_mode', 'placeholder');
     form.append('abort_on_error', 'true');
@@ -113,13 +120,16 @@ export class DoclingDocumentParserAdapter implements KnowledgeDocumentParser {
       });
       if (!response.ok) {
         throw new DocumentParsingError(
-          response.status === 408 || response.status === 429 || response.status >= 500
+          response.status === 404 ||
+            response.status === 408 ||
+            response.status === 429 ||
+            response.status >= 500
             ? 'DOCUMENT_PARSER_UNAVAILABLE'
             : 'DOCUMENT_PARSE_FAILED',
         );
       }
       const body = await readBoundedResponse(response, this.maximumResponseBytes);
-      return parseDoclingResponse(body, mimeType, input.bytes.byteLength);
+      return parseDoclingResponse(body, mimeType, input.bytes.byteLength, includeStructuredJson);
     } catch (error) {
       if (error instanceof DocumentParsingError) throw error;
       if (controller.signal.aborted) {
@@ -177,6 +187,7 @@ function parseDoclingResponse(
   body: string,
   mimeType: SupportedDocumentMimeType,
   sourceByteLength: number,
+  structuredJsonRequired: boolean,
 ): ParsedKnowledgeDocument {
   let value: unknown;
   try {
@@ -194,7 +205,21 @@ function parseDoclingResponse(
     throw new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE');
   }
   const markdown = value.document.md_content;
+  const structuredJson = value.document.json_content;
   if (typeof markdown !== 'string') {
+    throw new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE');
+  }
+  let doclingDocument: unknown = null;
+  if (typeof structuredJson === 'string') {
+    try {
+      doclingDocument = JSON.parse(structuredJson);
+    } catch {
+      throw new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE');
+    }
+  } else if (structuredJson !== null && structuredJson !== undefined) {
+    doclingDocument = structuredJson;
+  }
+  if (structuredJsonRequired && !isRecord(doclingDocument)) {
     throw new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE');
   }
 
@@ -218,6 +243,22 @@ function parseDoclingResponse(
       ...(pages === undefined ? {} : { pageCount: pages.length }),
     },
     ...(pages === undefined ? {} : { pages }),
+    structuredContent: isRecord(doclingDocument)
+      ? {
+          schemaVersion: 'enterprise-knowledge-document/v1',
+          kind: 'docling-document',
+          mimeType,
+          parser: DOCLING_PARSER_NAME,
+          document: doclingDocument,
+        }
+      : {
+          schemaVersion: 'enterprise-knowledge-document/v1',
+          kind: pages === undefined ? 'document' : 'paged-document',
+          mimeType,
+          parser: DOCLING_PARSER_NAME,
+          text,
+          ...(pages === undefined ? {} : { pages }),
+        },
   };
 }
 
@@ -244,25 +285,36 @@ function requireDoclingMimeType(mimeType: string): SupportedDocumentMimeType {
   if (
     mimeType !== 'application/pdf' &&
     mimeType !== 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' &&
-    mimeType !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    mimeType !== 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' &&
+    mimeType !== 'application/vnd.openxmlformats-officedocument.presentationml.presentation' &&
+    mimeType !== 'image/png' &&
+    mimeType !== 'image/jpeg' &&
+    mimeType !== 'image/tiff' &&
+    mimeType !== 'image/bmp' &&
+    mimeType !== 'image/webp'
   ) {
     throw new DocumentParsingError('UNSUPPORTED_MIME_TYPE');
   }
   return mimeType;
 }
 
-function doclingFormat(mimeType: SupportedDocumentMimeType): 'pdf' | 'docx' | 'xlsx' {
+function doclingFormat(
+  mimeType: SupportedDocumentMimeType,
+): 'pdf' | 'docx' | 'xlsx' | 'pptx' | 'image' {
   if (mimeType === 'application/pdf') return 'pdf';
-  return mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    ? 'xlsx'
-    : 'docx';
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+    return 'xlsx';
+  }
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') {
+    return 'pptx';
+  }
+  return mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    ? 'docx'
+    : 'image';
 }
 
 function requireSourceSignature(bytes: Buffer, mimeType: SupportedDocumentMimeType): void {
-  const signature =
-    mimeType === 'application/pdf'
-      ? Buffer.from('%PDF-', 'ascii')
-      : Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  const signature = sourceSignature(mimeType);
   if (
     bytes.byteLength < signature.byteLength ||
     !bytes.subarray(0, signature.byteLength).equals(signature)
@@ -271,13 +323,24 @@ function requireSourceSignature(bytes: Buffer, mimeType: SupportedDocumentMimeTy
   }
 }
 
+function sourceSignature(mimeType: SupportedDocumentMimeType): Buffer {
+  if (mimeType === 'application/pdf') return Buffer.from('%PDF-', 'ascii');
+  if (
+    mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+    mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  ) {
+    return Buffer.from([0x50, 0x4b, 0x03, 0x04]);
+  }
+  if (mimeType === 'image/png') return Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+  if (mimeType === 'image/jpeg') return Buffer.from([0xff, 0xd8, 0xff]);
+  if (mimeType === 'image/tiff') return Buffer.from([0x49, 0x49, 0x2a, 0x00]);
+  if (mimeType === 'image/bmp') return Buffer.from([0x42, 0x4d]);
+  return Buffer.from('RIFF', 'ascii');
+}
+
 function safeFileName(fileName: string | undefined, mimeType: SupportedDocumentMimeType): string {
-  const fallback =
-    mimeType === 'application/pdf'
-      ? 'document.pdf'
-      : mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        ? 'document.xlsx'
-        : 'document.docx';
+  const fallback = `document.${fileExtension(mimeType)}`;
   if (fileName === undefined) return fallback;
   const normalized = fileName.trim().replaceAll('\\', '/').split('/').at(-1)?.trim() ?? '';
   if (
@@ -288,6 +351,21 @@ function safeFileName(fileName: string | undefined, mimeType: SupportedDocumentM
     return fallback;
   }
   return normalized;
+}
+
+function fileExtension(mimeType: SupportedDocumentMimeType): string {
+  if (mimeType === 'application/pdf') return 'pdf';
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    return 'docx';
+  }
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet') {
+    return 'xlsx';
+  }
+  if (mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation') {
+    return 'pptx';
+  }
+  if (mimeType === 'image/jpeg') return 'jpg';
+  return mimeType.slice('image/'.length);
 }
 
 function normalizeExtractedText(value: string): string {

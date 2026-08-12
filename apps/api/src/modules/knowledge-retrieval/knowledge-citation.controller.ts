@@ -1,4 +1,12 @@
-import { Controller, Get, Inject, Param, ParseUUIDPipe, Query } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Inject,
+  Param,
+  ParseUUIDPipe,
+  Query,
+  StreamableFile,
+} from '@nestjs/common';
 import {
   knowledgeCitationOriginalQuerySchema,
   type KnowledgeCitationDetail,
@@ -22,5 +30,20 @@ export class KnowledgeCitationController {
     query: KnowledgeCitationOriginalQuery,
   ): Promise<KnowledgeCitationDetail> {
     return this.citations.getOriginal(query.messageId, documentVersionId, chunkId);
+  }
+
+  @Get(':documentVersionId/chunks/:chunkId/source')
+  async getSourceFile(
+    @Param('documentVersionId', new ParseUUIDPipe()) documentVersionId: string,
+    @Param('chunkId', new ParseUUIDPipe()) chunkId: string,
+    @Query(new SchemaValidationPipe(knowledgeCitationOriginalQuerySchema))
+    query: KnowledgeCitationOriginalQuery,
+  ): Promise<StreamableFile> {
+    const source = await this.citations.getSourceFile(query.messageId, documentVersionId, chunkId);
+    return new StreamableFile(source.body, {
+      type: source.mimeType,
+      disposition: `attachment; filename*=UTF-8''${encodeURIComponent(source.fileName)}`,
+      length: source.size,
+    });
   }
 }

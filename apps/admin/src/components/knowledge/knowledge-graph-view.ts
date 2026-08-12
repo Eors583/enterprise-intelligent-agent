@@ -15,7 +15,7 @@ export function knowledgeGraphReadinessSummary(
 ): KnowledgeGraphReadinessSummary {
   if (overview.status === 'BUILDING') return 'BUILDING';
   if (overview.status === 'FAILED') return 'FAILED';
-  if (overview.strongRetrievalReady) return 'READY';
+  if (overview.status === 'READY') return 'READY';
   if (overview.entityCount === 0 && overview.relationCount === 0) return 'EMPTY';
   return 'DEGRADED';
 }
@@ -48,9 +48,12 @@ export function knowledgeRetrievalDiagnosticStageLabel(
   stage: KnowledgeRetrievalDiagnostic['stage'],
 ): string {
   return {
+    ROUTER: '问题路由',
     LEXICAL: '关键词召回',
     VECTOR: '向量召回',
+    SQL: '表格 SQL',
     RELATIONSHIP: '关系扩展',
+    BUSINESS_API: '业务 API',
     RERANK: '模型重排',
   }[stage];
 }

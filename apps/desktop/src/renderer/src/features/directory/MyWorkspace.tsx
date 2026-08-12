@@ -1,7 +1,7 @@
 import type { RoleAssignment } from '@enterprise/contracts';
 import type { DesktopRuntimeInfo } from '../../../../shared/desktop-api';
 
-export type MySection = 'overview' | 'roles' | 'security' | 'about';
+export type MySection = 'overview' | 'manual' | 'roles' | 'security' | 'about';
 
 export function MySidebar({
   active,
@@ -18,6 +18,7 @@ export function MySidebar({
 }): React.JSX.Element {
   const items: Array<{ id: MySection; label: string; detail: string }> = [
     { id: 'overview', label: '个人主页', detail: '账号与常用设置' },
+    { id: 'manual', label: '个人使用说明书', detail: '介绍自己与协作方式' },
     { id: 'roles', label: '角色与权限', detail: `${assignments.length} 个角色任命` },
     { id: 'security', label: '账号与安全', detail: '切换账号、密码与登录保护' },
     { id: 'about', label: '关于', detail: '版本和客户端信息' },
@@ -73,6 +74,7 @@ export function MySidebar({
 export function MyOverviewWorkspace({
   user,
   assignments,
+  onOpenManual,
   onOpenRoles,
   onOpenAccountMenu,
   onChangePassword,
@@ -81,6 +83,7 @@ export function MyOverviewWorkspace({
 }: {
   user: { name: string; title?: string | undefined };
   assignments: readonly RoleAssignment[];
+  onOpenManual: () => void;
   onOpenRoles: () => void;
   onOpenAccountMenu: () => void;
   onChangePassword: () => void;
@@ -98,6 +101,13 @@ export function MyOverviewWorkspace({
         </div>
       </section>
       <section className="my-action-grid">
+        <ActionCard
+          glyph="介"
+          title="个人使用说明书"
+          detail="介绍岗位职责、协作方式，以及你能提供的技能与资源"
+          action="开始填写"
+          onClick={onOpenManual}
+        />
         <ActionCard
           glyph="角"
           title="角色与权限"
@@ -222,7 +232,7 @@ function initials(name: string): string {
 }
 
 function myGlyph(section: MySection): string {
-  return { overview: '我', roles: '角', security: '安', about: '版' }[section];
+  return { overview: '我', manual: '介', roles: '角', security: '安', about: '版' }[section];
 }
 
 function platformLabel(platform: DesktopRuntimeInfo['platform']): string {

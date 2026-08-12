@@ -366,11 +366,11 @@ describe('RoleAssignmentAdminService', () => {
     ).rejects.toBeInstanceOf(ConflictException);
   });
 
-  it('recognizes only independently approved versions with a strict immutable snapshot', () => {
+  it('recognizes published versions with a strict immutable snapshot', () => {
     const governed = governedVersion(assignmentRecord().agentInstance.version.template.id);
 
     expect(isGovernedPublishedRoleVersion(governed)).toBe(true);
-    expect(isGovernedPublishedRoleVersion({ ...governed, approvedById: ADMIN_ID })).toBe(false);
+    expect(isGovernedPublishedRoleVersion({ ...governed, approvedById: ADMIN_ID })).toBe(true);
     expect(
       isGovernedPublishedRoleVersion({
         ...governed,

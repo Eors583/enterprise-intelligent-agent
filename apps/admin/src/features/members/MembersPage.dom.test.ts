@@ -9,8 +9,8 @@ const api = vi.hoisted(() => ({
   updateMember: vi.fn(),
 }));
 
-vi.mock('@/api/admin-api', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/api/admin-api')>()),
+vi.mock('@/api/member-api', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/member-api')>()),
   ...api,
 }));
 
@@ -64,7 +64,7 @@ beforeEach(() => {
 });
 
 describe('MembersPage account onboarding', () => {
-  it('makes one-time invitation primary and keeps legacy password creation in advanced actions', async () => {
+  it('uses one complete local member form without a Feishu or legacy-password dependency', async () => {
     const dom = await renderInTestDom(
       createElement(MembersPage, {
         currentUserId: '00000000-0000-7000-8000-000000000003',
@@ -74,15 +74,27 @@ describe('MembersPage account onboarding', () => {
       await dom.flush();
       await dom.flush();
       const invite = [...dom.container.querySelectorAll('button')].find(
-        (button) => button.textContent?.trim() === '邀请成员',
+        (button) => button.textContent?.trim() === '添加成员',
       );
       expect(invite?.className).toContain('primary');
-      expect(dom.container.textContent).toContain('高级');
+      expect(dom.container.textContent).not.toContain('使用初始密码建号');
+      expect(dom.container.textContent).not.toContain('高级');
       expect(dom.container.querySelector('input[type="password"]')).toBeNull();
 
       await dom.click(invite!);
       const dialog = dom.container.querySelector('[role="dialog"]');
-      expect(dialog?.textContent).toContain('成员通过一次性链接设置密码');
+      expect(dialog?.textContent).toContain('基础信息');
+      expect(dialog?.textContent).toContain('工作信息');
+      expect(dialog?.textContent).toContain('在用户端自行完善个人使用说明书');
+      expect(dialog?.textContent).not.toContain('您可能会问这些问题');
+      expect(dialog?.textContent).toContain('正式');
+      expect(dialog?.textContent).toContain('实习');
+      expect(dialog?.textContent).toContain('外包');
+      expect(dialog?.textContent).toContain('劳务');
+      expect(dialog?.textContent).toContain('顾问');
+      expect(dialog?.querySelector('input[name="phoneNumber"]')).not.toBeNull();
+      expect(dialog?.querySelector('select[name="directManagerUserId"]')).not.toBeNull();
+      expect(dialog?.querySelector('textarea[name="jobResponsibilities"]')).toBeNull();
       expect(dialog?.textContent).not.toContain('初始密码');
     } finally {
       await dom.cleanup();

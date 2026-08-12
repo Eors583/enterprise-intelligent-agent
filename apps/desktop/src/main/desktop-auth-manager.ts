@@ -29,6 +29,7 @@ import type {
   DesktopImRealtimePayload,
   DesktopImRealtimeRequest,
   DesktopLoginResult,
+  DesktopOpenKnowledgeSourceRequest,
   DesktopPasswordChangeResult,
 } from '../shared/desktop-api';
 import { AccountStore } from './account-store';
@@ -48,6 +49,10 @@ const BUSINESS_ROUTES: ReadonlyArray<{
   { pattern: /^\/api\/v1\/role-assignments\/me$/, methods: new Set(['GET']) },
   { pattern: /^\/api\/v1\/workbench\/objectives$/, methods: new Set(['GET']) },
   { pattern: /^\/api\/v1\/workbench\/tasks$/, methods: new Set(['GET']) },
+  {
+    pattern: /^\/api\/v1\/workbench\/people\/me\/personal-manual$/,
+    methods: new Set(['GET', 'PUT']),
+  },
   {
     pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/trace$`),
     methods: new Set(['GET']),
@@ -375,6 +380,29 @@ export class DesktopAuthManager {
     return response;
   }
 
+  async downloadKnowledgeSource(
+    request: DesktopOpenKnowledgeSourceRequest,
+  ): Promise<{ readonly bytes: Uint8Array; readonly mimeType: string }> {
+    assertKnowledgeSourceRequest(request);
+    const activeSessionId = this.requireExpectedSession(request.expectedSessionId);
+    const requestGeneration = this.generation;
+    const path = `/api/v1/knowledge-citations/${request.documentVersionId}/chunks/${request.chunkId}/source?messageId=${request.messageId}`;
+    let token = await this.accessToken(activeSessionId);
+    this.requireExpectedSession(request.expectedSessionId);
+    let response = await this.rawBinaryRequest(path, token);
+    if (response.status === 401) {
+      token = await this.accessTokenAfterUnauthorized(activeSessionId, token);
+      this.requireExpectedSession(request.expectedSessionId);
+      response = await this.rawBinaryRequest(path, token);
+    }
+    this.requireExpectedSession(request.expectedSessionId);
+    if (requestGeneration !== this.generation) throw staleAccountError();
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Knowledge source returned HTTP ${response.status}.`);
+    }
+    return { bytes: response.bytes, mimeType: response.mimeType };
+  }
+
   async streamAgentRun(
     request: DesktopAgentRunStreamRequest,
     emit: (payload: DesktopAgentRunStreamPayload) => void,
@@ -634,6 +662,37 @@ export class DesktopAuthManager {
       clearTimeout(timeout);
     }
   }
+
+  private async rawBinaryRequest(
+    path: string,
+    authorization: string,
+  ): Promise<{ status: number; bytes: Uint8Array; mimeType: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}${path}`, {
+        method: 'GET',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/octet-stream,*/*',
+          Authorization: `Bearer ${authorization}`,
+        },
+      });
+      const body = new Uint8Array(await response.arrayBuffer());
+      if (body.byteLength > 50 * 1024 * 1024) {
+        throw new Error('Knowledge source exceeds the desktop safety limit.');
+      }
+      return {
+        status: response.status,
+        bytes: body,
+        mimeType: response.headers.get('content-type') ?? 'application/octet-stream',
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function validateBaseUrl(value: string): void {
@@ -666,6 +725,20 @@ function assertBusinessRequest(request: DesktopApiRequest): void {
     Buffer.byteLength(JSON.stringify(request.body), 'utf8') > MAX_REQUEST_BYTES
   ) {
     throw new Error('The desktop API request is too large.');
+  }
+}
+
+function assertKnowledgeSourceRequest(request: DesktopOpenKnowledgeSourceRequest): void {
+  if (
+    !UUID_PATTERN.test(request.expectedSessionId) ||
+    !UUID_PATTERN.test(request.messageId) ||
+    !UUID_PATTERN.test(request.documentVersionId) ||
+    !UUID_PATTERN.test(request.chunkId) ||
+    typeof request.fileName !== 'string' ||
+    request.fileName.trim().length === 0 ||
+    request.fileName.length > 300
+  ) {
+    throw new Error('Invalid knowledge source request.');
   }
 }
 

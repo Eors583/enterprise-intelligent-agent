@@ -1,5 +1,6 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import type { Readable } from 'node:stream';
 import {
   textMessageContentSchema,
   type KnowledgeCitationDetail,
@@ -12,6 +13,7 @@ import { readPolicySnapshotAssignmentId } from '../agent-run/domain/agent-run-po
 import { AuthorizationDecisionService } from '../authorization/authorization-decision.service.js';
 import type { AuthorizationAssignment } from '../authorization/authorization.types.js';
 import { IdentityService } from '../identity/application/identity.service.js';
+import { KnowledgeObjectStore } from '../knowledge-ingestion/infrastructure/knowledge-object.store.js';
 import { accessibleKnowledgeBaseIds } from './knowledge-access.policy.js';
 import {
   filterKnowledgeBasesByAssignmentOrganization,
@@ -31,6 +33,7 @@ export class KnowledgeCitationService {
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(AuthorizationDecisionService)
     private readonly authorization: AuthorizationDecisionService,
+    @Inject(KnowledgeObjectStore) private readonly objects: KnowledgeObjectStore,
   ) {}
 
   async getOriginal(
@@ -106,9 +109,15 @@ export class KnowledgeCitationService {
             knowledgeBaseId: true,
             documentId: true,
             documentVersionId: true,
+            parentChunkId: true,
+            previousChunkId: true,
+            nextChunkId: true,
             headingPath: true,
             content: true,
             metadata: true,
+            parentChunk: {
+              select: { id: true, headingPath: true, content: true },
+            },
             knowledgeBase: {
               select: {
                 id: true,
@@ -116,6 +125,7 @@ export class KnowledgeCitationService {
                 name: true,
                 status: true,
                 orgUnits: { select: { orgUnitId: true, includeChildren: true } },
+                members: { select: { userId: true } },
               },
             },
             document: {
@@ -135,6 +145,10 @@ export class KnowledgeCitationService {
                 documentId: true,
                 versionNumber: true,
                 sourceType: true,
+                mimeType: true,
+                fileName: true,
+                objectKey: true,
+                sourceUri: true,
                 status: true,
                 createdAt: true,
                 createdById: true,
@@ -266,6 +280,7 @@ export class KnowledgeCitationService {
         knowledgeFiltersFromDecision(
           decision,
           assignment?.roleTemplateId === undefined ? [] : [assignment.roleTemplateId],
+          user.id,
         ),
         employments,
         orgUnits,
@@ -283,6 +298,7 @@ export class KnowledgeCitationService {
       );
       const accessibleIds = accessibleKnowledgeBaseIds({
         userActive: true,
+        memberUserId: user.id,
         memberOrgUnitIds,
         parentByOrgUnitId: new Map(orgUnits.map((orgUnit) => [orgUnit.id, orgUnit.parentId])),
         knowledgeBases,
@@ -355,6 +371,24 @@ export class KnowledgeCitationService {
           },
         },
       });
+      const neighborIds = [chunk.previousChunkId, chunk.nextChunkId].filter(
+        (id): id is string => id !== null,
+      );
+      const neighbors =
+        neighborIds.length === 0
+          ? []
+          : await transaction.knowledgeChunk.findMany({
+              where: {
+                tenantId: user.tenantId,
+                knowledgeBaseId: chunk.knowledgeBaseId,
+                documentId: chunk.documentId,
+                documentVersionId: chunk.documentVersionId,
+                id: { in: neighborIds },
+              },
+              select: { id: true, content: true },
+            });
+      const neighborById = new Map(neighbors.map((neighbor) => [neighbor.id, neighbor]));
+      const locator = readSourceLocator(chunk.metadata, chunk.headingPath);
       return {
         knowledgeBaseId: chunk.knowledgeBaseId,
         knowledgeBaseName: chunk.knowledgeBase.name,
@@ -365,6 +399,26 @@ export class KnowledgeCitationService {
         chunkId: chunk.id,
         headingPath: chunk.headingPath,
         sourceType: chunk.documentVersion.sourceType,
+        sourceFileName: chunk.documentVersion.fileName,
+        sourceMimeType: chunk.documentVersion.mimeType,
+        sourceUri: chunk.documentVersion.sourceUri,
+        sourceDownloadAvailable: chunk.documentVersion.objectKey !== null,
+        sourceLocator: locator,
+        structuralContext: {
+          parent: {
+            id: chunk.parentChunk.id,
+            headingPath: chunk.parentChunk.headingPath,
+            excerpt: contextExcerpt(chunk.parentChunk.content),
+          },
+          previous:
+            chunk.previousChunkId === null
+              ? null
+              : neighborContext(neighborById.get(chunk.previousChunkId)),
+          next:
+            chunk.nextChunkId === null
+              ? null
+              : neighborContext(neighborById.get(chunk.nextChunkId)),
+        },
         content: chunk.content,
         updatedAt: (
           chunk.documentVersion.publishedAt ?? chunk.documentVersion.createdAt
@@ -373,6 +427,39 @@ export class KnowledgeCitationService {
     });
     if (result === null) throw this.notFound();
     return result;
+  }
+
+  async getSourceFile(
+    messageId: string,
+    documentVersionId: string,
+    chunkId: string,
+  ): Promise<{
+    readonly body: Readable;
+    readonly size: number;
+    readonly mimeType: string;
+    readonly fileName: string;
+  }> {
+    const citation = await this.getOriginal(messageId, documentVersionId, chunkId);
+    const { user } = await this.identity.getCurrentIdentity();
+    const source = await this.prisma.withTenant(user.tenantId, (transaction) =>
+      transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          tenantId: user.tenantId,
+          id: documentVersionId,
+          documentId: citation.documentId,
+          knowledgeBaseId: citation.knowledgeBaseId,
+        },
+        select: { objectKey: true, mimeType: true, fileName: true },
+      }),
+    );
+    if (source === null || source.objectKey === null) throw this.notFound();
+    const object = await this.objects.readObject(source.objectKey);
+    return {
+      body: object.body,
+      size: object.size,
+      mimeType: source.mimeType ?? 'application/octet-stream',
+      fileName: safeSourceFileName(source.fileName ?? citation.documentTitle),
+    };
   }
 
   private async loadCurrentAssignment(
@@ -453,6 +540,53 @@ export class KnowledgeCitationService {
       'Knowledge citation source was not found or is no longer accessible.',
     );
   }
+}
+
+function readSourceLocator(
+  metadata: Prisma.JsonValue,
+  headingPath: readonly string[],
+): KnowledgeCitationDetail['sourceLocator'] {
+  const record = isRecord(metadata) ? metadata : {};
+  const pageStart = positiveInteger(record.pageStart) ?? positiveInteger(record.page);
+  const pageEnd = positiveInteger(record.pageEnd) ?? pageStart;
+  const sheetName =
+    typeof record.sheetName === 'string' && record.sheetName.trim().length > 0
+      ? record.sheetName.trim().slice(0, 200)
+      : null;
+  return {
+    kind:
+      pageStart !== null
+        ? 'PAGE'
+        : sheetName !== null
+          ? 'SHEET'
+          : headingPath.length > 0
+            ? 'SECTION'
+            : 'DOCUMENT',
+    pageStart,
+    pageEnd,
+    sheetName,
+    headingPath: [...headingPath],
+  };
+}
+
+function positiveInteger(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : null;
+}
+
+function contextExcerpt(content: string): string {
+  const normalized = content.replace(/\s+/gu, ' ').trim();
+  return normalized.length <= 2_000 ? normalized : `${normalized.slice(0, 1_997)}...`;
+}
+
+function neighborContext(
+  value: { readonly id: string; readonly content: string } | undefined,
+): { id: string; excerpt: string } | null {
+  return value === undefined ? null : { id: value.id, excerpt: contextExcerpt(value.content) };
+}
+
+function safeSourceFileName(value: string): string {
+  const normalized = value.replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '_').trim();
+  return (normalized || 'knowledge-source').slice(0, 240);
 }
 
 function readOrganizationScope(

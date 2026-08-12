@@ -22,6 +22,8 @@ FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 class EmbeddingRequest(StrictModel):
     tenant_id: Identifier
     inputs: list[KnowledgeText] = Field(min_length=1, max_length=128)
+    expected_model: str | None = Field(default=None, min_length=1, max_length=200)
+    expected_dimensions: int | None = Field(default=None, ge=1, le=16_000)
 
     @model_validator(mode="after")
     def validate_total_input_size(self) -> EmbeddingRequest:

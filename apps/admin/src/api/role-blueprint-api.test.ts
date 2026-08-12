@@ -154,10 +154,7 @@ describe('role blueprint admin API', () => {
       },
     );
 
-    const publication = {
-      ...transition,
-      evaluationRunId: '00000000-0000-7000-8000-000000000103',
-    };
+    const publication = transition;
     await publishRoleVersion(BLUEPRINT_ID, VERSION_ID, publication);
     expect(requestMock).toHaveBeenLastCalledWith(
       `/admin/role-blueprints/${BLUEPRINT_ID}/versions/${VERSION_ID}/publish`,

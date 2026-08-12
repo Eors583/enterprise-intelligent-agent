@@ -30,6 +30,36 @@
   font-size: 24px;
 }
 
+.knowledge-quality-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.knowledge-quality-card {
+  display: grid;
+  gap: 8px;
+  padding: 16px;
+}
+
+.knowledge-quality-card > span,
+.knowledge-quality-card > small {
+  color: #68748b;
+}
+
+.knowledge-quality-card > strong {
+  color: #172033;
+  font-size: 22px;
+}
+
+.knowledge-quality-card .metric-pass {
+  color: #16744a;
+}
+
+.knowledge-quality-card .metric-fail {
+  color: #b42318;
+}
+
 .evaluation-grid-section {
   padding-top: 6px;
   border-top: 1px solid #e2e7ef;
@@ -324,8 +354,172 @@
   margin-top: 3px;
 }
 
+.retrieval-evaluation-panel {
+  display: grid;
+  gap: 18px;
+}
+
+.retrieval-evaluation-panel > header,
+.retrieval-benchmark-summary > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.retrieval-evaluation-panel > header h3,
+.retrieval-evaluation-panel > header p,
+.retrieval-benchmark-summary h4 {
+  margin: 0;
+}
+
+.retrieval-evaluation-panel > header p {
+  max-width: 820px;
+  margin-top: 7px;
+  color: #5f6b7d;
+  line-height: 1.6;
+}
+
+.retrieval-evaluation-steps {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.retrieval-evaluation-steps li {
+  display: grid;
+  gap: 5px;
+  padding: 13px 14px;
+  color: #667085;
+  background: #f7f9fc;
+  border: 1px solid #e2e7ef;
+  border-radius: 11px;
+}
+
+.retrieval-evaluation-steps li.is-current {
+  color: #153b31;
+  background: #ecf8f3;
+  border-color: #91c9b6;
+}
+
+.retrieval-evaluation-steps li.is-complete {
+  color: #35504a;
+  border-color: #bfd7cf;
+}
+
+.retrieval-evaluation-steps span,
+.retrieval-evaluation-import > small {
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.retrieval-evaluation-import,
+.retrieval-evaluation-preview,
+.retrieval-benchmark-summary {
+  display: grid;
+  gap: 13px;
+}
+
+.retrieval-benchmark-progress {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid #dfe5ed;
+  border-radius: 0.8rem;
+  background: #f8fafc;
+}
+
+.retrieval-benchmark-progress progress {
+  width: 100%;
+  height: 0.65rem;
+}
+
+.file-button {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.file-button input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+}
+
+.retrieval-evaluation-table-wrap {
+  overflow-x: auto;
+  border: 1px solid #e2e7ef;
+  border-radius: 10px;
+}
+
+.retrieval-evaluation-table-wrap table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+}
+
+.retrieval-evaluation-table-wrap th,
+.retrieval-evaluation-table-wrap td {
+  padding: 9px 11px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.retrieval-evaluation-table-wrap td:nth-child(2) {
+  max-width: 420px;
+}
+
+.retrieval-benchmark-summary {
+  padding: 15px;
+  background: #f8fafc;
+  border: 1px solid #dfe5ed;
+  border-radius: 12px;
+}
+
+.retrieval-benchmark-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  gap: 9px;
+}
+
+.retrieval-benchmark-metrics article {
+  display: grid;
+  gap: 5px;
+  padding: 11px;
+  background: #fff;
+  border: 1px solid #e4e8ef;
+  border-radius: 9px;
+}
+
+.retrieval-benchmark-metrics span {
+  color: #667085;
+  font-size: 12px;
+}
+
+.retrieval-benchmark-metrics strong {
+  font-size: 18px;
+}
+
+.retrieval-evaluation-panel .inline-error {
+  padding: 12px 14px;
+  color: #8e342f;
+  background: #fff1f0;
+  border: 1px solid #f1b9b5;
+  border-radius: 10px;
+}
+
+.retrieval-evaluation-panel .inline-error ul {
+  margin: 8px 0 0;
+}
+
 @media (max-width: 1100px) {
   .evaluation-assurance-strip,
+  .knowledge-quality-grid,
   .evaluation-three-column {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -333,10 +527,13 @@
 
 @media (max-width: 760px) {
   .evaluation-assurance-strip,
+  .knowledge-quality-grid,
   .evaluation-two-column,
   .evaluation-three-column,
   .evaluation-card-list,
-  .evaluation-check-grid {
+  .evaluation-check-grid,
+  .retrieval-evaluation-steps,
+  .retrieval-benchmark-metrics {
     grid-template-columns: 1fr;
   }
 }

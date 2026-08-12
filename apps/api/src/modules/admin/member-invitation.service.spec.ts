@@ -99,6 +99,7 @@ describe('MemberInvitationService directory activation', () => {
         displayName: 'Invited member',
         role: 'MEMBER',
         orgUnitId: invitationId,
+        employmentType: 'REGULAR',
       }),
     ).resolves.toMatchObject({
       memberId,

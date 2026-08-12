@@ -24,6 +24,7 @@ const knowledgeBaseId = '00000000-0000-7000-8000-00000000f601';
 const documentId = '00000000-0000-7000-8000-00000000f602';
 const documentVersionId = '00000000-0000-7000-8000-00000000f603';
 const chunkId = '00000000-0000-7000-8000-00000000f604';
+const parentChunkId = '00000000-0000-7000-8000-00000000f605';
 const inputPrompt = 'Contact employee@example.com with api_token=super-secret-token-value-123456.';
 const outputAnswer = 'The approved policy applies. [来源1]';
 const canonicalCitations = [
@@ -633,6 +634,8 @@ describe.runIf(enabled)('PostgreSQL answer feedback to Evaluation Bad Case proje
         key: 'feedback-evaluation-knowledge',
         name: 'Feedback Evaluation Knowledge',
         status: 'ACTIVE',
+        spaceTargetId: tenantId,
+        spaceTargetName: 'Feedback Evaluation Tenant',
         createdById: reporterId,
       },
     });
@@ -668,6 +671,19 @@ describe.runIf(enabled)('PostgreSQL answer feedback to Evaluation Bad Case proje
       where: { id: documentId },
       data: { currentVersionId: documentVersionId },
     });
+    await administrator.knowledgeParentChunk.create({
+      data: {
+        id: parentChunkId,
+        tenantId,
+        knowledgeBaseId,
+        documentId,
+        documentVersionId,
+        parentIndex: 0,
+        content: 'The approved policy applies.',
+        tokenCount: 5,
+        contentHash: 'c'.repeat(64),
+      },
+    });
     await administrator.knowledgeChunk.create({
       data: {
         id: chunkId,
@@ -675,6 +691,7 @@ describe.runIf(enabled)('PostgreSQL answer feedback to Evaluation Bad Case proje
         knowledgeBaseId,
         documentId,
         documentVersionId,
+        parentChunkId,
         chunkIndex: 0,
         content: 'The approved policy applies.',
         tokenCount: 5,

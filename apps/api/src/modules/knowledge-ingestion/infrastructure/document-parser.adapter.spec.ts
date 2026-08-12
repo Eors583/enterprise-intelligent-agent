@@ -25,6 +25,12 @@ describe('DocumentParserAdapter', () => {
         byteLength: 31,
         characterCount: 22,
       },
+      structuredContent: {
+        schemaVersion: 'enterprise-knowledge-document/v1',
+        kind: 'document',
+        mimeType: 'text/plain',
+        text: 'First line\nSecond line',
+      },
     });
   });
 
@@ -121,7 +127,7 @@ describe('DocumentParserAdapter', () => {
     expect(result.text).toContain('引用完整率\t100%');
     expect(result.metadata).toMatchObject({
       mimeType: XLSX_MIME,
-      sourceType: 'TEXT',
+      sourceType: 'MARKDOWN',
       parser: 'exceljs-v4',
     });
   });

@@ -123,13 +123,6 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
             target_projection."status" = 'CANDIDATE'::"KnowledgeGraphProjectionStatus"
             AND target_projection."document_version_id" IN (${Prisma.join(previewVersionSql)})
           )`;
-    const conflictProjectionScopeSql =
-      previewVersionSql.length === 0
-        ? Prisma.sql`conflict_projection."status" = 'ACTIVE'::"KnowledgeGraphProjectionStatus"`
-        : Prisma.sql`(
-            conflict_projection."status" = 'CANDIDATE'::"KnowledgeGraphProjectionStatus"
-            AND conflict_projection."document_version_id" IN (${Prisma.join(previewVersionSql)})
-          )`;
     const evidenceDocumentVersionScopeSql =
       previewVersionSql.length === 0
         ? Prisma.sql`evidence_document."current_version_id" = evidence."document_version_id"`
@@ -144,7 +137,7 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
         : Prisma.sql`target_chunk."document_version_id" IN (${Prisma.join(previewVersionSql)})`;
 
     const rows = await transaction.$queryRaw<RelationshipCandidateRow[]>(Prisma.sql`
-      WITH RECURSIVE current_relation_evidence AS (
+      WITH RECURSIVE current_relation_evidence AS MATERIALIZED (
         SELECT
           evidence."tenant_id",
           evidence."knowledge_base_id",
@@ -173,7 +166,7 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
           AND ${evidenceResourceFilterSql}
         GROUP BY evidence."tenant_id", evidence."knowledge_base_id", evidence."relation_id"
       ),
-      governed_relations AS (
+      eligible_relations AS MATERIALIZED (
         SELECT
           relation."id",
           relation."tenant_id",
@@ -194,61 +187,11 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
           relation."confidence",
           relation."status"
         FROM public."knowledge_relations" relation
-        JOIN public."knowledge_relation_governance" governance
-          ON governance."tenant_id" = relation."tenant_id"
-         AND governance."knowledge_base_id" = relation."knowledge_base_id"
-         AND governance."relation_id" = relation."id"
-         AND governance."valid_from" <= CURRENT_TIMESTAMP
-         AND (governance."valid_to" IS NULL OR governance."valid_to" > CURRENT_TIMESTAMP)
-        JOIN public."knowledge_ontology_versions" ontology_version
-          ON ontology_version."tenant_id" = governance."tenant_id"
-         AND ontology_version."knowledge_base_id" = governance."knowledge_base_id"
-         AND ontology_version."id" = governance."ontology_version_id"
-         AND ontology_version."status" = 'PUBLISHED'
-        JOIN public."knowledge_ontology_predicates" predicate_definition
-          ON predicate_definition."tenant_id" = governance."tenant_id"
-         AND predicate_definition."knowledge_base_id" = governance."knowledge_base_id"
-         AND predicate_definition."ontology_version_id" = governance."ontology_version_id"
-         AND predicate_definition."id" = governance."predicate_definition_id"
         WHERE relation."tenant_id" = ${input.tenantId}::uuid
           AND relation."knowledge_base_id" IN (${accessibleSql})
           AND relation."status" = 'ACTIVE'
-          AND (
-            predicate_definition."allow_self_loop"
-            OR public.knowledge_graph_resolve_canonical_entity(
-              relation."tenant_id",
-              relation."knowledge_base_id",
-              relation."subject_entity_id"
-            ) <> public.knowledge_graph_resolve_canonical_entity(
-              relation."tenant_id",
-              relation."knowledge_base_id",
-              relation."object_entity_id"
-            )
-          )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM public."knowledge_graph_conflicts" conflict
-            JOIN public."knowledge_graph_projections" conflict_projection
-              ON conflict_projection."tenant_id" = conflict."tenant_id"
-             AND conflict_projection."knowledge_base_id" = conflict."knowledge_base_id"
-             AND conflict_projection."id" = conflict."projection_id"
-             AND ${conflictProjectionScopeSql}
-            WHERE conflict."tenant_id" = relation."tenant_id"
-              AND conflict."knowledge_base_id" = relation."knowledge_base_id"
-              AND conflict."status" IN ('OPEN', 'IN_REVIEW')
-              AND (
-                (conflict."target_type" = 'RELATION' AND conflict."target_id" = relation."id")
-                OR (
-                  conflict."target_type" = 'ENTITY'
-                  AND conflict."target_id" IN (
-                    relation."subject_entity_id",
-                    relation."object_entity_id"
-                  )
-                )
-              )
-          )
       ),
-      eligible_seed_mentions AS (
+      eligible_seed_mentions AS MATERIALIZED (
         SELECT
           mention."chunk_id" AS seed_chunk_id,
           mention."knowledge_base_id",
@@ -403,7 +346,7 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
           eligible."entity_id" ASC
         LIMIT 20
       ),
-      seed_mentions AS (
+      seed_mentions AS MATERIALIZED (
         SELECT DISTINCT ON (combined.seed_chunk_id, combined."entity_id")
           combined.seed_chunk_id,
           combined."knowledge_base_id",
@@ -423,6 +366,23 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
           combined.source_seed_score DESC,
           combined.mention_confidence DESC,
           combined.mention_id ASC
+      ),
+      eligible_target_mentions AS MATERIALIZED (
+        SELECT
+          mention.*,
+          public.knowledge_graph_resolve_canonical_entity(
+            mention."tenant_id",
+            mention."knowledge_base_id",
+            mention."entity_id"
+          ) AS canonical_entity_id
+        FROM public."knowledge_entity_mentions" AS mention
+        JOIN public."knowledge_graph_projections" AS target_projection
+         ON target_projection."tenant_id" = mention."tenant_id"
+         AND target_projection."knowledge_base_id" = mention."knowledge_base_id"
+         AND target_projection."id" = mention."projection_id"
+         AND ${targetProjectionScopeSql}
+        WHERE mention."tenant_id" = ${input.tenantId}::uuid
+          AND mention."knowledge_base_id" IN (${accessibleSql})
       ),
       relationship_walk AS (
         SELECT
@@ -453,7 +413,7 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
           ARRAY[seed.source_entity_name, next_entity."canonical_name"]::text[]
             AS path_entity_names
         FROM seed_mentions AS seed
-        JOIN governed_relations AS relation
+        JOIN eligible_relations AS relation
           ON relation."tenant_id" = ${input.tenantId}::uuid
          AND relation."knowledge_base_id" = seed."knowledge_base_id"
          AND relation."status" = 'ACTIVE'
@@ -516,7 +476,7 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
           (walk.path_entity_ids || step.next_entity_id)::uuid[] AS path_entity_ids,
           (walk.path_entity_names || next_entity."canonical_name")::text[] AS path_entity_names
         FROM relationship_walk AS walk
-        JOIN governed_relations AS relation
+        JOIN eligible_relations AS relation
           ON relation."tenant_id" = ${input.tenantId}::uuid
          AND relation."knowledge_base_id" = walk."knowledge_base_id"
          AND relation."status" = 'ACTIVE'
@@ -596,19 +556,10 @@ export class PrismaKnowledgeRelationshipExpander extends KnowledgeRelationshipEx
          AND target_entity."knowledge_base_id" = walk."knowledge_base_id"
          AND target_entity."id" = walk.current_entity_id
          AND target_entity."status" = 'ACTIVE'
-        JOIN public."knowledge_entity_mentions" AS target_mention
+        JOIN eligible_target_mentions AS target_mention
           ON target_mention."tenant_id" = target_entity."tenant_id"
          AND target_mention."knowledge_base_id" = target_entity."knowledge_base_id"
-         AND public.knowledge_graph_resolve_canonical_entity(
-           target_mention."tenant_id",
-           target_mention."knowledge_base_id",
-           target_mention."entity_id"
-         ) = target_entity."id"
-        JOIN public."knowledge_graph_projections" AS target_projection
-         ON target_projection."tenant_id" = target_mention."tenant_id"
-         AND target_projection."knowledge_base_id" = target_mention."knowledge_base_id"
-         AND target_projection."id" = target_mention."projection_id"
-         AND ${targetProjectionScopeSql}
+         AND target_mention.canonical_entity_id = target_entity."id"
         JOIN public."knowledge_chunks" AS target_chunk
           ON target_chunk."tenant_id" = target_mention."tenant_id"
          AND target_chunk."knowledge_base_id" = target_mention."knowledge_base_id"

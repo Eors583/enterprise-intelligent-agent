@@ -404,7 +404,7 @@ function CreateRoleAssignmentModal({
   return (
     <Modal
       title="新建角色任命"
-      description="任命会为成员创建独立的角色 Agent 实例；只有已通过独立审核并发布的角色蓝图版本可被选择，提交时服务端仍会再次校验。"
+      description="任命会为成员创建独立的角色 Agent 实例；已发布的结构化角色蓝图版本即可选择，提交时服务端仍会校验版本和快照完整性。"
       onClose={onClose}
       size="wide"
     >

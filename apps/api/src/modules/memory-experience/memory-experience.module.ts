@@ -11,12 +11,12 @@ import { MemoryExperienceAuthorizationPort } from './memory-experience-authoriza
 import { ExperienceKnowledgeProjectionPort } from './experience-knowledge-projection.port.js';
 import { MemoryExperienceRepository } from './memory-experience.repository.js';
 import { MemoryExperienceService } from './memory-experience.service.js';
-import { KnowledgeIngestionModule } from '../knowledge-ingestion/knowledge-ingestion.module.js';
+import { KnowledgeGatewayModule } from '../knowledge-gateway/knowledge-gateway.module.js';
 import { RuntimeIdentityPort } from '../process-orchestration/application/runtime-identity.port.js';
 import { TenantContextRuntimeIdentityAdapter } from '../process-orchestration/application/tenant-context-runtime-identity.adapter.js';
 
 @Module({
-  imports: [KnowledgeIngestionModule],
+  imports: [KnowledgeGatewayModule],
   controllers: [ExperienceAdminController, MemoryWorkbenchController],
   providers: [
     MemoryExperienceService,

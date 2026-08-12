@@ -242,6 +242,12 @@ export function useSendTextMessage(conversationId: string | null) {
           ...current.filter((item) => item.id !== conversationId),
         ];
       });
+      // The message transaction also creates the Agent Run. Refresh this active
+      // conversation immediately so streaming does not wait for the next poll.
+      void queryClient.invalidateQueries({
+        queryKey: conversationQueryKeys.messages(conversationId),
+        exact: true,
+      });
       void queryClient.invalidateQueries({ queryKey: conversationQueryKeys.all });
     },
   });

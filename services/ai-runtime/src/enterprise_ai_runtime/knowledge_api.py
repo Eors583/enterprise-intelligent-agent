@@ -37,6 +37,7 @@ def _provider_error(error: RuntimeExecutionError) -> HTTPException:
         "PROVIDER_TIMEOUT": status.HTTP_504_GATEWAY_TIMEOUT,
         "PROVIDER_RATE_LIMITED": status.HTTP_429_TOO_MANY_REQUESTS,
         "KNOWLEDGE_CAPABILITY_DISABLED": status.HTTP_503_SERVICE_UNAVAILABLE,
+        "KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH": status.HTTP_409_CONFLICT,
     }.get(error.code, status.HTTP_502_BAD_GATEWAY)
     return HTTPException(
         status_code=status_code,

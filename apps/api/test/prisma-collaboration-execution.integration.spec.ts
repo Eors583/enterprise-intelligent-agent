@@ -8,7 +8,7 @@ import {
   parseAgentRunMemoryContextSnapshot,
   PrismaAgentRunRepository,
 } from '../src/modules/agent-run/infrastructure/prisma/prisma-agent-run.repository.js';
-import { KnowledgeRetrievalService } from '../src/modules/knowledge-retrieval/knowledge-retrieval.service.js';
+import { KnowledgeRetrievalGateway } from '../src/modules/knowledge-gateway/knowledge-gateway.port.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
 import { cleanupDisposableTenants } from './database-test-harness.js';
 
@@ -80,7 +80,7 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
   const administrator = new PrismaClient();
   let app: INestApplication;
   let runs: PrismaAgentRunRepository;
-  let retrieval: KnowledgeRetrievalService;
+  let retrieval: KnowledgeRetrievalGateway;
   let collaborationId: string;
   let memoryConversationId: string;
   let memoryRunId: string;
@@ -109,7 +109,7 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
       },
     });
     runs = app.get(PrismaAgentRunRepository);
-    retrieval = app.get(KnowledgeRetrievalService);
+    retrieval = app.get(KnowledgeRetrievalGateway);
   });
 
   afterAll(async () => {

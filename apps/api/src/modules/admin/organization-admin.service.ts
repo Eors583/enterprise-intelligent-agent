@@ -26,11 +26,18 @@ import { AdminAccessService, type AdminPrincipal } from './admin-access.service.
 import { recordAdminAudit } from './admin-audit.js';
 import { assertOrgUnitParent } from './org-unit-tree.js';
 import { lockOrganizationDirectory } from './organization-directory-lock.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
+import { createMemberDirectoryDetails } from './member-directory-details.js';
 
 type MemberRecord = Prisma.UserGetPayload<{
   include: {
     directoryBindings: true;
-    employments: { include: { position: true } };
+    employments: {
+      include: {
+        position: true;
+        managers: { include: { managerEmployment: { include: { user: true } } } };
+      };
+    };
   };
 }>;
 
@@ -49,6 +56,7 @@ export class OrganizationAdminService {
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
     @Inject(PasswordHasher) private readonly passwords: PasswordHasher,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
   ) {}
 
   async getOrganization(): Promise<AdminOrganizationResponse> {
@@ -75,7 +83,10 @@ export class OrganizationAdminService {
               where: { organizationId: organization.id },
               orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
               take: 1,
-              include: { position: true },
+              include: {
+                position: true,
+                managers: { include: { managerEmployment: { include: { user: true } } } },
+              },
             },
           },
         }),
@@ -283,8 +294,10 @@ export class OrganizationAdminService {
         transaction.position.count({
           where: { tenantId: principal.tenantId, orgUnitId: id },
         }),
-        transaction.knowledgeBaseOrgUnit.count({
-          where: { tenantId: principal.tenantId, orgUnitId: id },
+        this.knowledge.countOrgUnitBindings({
+          tenantId: principal.tenantId,
+          userId: principal.userId,
+          orgUnitId: id,
         }),
       ]);
       if (children + employments + positions + knowledgeScopes > 0) {
@@ -343,6 +356,8 @@ export class OrganizationAdminService {
             email: request.email,
             emailNormalized: request.email,
             displayName: request.displayName,
+            ...(request.phone === undefined ? {} : { phone: request.phone }),
+            ...(request.avatarUrl === undefined ? {} : { avatarUrl: request.avatarUrl }),
             status: 'ACTIVE',
             role: request.role,
           },
@@ -367,7 +382,7 @@ export class OrganizationAdminService {
                 request.orgUnitId,
                 request.title,
               );
-        await transaction.employment.create({
+        const employment = await transaction.employment.create({
           data: {
             tenantId: principal.tenantId,
             userId: user.id,
@@ -377,10 +392,28 @@ export class OrganizationAdminService {
             workEmail: request.email,
             status: 'ACTIVE',
             isPrimary: true,
+            employmentType: request.employmentType,
+            ...(request.hireDate === undefined ? {} : { hireDate: new Date(request.hireDate) }),
+            ...(request.countryOrRegion === undefined
+              ? {}
+              : { countryOrRegion: request.countryOrRegion }),
+            ...(request.city === undefined ? {} : { city: request.city }),
             ...(request.employeeNumber === undefined
               ? {}
               : { employeeNumber: request.employeeNumber }),
           },
+          select: { id: true },
+        });
+        await createMemberDirectoryDetails(transaction, {
+          tenantId: principal.tenantId,
+          organizationId: organization.id,
+          employmentId: employment.id,
+          ...(request.directManagerUserId === undefined
+            ? {}
+            : { directManagerUserId: request.directManagerUserId }),
+          ...(request.dottedLineManagerUserId === undefined
+            ? {}
+            : { dottedLineManagerUserId: request.dottedLineManagerUserId }),
         });
         await recordAdminAudit(transaction, principal, 'admin.member.created', 'user', user.id, {
           role: user.role,
@@ -702,7 +735,10 @@ export class OrganizationAdminService {
           where: { organizationId },
           orderBy: [{ isPrimary: 'desc' }, { createdAt: 'asc' }],
           take: 1,
-          include: { position: true },
+          include: {
+            position: true,
+            managers: { include: { managerEmployment: { include: { user: true } } } },
+          },
         },
       },
     });
@@ -798,10 +834,16 @@ function mapOrgUnit(unit: OrgUnitRecord): AdminOrgUnit {
 
 function mapMember(member: MemberRecord): AdminMember {
   const employment = member.employments[0];
+  const directManager = employment?.managers?.find((manager) => manager.relationType === 'DIRECT');
+  const dottedLineManager = employment?.managers?.find(
+    (manager) => manager.relationType === 'DOTTED_LINE',
+  );
   return {
     id: member.id,
     email: employment?.workEmail ?? member.email,
     displayName: member.displayName,
+    phone: member.phone,
+    avatarUrl: member.avatarUrl,
     status: member.status,
     role: member.role,
     source: member.directoryBindings.length > 0 ? 'FEISHU' : 'LOCAL',
@@ -813,9 +855,36 @@ function mapMember(member: MemberRecord): AdminMember {
             organizationId: employment.organizationId,
             orgUnitId: employment.orgUnitId,
             title: employment.position?.name ?? null,
+            employeeNumber: employment.employeeNumber,
+            employmentType: readEmploymentType(employment.employmentType),
+            hireDate: employment.hireDate?.toISOString().slice(0, 10) ?? null,
+            countryOrRegion: employment.countryOrRegion,
+            city: employment.city,
+            directManager:
+              directManager === undefined
+                ? null
+                : {
+                    userId: directManager.managerEmployment.userId,
+                    displayName: directManager.managerEmployment.user.displayName,
+                  },
+            dottedLineManager:
+              dottedLineManager === undefined
+                ? null
+                : {
+                    userId: dottedLineManager.managerEmployment.userId,
+                    displayName: dottedLineManager.managerEmployment.user.displayName,
+                  },
             status: employment.status,
           },
   };
+}
+
+function readEmploymentType(
+  value: string | null | undefined,
+): NonNullable<AdminMember['employment']>['employmentType'] {
+  return ['REGULAR', 'INTERN', 'OUTSOURCED', 'LABOR', 'CONSULTANT'].includes(value ?? '')
+    ? (value as NonNullable<AdminMember['employment']>['employmentType'])
+    : null;
 }
 
 function optimisticConflict(resource: string): ConflictException {

@@ -1,4 +1,13 @@
-import type { KnowledgeBase } from '@enterprise/contracts';
+import type {
+  AdminOrganizationResponse,
+  KnowledgeBase,
+  KnowledgeBaseOrgUnitScope,
+} from '@enterprise/contracts';
+import {
+  KnowledgeAccessPicker,
+  knowledgeAccessError,
+  type KnowledgeAccessMode,
+} from '@/features/knowledge/KnowledgeAccessPicker';
 import {
   useMemo,
   useRef,
@@ -12,12 +21,33 @@ import {
 import { createKnowledgeBase, uploadKnowledgeDocument } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { FieldError, Modal, Spinner } from '@/components/ui';
+import {
+  companyKnowledgeSpaceDraft,
+  KnowledgeSpacePicker,
+  knowledgeSpaceDraftError,
+  knowledgeSpaceSelectionFromDraft,
+  type KnowledgeSpaceDraft,
+} from '@/features/knowledge/KnowledgeSpacePicker';
 
 import { knowledgeVersionFailure, latestKnowledgeVersion } from './knowledge-ingestion-outcome';
 
 const MAXIMUM_FILES = 20;
-const MAXIMUM_FILE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_EXTENSIONS = new Set(['pdf', 'docx', 'xlsx', 'txt', 'md']);
+const ALLOWED_EXTENSIONS = new Set([
+  'pdf',
+  'docx',
+  'xlsx',
+  'ppt',
+  'pptx',
+  'png',
+  'jpg',
+  'jpeg',
+  'tif',
+  'tiff',
+  'bmp',
+  'webp',
+  'txt',
+  'md',
+]);
 
 type ImportFileStatus = 'QUEUED' | 'UPLOADING' | 'SUCCEEDED' | 'FAILED';
 
@@ -35,9 +65,17 @@ export interface KnowledgeImportResult {
 }
 
 export function KnowledgeImportModal({
+  currentUserId,
+  currentUserName,
+  organization,
+  knowledgeBases = [],
   onClose,
   onImported,
 }: {
+  currentUserId: string;
+  currentUserName: string;
+  organization?: AdminOrganizationResponse | null;
+  knowledgeBases?: readonly KnowledgeBase[];
   onClose: () => void;
   onImported: (result: KnowledgeImportResult) => void;
 }): ReactNode {
@@ -45,6 +83,12 @@ export function KnowledgeImportModal({
   const nextFileId = useRef(0);
   const [files, setFiles] = useState<ImportFile[]>([]);
   const [dragging, setDragging] = useState(false);
+  const [space, setSpace] = useState<KnowledgeSpaceDraft>(() =>
+    companyKnowledgeSpaceDraft(organization),
+  );
+  const [accessMode, setAccessMode] = useState<KnowledgeAccessMode>('ENTERPRISE');
+  const [orgUnitScopes, setOrgUnitScopes] = useState<KnowledgeBaseOrgUnitScope[]>([]);
+  const [memberUserIds, setMemberUserIds] = useState<string[]>([]);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -117,6 +161,16 @@ export function KnowledgeImportModal({
       setError('请先选择需要导入的文件。');
       return;
     }
+    const spaceError = knowledgeSpaceDraftError(space);
+    if (spaceError !== null) {
+      setError(spaceError);
+      return;
+    }
+    const accessError = knowledgeAccessError(accessMode, orgUnitScopes, memberUserIds);
+    if (accessError !== null) {
+      setError(accessError);
+      return;
+    }
 
     setImporting(true);
     setError(null);
@@ -131,8 +185,10 @@ export function KnowledgeImportModal({
         name: knowledgeBaseNameFromFile(files[0]!.file.name),
         description: null,
         status: 'DRAFT',
+        space: knowledgeSpaceSelectionFromDraft(space),
         orgUnitIds: [],
-        orgUnitScopes: [],
+        orgUnitScopes,
+        memberUserIds,
       });
     } catch (caught) {
       setError(messageFromError(caught));
@@ -169,20 +225,39 @@ export function KnowledgeImportModal({
 
   return (
     <Modal
-      title="批量导入企业知识"
-      description="选择资料后，系统会创建一个全企业范围的草稿知识库，并自动解析、切片和建立索引。请在管理员确认权限范围后再启用知识库。"
+      title="选择存放位置并导入知识"
+      description="归属账号自动使用当前登录账号。这里只选择资料存放在公司、部门、项目还是成员知识中。"
       onClose={onClose}
       size="wide"
       dismissible={!importing}
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
+        <KnowledgeSpacePicker
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          organization={organization}
+          knowledgeBases={knowledgeBases}
+          value={space}
+          disabled={importing}
+          onChange={setSpace}
+        />
+        <KnowledgeAccessPicker
+          organization={organization ?? null}
+          mode={accessMode}
+          orgUnitScopes={orgUnitScopes}
+          memberUserIds={memberUserIds}
+          disabled={importing || organization === undefined || organization === null}
+          onModeChange={setAccessMode}
+          onOrgUnitScopesChange={setOrgUnitScopes}
+          onMemberUserIdsChange={setMemberUserIds}
+        />
         <input
           ref={inputRef}
           className="visually-hidden"
           type="file"
           multiple
           disabled={importing || files.length >= MAXIMUM_FILES}
-          accept=".pdf,.docx,.xlsx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/plain,text/markdown"
+          accept=".pdf,.docx,.xlsx,.ppt,.pptx,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-powerpoint,application/vnd.openxmlformats-officedocument.presentationml.presentation,image/*,text/plain,text/markdown"
           onChange={chooseFiles}
         />
         <div
@@ -215,7 +290,7 @@ export function KnowledgeImportModal({
             ↑
           </span>
           <strong>拖放多个文件到这里，或点击选择</strong>
-          <small>支持 PDF、DOCX、XLSX、TXT、MD；最多 20 个，每个不超过 20 MB</small>
+          <small>支持 PDF、DOCX、XLSX、PPT、PPTX、常见图片、TXT、MD；最多 20 个</small>
         </div>
 
         {files.length > 0 ? (
@@ -280,7 +355,7 @@ export function KnowledgeImportModal({
         ) : null}
         <FieldError message={error} />
         <p className="form-hint">
-          知识库将以草稿状态创建，默认全企业范围。上传完成后请检查文档处理结果和部门权限，再手动启用。
+          知识库将以草稿状态创建。本批文件共享上面选择的访问范围；后续添加到该知识库的文件会继承同一范围。
         </p>
         <div className="modal-actions">
           <button className="button secondary" type="button" onClick={onClose} disabled={importing}>
@@ -308,10 +383,9 @@ function fileProblem(file: File): string | null {
     return '文件名长度必须在 1 到 300 个字符之间';
   }
   if (!ALLOWED_EXTENSIONS.has(extensionOf(file.name))) {
-    return '仅支持 PDF、Word（.docx）、Excel（.xlsx）、纯文本（.txt）和 Markdown（.md）文件';
+    return '仅支持 PDF、DOCX、XLSX、PPT、PPTX、常见图片、TXT 和 Markdown 文件';
   }
   if (file.size === 0) return '文件内容为空';
-  if (file.size > MAXIMUM_FILE_BYTES) return '文件超过 20 MB';
   return null;
 }
 

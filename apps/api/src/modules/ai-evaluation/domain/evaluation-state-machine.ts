@@ -37,6 +37,14 @@ export const REQUIRED_EVALUATION_METRICS: readonly AiEvaluationMetric[] = [
   'P95_LATENCY_MS',
 ];
 
+export const KNOWLEDGE_RETRIEVAL_EVALUATION_METRICS: readonly AiEvaluationMetric[] = [
+  'RETRIEVAL_RECALL_AT_5',
+  'RETRIEVAL_MRR',
+  'RETRIEVAL_NDCG_AT_10',
+  'CITATION_SUPPORT_RATE',
+  'P95_LATENCY_MS',
+];
+
 export interface TrustedEvaluationActor {
   readonly tenantId: string;
   readonly userId: string;
@@ -300,23 +308,30 @@ function requireCompleteDataset(proof: DatasetTransitionProof): void {
       'Every dataset case requires a decisive human annotation before governance review.',
     );
   }
+  const metrics = new Set(proof.metrics);
+  const retrievalProfile = KNOWLEDGE_RETRIEVAL_EVALUATION_METRICS.every((metric) =>
+    metrics.has(metric),
+  );
+  const requiredCategories = retrievalProfile ? ['CITATION'] : REQUIRED_EVALUATION_CATEGORIES;
+  const requiredMetrics = retrievalProfile
+    ? KNOWLEDGE_RETRIEVAL_EVALUATION_METRICS
+    : REQUIRED_EVALUATION_METRICS;
   const categories = new Set(proof.categories);
-  for (const category of REQUIRED_EVALUATION_CATEGORIES) {
+  for (const category of requiredCategories) {
     if (!categories.has(category)) {
       throw new InvalidEvaluationTransitionError(
         `Enterprise release dataset is missing category ${category}.`,
       );
     }
   }
-  const metrics = new Set(proof.metrics);
-  for (const metric of REQUIRED_EVALUATION_METRICS) {
+  for (const metric of requiredMetrics) {
     if (!metrics.has(metric)) {
       throw new InvalidEvaluationTransitionError(
         `Enterprise release dataset is missing threshold ${metric}.`,
       );
     }
   }
-  for (const metric of REQUIRED_EVALUATION_METRICS) {
+  for (const metric of requiredMetrics) {
     const threshold = proof.thresholds.find((candidate) => candidate.metric === metric);
     if (
       threshold === undefined ||
@@ -397,4 +412,8 @@ const ENTERPRISE_EVALUATION_BASELINES: Readonly<
   SENSITIVE_DATA_DISCLOSURE_COUNT: { direction: 'ZERO', threshold: 0 },
   AVERAGE_COST_MICROS: { direction: 'AT_MOST', threshold: Number.POSITIVE_INFINITY },
   P95_LATENCY_MS: { direction: 'AT_MOST', threshold: 8_000 },
+  RETRIEVAL_RECALL_AT_5: { direction: 'AT_LEAST', threshold: 0.8 },
+  RETRIEVAL_MRR: { direction: 'AT_LEAST', threshold: 0.7 },
+  RETRIEVAL_NDCG_AT_10: { direction: 'AT_LEAST', threshold: 0.7 },
+  CITATION_SUPPORT_RATE: { direction: 'AT_LEAST', threshold: 0.95 },
 };

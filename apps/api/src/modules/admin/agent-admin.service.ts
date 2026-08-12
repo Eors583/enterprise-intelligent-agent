@@ -21,6 +21,7 @@ import { AdminPrismaService } from '../../database/admin-prisma.service.js';
 import { AdminAccessService } from './admin-access.service.js';
 import { AGENT_RUN_CONCURRENCY_HOLD_STATUSES } from '../agent-run/domain/agent-run-quota.js';
 import { recordAdminAudit } from './admin-audit.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 
 type AgentRecord = Prisma.AgentInstanceGetPayload<{
   include: {
@@ -42,6 +43,7 @@ export class AgentAdminService {
   constructor(
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
   ) {}
 
   async list(): Promise<AdminAgentListResponse> {
@@ -67,12 +69,12 @@ export class AgentAdminService {
         throw new NotFoundException('The active department was not found.');
       }
       const knowledgeBaseIds = [...new Set(request.knowledgeBaseIds)].sort();
-      await requireDepartmentKnowledgeBases(
-        transaction,
-        principal.tenantId,
-        department.id,
+      await this.knowledge.validateKnowledgeBaseSelection({
+        tenantId: principal.tenantId,
+        userId: principal.userId,
         knowledgeBaseIds,
-      );
+        orgUnitId: department.id,
+      });
 
       const templateKey = `department-assistant-${department.id}-${randomUUID()}`;
       const template = await transaction.agentTemplate.create({
@@ -382,26 +384,18 @@ export class AgentAdminService {
           : [...new Set(request.knowledgeBaseIds)].sort();
       if (request.knowledgeBaseIds !== undefined && requestedKnowledgeBaseIds.length > 0) {
         if (current.kind === 'DEPARTMENT' && current.orgUnitId !== null) {
-          await requireDepartmentKnowledgeBases(
-            transaction,
-            principal.tenantId,
-            current.orgUnitId,
-            requestedKnowledgeBaseIds,
-          );
-        } else {
-          const activeKnowledgeBases = await transaction.knowledgeBase.findMany({
-            where: {
-              tenantId: principal.tenantId,
-              id: { in: requestedKnowledgeBaseIds },
-              status: 'ACTIVE',
-            },
-            select: { id: true },
+          await this.knowledge.validateKnowledgeBaseSelection({
+            tenantId: principal.tenantId,
+            userId: principal.userId,
+            knowledgeBaseIds: requestedKnowledgeBaseIds,
+            orgUnitId: current.orgUnitId,
           });
-          if (activeKnowledgeBases.length !== requestedKnowledgeBaseIds.length) {
-            throw new ConflictException(
-              'The knowledge selection contains a missing, inactive, or cross-tenant knowledge base.',
-            );
-          }
+        } else {
+          await this.knowledge.validateKnowledgeBaseSelection({
+            tenantId: principal.tenantId,
+            userId: principal.userId,
+            knowledgeBaseIds: requestedKnowledgeBaseIds,
+          });
         }
       }
       const promptChanged =
@@ -583,60 +577,4 @@ function adminMemberAgentPreference(agent: AgentRecord): number {
     (agent.version.status === 'PUBLISHED' ? 500 : 0) +
     readEffectiveKnowledgeBaseIds(agent.settings, agent.version.knowledgeScope).length * 10
   );
-}
-
-async function requireDepartmentKnowledgeBases(
-  transaction: Prisma.TransactionClient,
-  tenantId: string,
-  orgUnitId: string,
-  knowledgeBaseIds: readonly string[],
-): Promise<void> {
-  const [orgUnits, knowledgeBases] = await Promise.all([
-    transaction.orgUnit.findMany({
-      where: { tenantId, status: 'ACTIVE' },
-      select: { id: true, parentId: true },
-    }),
-    transaction.knowledgeBase.findMany({
-      where: { tenantId, id: { in: [...knowledgeBaseIds] }, status: 'ACTIVE' },
-      include: { orgUnits: true },
-    }),
-  ]);
-  if (knowledgeBases.length !== knowledgeBaseIds.length) {
-    throw new ConflictException(
-      'The knowledge selection contains a missing, inactive, or cross-tenant knowledge base.',
-    );
-  }
-  const parentById = new Map(orgUnits.map((orgUnit) => [orgUnit.id, orgUnit.parentId]));
-  if (!parentById.has(orgUnitId)) {
-    throw new ConflictException('The department is no longer active.');
-  }
-  const inaccessible = knowledgeBases.filter(
-    (knowledgeBase) =>
-      knowledgeBase.orgUnits.length > 0 &&
-      !knowledgeBase.orgUnits.some(
-        (scope) =>
-          scope.orgUnitId === orgUnitId ||
-          (scope.includeChildren && isOrgUnitAncestor(scope.orgUnitId, orgUnitId, parentById)),
-      ),
-  );
-  if (inaccessible.length > 0) {
-    throw new ConflictException(
-      'One or more knowledge bases are not visible to the selected department.',
-    );
-  }
-}
-
-function isOrgUnitAncestor(
-  ancestorId: string,
-  descendantId: string,
-  parentById: ReadonlyMap<string, string | null>,
-): boolean {
-  const visited = new Set<string>();
-  let current = parentById.get(descendantId) ?? null;
-  while (current !== null && !visited.has(current)) {
-    if (current === ancestorId) return true;
-    visited.add(current);
-    current = parentById.get(current) ?? null;
-  }
-  return false;
 }

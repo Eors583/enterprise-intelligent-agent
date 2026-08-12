@@ -16,7 +16,7 @@ describe('admin P1 compatibility contracts', () => {
       createKnowledgeBaseRequestSchema.parse({
         name: '企业制度',
       }),
-    ).toMatchObject({ name: '企业制度', status: 'DRAFT', orgUnitIds: [] });
+    ).toMatchObject({ name: '企业制度', status: 'ACTIVE', orgUnitIds: [] });
     expect(
       createKnowledgeBaseRequestSchema.parse({
         key: 'employee-handbook',
@@ -70,5 +70,30 @@ describe('admin P1 compatibility contracts', () => {
         temporaryPassword: 'TemporaryPassword!2026',
       }).success,
     ).toBe(true);
+  });
+
+  it('accepts the five personnel types but never carries a personal manual in admin onboarding', () => {
+    for (const employmentType of ['REGULAR', 'INTERN', 'OUTSOURCED', 'LABOR', 'CONSULTANT']) {
+      const result = inviteMemberRequestSchema.parse({
+        email: `${employmentType.toLowerCase()}@example.test`,
+        displayName: employmentType,
+        role: 'MEMBER',
+        orgUnitId,
+        phone: '+86 13800000000',
+        employmentType,
+        hireDate: '2026-08-10',
+        countryOrRegion: '中国',
+        city: '深圳',
+        personalManual: {
+          personalSummary: '负责企业协作产品。',
+          jobResponsibilities: '负责需求分析与产品交付。',
+          coreSkills: '产品设计、业务分析。',
+          faqs: [{ question: '什么时候可以找我？', answer: '工作日可直接发消息。' }],
+        },
+      });
+      expect(result.employmentType).toBe(employmentType);
+      expect(result).not.toHaveProperty('personalManual');
+      expect(result).not.toHaveProperty('password');
+    }
   });
 });

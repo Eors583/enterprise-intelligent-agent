@@ -2,12 +2,15 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createKnowledgeBaseRequestSchema,
+  createKnowledgeEmbeddingIndexVersionRequestSchema,
   knowledgeBaseSchema,
   knowledgeDocumentChunkListResponseSchema,
   knowledgeDocumentSchema,
   knowledgeDocumentSummarySchema,
   knowledgeDocumentVersionDetailSchema,
   importKnowledgeWebDocumentRequestSchema,
+  ensureKnowledgeFoldersRequestSchema,
+  inspectKnowledgeUploadRequestSchema,
   reviewKnowledgeDocumentGovernanceRequestSchema,
   reviewKnowledgeDocumentParseRequestSchema,
   knowledgeGraphQuerySchema,
@@ -22,10 +25,32 @@ import {
 } from '../src/index.js';
 
 const ORG_UNIT_ID = '00000000-0000-7000-8000-000000000001';
+const MEMBER_USER_ID = '00000000-0000-7000-8000-000000000005';
 const DOCUMENT_ID = '00000000-0000-7000-8000-000000000003';
 const VERSION_ID = '00000000-0000-7000-8000-000000000004';
 
 describe('knowledge administration contracts', () => {
+  it('accepts directory paths and files beyond the former 100 MB product limit', () => {
+    expect(
+      ensureKnowledgeFoldersRequestSchema.parse({ paths: ['企业战略/2026', '企业战略/制度'] }),
+    ).toEqual({ paths: ['企业战略/2026', '企业战略/制度'] });
+    expect(
+      inspectKnowledgeUploadRequestSchema.parse({
+        fileName: '战略规划.pdf',
+        size: 101 * 1024 * 1024,
+        sha256: 'a'.repeat(64),
+        folderId: ORG_UNIT_ID,
+      }),
+    ).toMatchObject({ size: 101 * 1024 * 1024, folderId: ORG_UNIT_ID });
+    expect(
+      inspectKnowledgeUploadRequestSchema.safeParse({
+        fileName: 'beyond-storage-integer.pdf',
+        size: 2_147_483_648,
+        sha256: 'a'.repeat(64),
+      }).success,
+    ).toBe(false);
+  });
+
   it('preserves whether a department grant includes descendants', () => {
     const request = createKnowledgeBaseRequestSchema.parse({
       key: 'employee-handbook',
@@ -35,6 +60,18 @@ describe('knowledge administration contracts', () => {
 
     expect(request.orgUnitScopes).toEqual([{ orgUnitId: ORG_UNIT_ID, includeChildren: false }]);
     expect(request.orgUnitIds).toEqual([]);
+    expect(request.memberUserIds).toEqual([]);
+  });
+
+  it('accepts departments and named members as one restricted access audience', () => {
+    const request = createKnowledgeBaseRequestSchema.parse({
+      name: 'Project delivery knowledge',
+      orgUnitScopes: [{ orgUnitId: ORG_UNIT_ID, includeChildren: true }],
+      memberUserIds: [MEMBER_USER_ID],
+    });
+
+    expect(request.orgUnitScopes).toEqual([{ orgUnitId: ORG_UNIT_ID, includeChildren: true }]);
+    expect(request.memberUserIds).toEqual([MEMBER_USER_ID]);
   });
 
   it('keeps legacy department id updates valid during the API transition', () => {
@@ -46,6 +83,33 @@ describe('knowledge administration contracts', () => {
     ).toMatchObject({ orgUnitIds: [ORG_UNIT_ID] });
   });
 
+  it('models company, department, project and member as sibling knowledge spaces', () => {
+    expect(
+      createKnowledgeBaseRequestSchema.parse({
+        name: 'Company strategy',
+        space: { type: 'COMPANY' },
+      }).space,
+    ).toEqual({ type: 'COMPANY' });
+    expect(
+      createKnowledgeBaseRequestSchema.parse({
+        name: 'Department goals',
+        space: { type: 'DEPARTMENT', targetId: ORG_UNIT_ID },
+      }).space,
+    ).toEqual({ type: 'DEPARTMENT', targetId: ORG_UNIT_ID });
+    expect(
+      createKnowledgeBaseRequestSchema.parse({
+        name: 'Project delivery',
+        space: { type: 'PROJECT', targetName: 'New employee workbench' },
+      }).space,
+    ).toEqual({ type: 'PROJECT', targetName: 'New employee workbench' });
+    expect(
+      createKnowledgeBaseRequestSchema.parse({
+        name: 'Member skills',
+        space: { type: 'MEMBER', targetId: ORG_UNIT_ID },
+      }).space,
+    ).toEqual({ type: 'MEMBER', targetId: ORG_UNIT_ID });
+  });
+
   it('requires explicit descendant semantics in knowledge-base responses', () => {
     const result = knowledgeBaseSchema.safeParse({
       id: '00000000-0000-7000-8000-000000000002',
@@ -53,10 +117,30 @@ describe('knowledge administration contracts', () => {
       name: 'Employee handbook',
       description: null,
       status: 'ACTIVE',
+      space: {
+        type: 'DEPARTMENT',
+        targetId: ORG_UNIT_ID,
+        targetName: 'Product',
+      },
       version: 1,
+      retrievalConfig: {
+        mode: 'HYBRID',
+        topK: 8,
+        scoreThreshold: 0.08,
+        semanticWeight: 0.7,
+        keywordWeight: 0.3,
+        rerankEnabled: true,
+        relationshipRetrievalEnabled: true,
+        maxChunksPerDocument: 3,
+      },
+      chunkingConfig: { targetTokens: 500, overlapTokens: 80 },
+      activeEmbeddingIndexVersion: null,
+      pendingEmbeddingIndexVersion: null,
       orgUnitIds: [ORG_UNIT_ID],
       orgUnitScopes: [{ orgUnitId: ORG_UNIT_ID, includeChildren: false }],
+      memberUserIds: [MEMBER_USER_ID],
       documentCount: 0,
+      folders: [],
       documents: [],
       updatedAt: '2026-07-20T00:00:00.000Z',
     });
@@ -64,10 +148,35 @@ describe('knowledge administration contracts', () => {
     expect(result.success).toBe(true);
   });
 
+  it('accepts model-specific dimensions and rejects unsafe index dimensions', () => {
+    expect(
+      createKnowledgeEmbeddingIndexVersionRequestSchema.parse({
+        provider: 'local_fastembed',
+        model: 'local-fastembed:BAAI/bge-m3:pad-1024-v1',
+        dimensions: 1024,
+      }),
+    ).toEqual({
+      provider: 'local_fastembed',
+      model: 'local-fastembed:BAAI/bge-m3:pad-1024-v1',
+      dimensions: 1024,
+      distance: 'COSINE',
+      normalization: 'L2',
+    });
+    expect(
+      createKnowledgeEmbeddingIndexVersionRequestSchema.safeParse({
+        provider: 'local_fastembed',
+        model: 'model',
+        dimensions: 16_001,
+      }).success,
+    ).toBe(false);
+  });
+
   it('keeps list summaries separate from full document and version content', () => {
     const summary = {
       id: DOCUMENT_ID,
       knowledgeBaseId: '00000000-0000-7000-8000-000000000002',
+      folderId: null,
+      folderPath: null,
       title: 'Employee handbook',
       sourceType: 'MARKDOWN',
       mimeType: 'text/markdown',
@@ -158,15 +267,12 @@ describe('knowledge administration contracts', () => {
     expect(rollbackKnowledgeDocumentVersionRequestSchema.safeParse({}).success).toBe(false);
   });
 
-  it('requires an exact Evaluation Run reference for Knowledge Version publication', () => {
+  it('accepts direct Knowledge Version publication without a release proof', () => {
+    expect(publishKnowledgeDocumentVersionRequestSchema.parse({})).toEqual({});
     expect(
-      publishKnowledgeDocumentVersionRequestSchema.parse({
-        evaluationRunId: '00000000-0000-7000-8000-000000000006',
-      }),
-    ).toEqual({
-      evaluationRunId: '00000000-0000-7000-8000-000000000006',
-    });
-    expect(publishKnowledgeDocumentVersionRequestSchema.safeParse({}).success).toBe(false);
+      publishKnowledgeDocumentVersionRequestSchema.safeParse({ evaluationRunId: VERSION_ID })
+        .success,
+    ).toBe(false);
   });
 
   it('accepts only HTTPS web imports and requires a reason when parse review rejects', () => {
@@ -207,13 +313,19 @@ describe('knowledge administration contracts', () => {
         items: [
           {
             id: '00000000-0000-7000-8000-000000000005',
+            parentChunkId: '00000000-0000-7000-8000-000000000006',
+            previousChunkId: null,
+            nextChunkId: '00000000-0000-7000-8000-000000000007',
             chunkIndex: 0,
             headingPath: ['Benefits', 'Leave'],
+            parentHeadingPath: ['Benefits', 'Leave'],
+            parentExcerpt: 'Employees receive annual leave.',
             content: 'Employees receive annual leave.',
             tokenCount: 8,
             contentHash: 'a'.repeat(64),
             pageStart: 3,
             pageEnd: 4,
+            sheetName: null,
             embeddingModels: ['embedding-v1'],
           },
         ],
@@ -256,8 +368,7 @@ describe('knowledge administration contracts', () => {
         { type: 'POLICY', count: 8 },
       ],
       relationTypes: [{ predicate: 'APPLIES_TO', count: 8 }],
-      strongRetrievalReady: true,
-      readinessBlockers: [],
+      diagnostics: [],
       lastBuiltAt: '2026-07-27T08:00:00.000Z',
     } as const;
 
@@ -265,9 +376,11 @@ describe('knowledge administration contracts', () => {
     expect(
       knowledgeGraphOverviewSchema.safeParse({
         ...overview,
+        status: 'DEGRADED',
         relationsWithoutEvidenceCount: 1,
+        diagnostics: ['RELATIONS_WITHOUT_EVIDENCE'],
       }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       knowledgeGraphOverviewSchema.safeParse({
         ...overview,
@@ -331,6 +444,14 @@ describe('knowledge administration contracts', () => {
           documentVersion: 2,
           title: '差旅制度',
           headingPath: ['适用范围'],
+          pageStart: 3,
+          pageEnd: 4,
+          sheetName: null,
+          sourceMimeType: 'application/pdf',
+          sourceFileName: '差旅制度.pdf',
+          sourceUri: null,
+          sourceDownloadAvailable: true,
+          structuredPreviewAvailable: true,
           excerpt: '本制度适用于研发部门。',
           keywordScore: 0.7,
           fuzzyScore: 0.4,

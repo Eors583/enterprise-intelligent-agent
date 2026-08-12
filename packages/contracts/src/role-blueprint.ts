@@ -224,7 +224,6 @@ export const roleVersionTransitionRequestSchema = z
 export const publishRoleVersionRequestSchema = z
   .object({
     expectedRevision: z.number().int().positive(),
-    evaluationRunId: z.uuid(),
   })
   .strict();
 

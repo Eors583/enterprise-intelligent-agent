@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   createKnowledgeOntology: vi.fn(),
   getKnowledgeGraphGovernance: vi.fn(),
   transitionKnowledgeGraphCorrection: vi.fn(),
+  transitionKnowledgeGraphRelationCorrectionBatch: vi.fn(),
   transitionKnowledgeOntologyVersion: vi.fn(),
 }));
 
@@ -38,10 +39,11 @@ describe('KnowledgeGraphGovernancePanel', () => {
       expect(dom.container.textContent).toContain('ONTOLOGY.MAPPING.MISSING');
       expect(dom.container.textContent).toContain(CONFLICT_ID);
 
-      Object.defineProperty(window, 'prompt', {
-        configurable: true,
-        value: vi.fn(() => '已发布本体补齐谓词后，保留当前关系。'),
-      });
+      const resolution = dom.container.querySelector('textarea');
+      expect(resolution).not.toBeNull();
+      if (resolution) {
+        await dom.change(resolution, '已发布本体补齐谓词后，保留当前关系。');
+      }
       const propose = [...dom.container.querySelectorAll('button')].find(
         (button) => button.textContent?.trim() === '创建裁决草稿',
       );
@@ -74,6 +76,20 @@ describe('KnowledgeGraphGovernancePanel', () => {
 function overview(): KnowledgeGraphGovernanceOverview {
   return {
     knowledgeBaseId: KNOWLEDGE_BASE_ID,
+    suggestedOntology: {
+      entityTypes: [
+        {
+          key: 'DOCUMENT',
+          name: '文档',
+          description: '由当前图谱归纳。',
+          attributesSchema: {},
+        },
+      ],
+      predicates: [],
+      sourceEntityCount: 1,
+      sourceRelationCount: 1,
+      ungovernedRelationCount: 1,
+    },
     ontologies: [],
     corrections: [],
     merges: [],
@@ -114,6 +130,9 @@ function overview(): KnowledgeGraphGovernanceOverview {
       excludedConflictCount: 1,
       mergedEntityCount: 0,
       publishedOntologyVersionCount: 0,
+      ungovernedRelationCount: 1,
+      pendingReviewRelationCount: 0,
+      approvedRelationCount: 0,
     },
   };
 }

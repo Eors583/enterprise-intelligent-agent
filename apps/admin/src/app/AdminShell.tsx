@@ -1,25 +1,10 @@
-import type { AuthAccount, BrowserAuthSessionResponse } from '@enterprise/contracts';
-import { useEffect, useState, type ReactNode } from 'react';
+import type { AuthAccount, BrowserAuthSessionResponse } from '@enterprise/contracts/auth-session';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
-import { logout } from '@/api/admin-api';
+import { logout } from '@/api/session-api';
 import { writeSession } from '@/auth/session';
 import { Icon } from '@/components/Icons';
-import { roleLabel } from '@/components/ui';
-import { ChangePasswordModal } from '@/features/auth/ChangePasswordModal';
-import { KnowledgePage } from '@/features/knowledge/KnowledgePage';
-import { MarketingManagementPage } from '@/features/marketing-management/MarketingManagementPage';
-import { PeopleOrganizationPage } from '@/features/people-organization/PeopleOrganizationPage';
-import { AgentsPage } from '@/features/agents/AgentsPage';
-import { MembersPage } from '@/features/members/MembersPage';
-import { OrganizationPage } from '@/features/organization/OrganizationPage';
-import { RoleAssignmentsPage } from '@/features/role-assignments/RoleAssignmentsPage';
-import { RoleBlueprintsPage } from '@/features/role-blueprints/RoleBlueprintsPage';
-import { BusinessSemanticsPage } from '@/features/business-semantics/BusinessSemanticsPage';
-import { ExperienceGovernancePage } from '@/features/experience-governance/ExperienceGovernancePage';
-import { IdentitySecurityPage } from '@/features/identity-governance/IdentitySecurityPage';
-import { AiModelRoutingPage } from '@/features/ai-model-routing/AiModelRoutingPage';
-import { AiEvaluationPage } from '@/features/ai-evaluation/AiEvaluationPage';
-import { AdminOverviewPage } from '@/features/admin-overview/AdminOverviewPage';
+import { LoadingPanel, roleLabel } from '@/components/ui';
 import {
   ADMIN_SECONDARY_NAVIGATION,
   adminNavigationForRole,
@@ -30,6 +15,78 @@ import {
   type AdminPrimaryId,
   type AdminRouteId,
 } from './admin-navigation';
+
+const AdminOverviewPage = lazy(() =>
+  import('@/features/admin-overview/AdminOverviewPage').then((module) => ({
+    default: module.AdminOverviewPage,
+  })),
+);
+const ChangePasswordModal = lazy(() =>
+  import('@/features/auth/ChangePasswordModal').then((module) => ({
+    default: module.ChangePasswordModal,
+  })),
+);
+const OrganizationPage = lazy(() =>
+  import('@/features/organization/OrganizationPage').then((module) => ({
+    default: module.OrganizationPage,
+  })),
+);
+const MembersPage = lazy(() =>
+  import('@/features/members/MembersPage').then((module) => ({ default: module.MembersPage })),
+);
+const AgentsPage = lazy(() =>
+  import('@/features/agents/AgentsPage').then((module) => ({ default: module.AgentsPage })),
+);
+const RoleBlueprintsPage = lazy(() =>
+  import('@/features/role-blueprints/RoleBlueprintsPage').then((module) => ({
+    default: module.RoleBlueprintsPage,
+  })),
+);
+const RoleAssignmentsPage = lazy(() =>
+  import('@/features/role-assignments/RoleAssignmentsPage').then((module) => ({
+    default: module.RoleAssignmentsPage,
+  })),
+);
+const BusinessSemanticsPage = lazy(() =>
+  import('@/features/business-semantics/BusinessSemanticsPage').then((module) => ({
+    default: module.BusinessSemanticsPage,
+  })),
+);
+const MarketingManagementPage = lazy(() =>
+  import('@/features/marketing-management/MarketingManagementPage').then((module) => ({
+    default: module.MarketingManagementPage,
+  })),
+);
+const PeopleOrganizationPage = lazy(() =>
+  import('@/features/people-organization/PeopleOrganizationPage').then((module) => ({
+    default: module.PeopleOrganizationPage,
+  })),
+);
+const ExperienceGovernancePage = lazy(() =>
+  import('@/features/experience-governance/ExperienceGovernancePage').then((module) => ({
+    default: module.ExperienceGovernancePage,
+  })),
+);
+const IdentitySecurityPage = lazy(() =>
+  import('@/features/identity-governance/IdentitySecurityPage').then((module) => ({
+    default: module.IdentitySecurityPage,
+  })),
+);
+const AiModelRoutingPage = lazy(() =>
+  import('@/features/ai-model-routing/AiModelRoutingPage').then((module) => ({
+    default: module.AiModelRoutingPage,
+  })),
+);
+const AiEvaluationPage = lazy(() =>
+  import('@/features/ai-evaluation/AiEvaluationPage').then((module) => ({
+    default: module.AiEvaluationPage,
+  })),
+);
+const KnowledgePage = lazy(() =>
+  import('@/features/knowledge/KnowledgePage').then((module) => ({
+    default: module.KnowledgePage,
+  })),
+);
 
 export function AdminShell({ session }: { session: BrowserAuthSessionResponse }): ReactNode {
   const [route, setRoute] = useState<AdminRouteId>(() =>
@@ -167,36 +224,45 @@ export function AdminShell({ session }: { session: BrowserAuthSessionResponse })
           {activePrimary !== null && secondaryNavigation.length > 1 ? (
             <SecondaryNavigation primary={activePrimary} page={page} onNavigate={setRoute} />
           ) : null}
-          {page === 'overview' ? <AdminOverviewPage /> : null}
-          {page === 'organization' ? <OrganizationPage /> : null}
-          {page === 'members' ? <MembersPage currentUserId={session.account.userId} /> : null}
-          {page === 'agents' ? <AgentsPage /> : null}
-          {page === 'role-blueprints' ? (
-            <RoleBlueprintsPage currentUserId={session.account.userId} />
-          ) : null}
-          {page === 'role-assignments' ? <RoleAssignmentsPage /> : null}
-          {page === 'business-semantics' ? (
-            <BusinessSemanticsPage currentUserId={session.account.userId} />
-          ) : null}
-          {page === 'marketing-management' ? (
-            <MarketingManagementPage currentUserId={session.account.userId} />
-          ) : null}
-          {page === 'people-organization' ? <PeopleOrganizationPage /> : null}
-          {page === 'experience-governance' ? <ExperienceGovernancePage /> : null}
-          {page === 'identity-security' ? <IdentitySecurityPage /> : null}
-          {page === 'ai-model-routing' ? <AiModelRoutingPage /> : null}
-          {page === 'ai-evaluation' ? <AiEvaluationPage /> : null}
-          {page === 'knowledge' ? <KnowledgePage /> : null}
+          <Suspense fallback={<LoadingPanel label="正在加载当前页面…" />}>
+            {page === 'overview' ? <AdminOverviewPage /> : null}
+            {page === 'organization' ? <OrganizationPage /> : null}
+            {page === 'members' ? <MembersPage currentUserId={session.account.userId} /> : null}
+            {page === 'agents' ? <AgentsPage /> : null}
+            {page === 'role-blueprints' ? (
+              <RoleBlueprintsPage currentUserId={session.account.userId} />
+            ) : null}
+            {page === 'role-assignments' ? <RoleAssignmentsPage /> : null}
+            {page === 'business-semantics' ? (
+              <BusinessSemanticsPage currentUserId={session.account.userId} />
+            ) : null}
+            {page === 'marketing-management' ? (
+              <MarketingManagementPage currentUserId={session.account.userId} />
+            ) : null}
+            {page === 'people-organization' ? <PeopleOrganizationPage /> : null}
+            {page === 'experience-governance' ? <ExperienceGovernancePage /> : null}
+            {page === 'identity-security' ? <IdentitySecurityPage /> : null}
+            {page === 'ai-model-routing' ? <AiModelRoutingPage /> : null}
+            {page === 'ai-evaluation' ? <AiEvaluationPage /> : null}
+            {page === 'knowledge' ? (
+              <KnowledgePage
+                currentUserId={session.account.userId}
+                currentUserName={session.account.displayName}
+              />
+            ) : null}
+          </Suspense>
         </div>
       </main>
       {passwordModalOpen || session.account.passwordChangeRequired ? (
-        <ChangePasswordModal
-          required={session.account.passwordChangeRequired}
-          onClose={() => {
-            if (!session.account.passwordChangeRequired) setPasswordModalOpen(false);
-          }}
-          onChanged={acceptChangedAccount}
-        />
+        <Suspense fallback={null}>
+          <ChangePasswordModal
+            required={session.account.passwordChangeRequired}
+            onClose={() => {
+              if (!session.account.passwordChangeRequired) setPasswordModalOpen(false);
+            }}
+            onChanged={acceptChangedAccount}
+          />
+        </Suspense>
       ) : null}
     </div>
   );

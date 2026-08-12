@@ -1,14 +1,16 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
-import { currentBrowserSession } from '@/api/admin-api';
+import { currentBrowserSession } from '@/api/session-api';
 import { AdminShell } from '@/app/AdminShell';
 import { isSessionRoleAllowed, readSession, subscribeSession, writeSession } from '@/auth/session';
-import { AuthScreen } from '@/features/auth/AuthScreen';
-import {
-  parseRecoveryRoute,
-  RecoveryScreen,
-  type RecoveryRoute,
-} from '@/features/auth/RecoveryScreen';
+import { parseRecoveryRoute, type RecoveryRoute } from '@/features/auth/recovery-route';
+
+const AuthScreen = lazy(() =>
+  import('@/features/auth/AuthScreen').then((module) => ({ default: module.AuthScreen })),
+);
+const RecoveryScreen = lazy(() =>
+  import('@/features/auth/RecoveryScreen').then((module) => ({ default: module.RecoveryScreen })),
+);
 
 export function App(): ReactNode {
   const [session, setSession] = useState(readSession);
@@ -50,19 +52,25 @@ export function App(): ReactNode {
   // prevents AdminShell from interpreting the sensitive fragment as a page id.
   if (recoveryRoute) {
     return (
-      <RecoveryScreen
-        key={
-          recoveryRoute.kind === 'forgot-password'
-            ? recoveryRoute.kind
-            : `${recoveryRoute.kind}:${recoveryRoute.token}`
-        }
-        route={recoveryRoute}
-        onReturnToLogin={() => {
-          writeSession(null);
-          window.history.replaceState(null, '', window.location.pathname + window.location.search);
-          setRecoveryRoute(null);
-        }}
-      />
+      <Suspense fallback={<SessionLoading label="正在打开账号恢复页面" />}>
+        <RecoveryScreen
+          key={
+            recoveryRoute.kind === 'forgot-password'
+              ? recoveryRoute.kind
+              : `${recoveryRoute.kind}:${recoveryRoute.token}`
+          }
+          route={recoveryRoute}
+          onReturnToLogin={() => {
+            writeSession(null);
+            window.history.replaceState(
+              null,
+              '',
+              window.location.pathname + window.location.search,
+            );
+            setRecoveryRoute(null);
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -76,6 +84,22 @@ export function App(): ReactNode {
     );
   }
 
-  if (!session || !isSessionRoleAllowed(session)) return <AuthScreen />;
+  if (!session || !isSessionRoleAllowed(session)) {
+    return (
+      <Suspense fallback={<SessionLoading label="正在打开登录页面" />}>
+        <AuthScreen />
+      </Suspense>
+    );
+  }
   return <AdminShell session={session} />;
+}
+
+function SessionLoading({ label }: { label: string }): ReactNode {
+  return (
+    <main className="auth-page" aria-busy="true" aria-label={label}>
+      <section className="auth-panel">
+        <div className="auth-card">{label}…</div>
+      </section>
+    </main>
+  );
 }

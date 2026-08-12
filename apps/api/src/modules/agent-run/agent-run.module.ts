@@ -6,7 +6,7 @@ import { AgentRunStreamService } from './application/agent-run-stream.service.js
 import { AuthorizationModule } from '../authorization/authorization.module.js';
 import { AgentOperationalReadinessModule } from '../ai-safety-model-routing/agent-operational-readiness.module.js';
 import { IdentityModule } from '../identity/identity.module.js';
-import { KnowledgeRetrievalModule } from '../knowledge-retrieval/knowledge-retrieval.module.js';
+import { KnowledgeGatewayModule } from '../knowledge-gateway/knowledge-gateway.module.js';
 import { AgentRunQueueRepository } from './domain/agent-run-queue.repository.js';
 import { AgentRunRepository } from './domain/agent-run.repository.js';
 import { AgentRunStreamRepository } from './domain/agent-run-stream.repository.js';
@@ -20,7 +20,7 @@ import { HttpAgentRuntimeClient } from './infrastructure/runtime/http-agent-runt
   imports: [
     AuthorizationModule,
     IdentityModule,
-    KnowledgeRetrievalModule,
+    KnowledgeGatewayModule,
     AgentOperationalReadinessModule,
   ],
   providers: [

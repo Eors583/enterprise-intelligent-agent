@@ -16,15 +16,23 @@ import {
   selectedFormValues,
   type BadCaseLineagePackage,
 } from './governance-form';
-import { badCaseStatusLabel, EVALUATION_CATEGORIES, parseUuidList } from './view';
+import {
+  answerFeedbackReasonLabel,
+  badCaseStatusLabel,
+  EVALUATION_CATEGORIES,
+  evaluationCategoryLabel,
+  parseUuidList,
+} from './view';
 
 export function BadCaseGovernancePanel({
   badCases,
+  refreshToken,
   reload,
   onNotice,
   onError,
 }: {
   badCases: readonly AiEvaluationBadCase[];
+  refreshToken: number;
   reload: () => void;
   onNotice: (message: string) => void;
   onError: (message: string) => void;
@@ -76,7 +84,7 @@ export function BadCaseGovernancePanel({
         }
       });
     return () => controller.abort();
-  }, [onError]);
+  }, [onError, refreshToken]);
 
   const importLineage = async (event: ChangeEvent<HTMLInputElement>): Promise<void> => {
     const file = event.target.files?.[0];
@@ -278,7 +286,7 @@ export function BadCaseGovernancePanel({
           <article className="card evaluation-bad-case" key={badCase.id}>
             <header>
               <div>
-                <strong>{badCase.category}</strong>
+                <strong>{evaluationCategoryLabel(badCase.category)}</strong>
                 <small>
                   {badCase.sourceType} · {badCase.sourceId} · v{badCase.sourceVersion}
                 </small>
@@ -289,6 +297,10 @@ export function BadCaseGovernancePanel({
             <code>{badCase.sourceSnapshotHash}</code>
             {badCase.answerFeedbackSource ? (
               <dl className="evaluation-bad-case-lineage">
+                <div>
+                  <dt>员工反馈原因</dt>
+                  <dd>{answerFeedbackReasonLabel(badCase.answerFeedbackSource.feedbackReason)}</dd>
+                </div>
                 <div>
                   <dt>Agent Run</dt>
                   <dd>

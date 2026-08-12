@@ -3,7 +3,7 @@ import {
   browserAuthSessionResponseSchema,
   canAccessAdminConsole,
   type BrowserAuthSessionResponse,
-} from '@enterprise/contracts';
+} from '@enterprise/contracts/auth-session';
 
 export type AdminBrowserSession = BrowserAuthSessionResponse;
 

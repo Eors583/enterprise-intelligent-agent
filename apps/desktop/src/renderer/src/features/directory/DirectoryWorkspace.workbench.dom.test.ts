@@ -256,7 +256,7 @@ describe('desktop workbench navigation integration', () => {
       );
       expect(contactAgent?.disabled).toBe(false);
       expect(contactAgent?.textContent).toContain('打开共享会话');
-      expect(contactAgent?.title).toContain('可联系本人');
+      expect(contactAgent?.title).toContain('共用同一个会话窗口');
       expect(dom.container.querySelector('.agent-operational-status')?.textContent).toContain(
         '配置已启用，但模型未就绪',
       );

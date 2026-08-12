@@ -13,7 +13,7 @@ const REQUIRED_KNOWLEDGE_FILTER_OBLIGATIONS = new Set<AuthorizationObligationTyp
 ]);
 
 const ALLOWED_CLASSIFICATIONS = new Set(['PUBLIC', 'INTERNAL', 'SENSITIVE', 'CONFIDENTIAL']);
-const ALLOWED_REVIEW_STATUSES = new Set(['APPROVED', 'MIGRATED']);
+const ALLOWED_REVIEW_STATUSES = new Set(['PENDING', 'APPROVED', 'MIGRATED']);
 const SENSITIVE_CLEARANCE = 'CLASSIFICATION:SENSITIVE';
 const CONFIDENTIAL_CLEARANCE = 'CLASSIFICATION:CONFIDENTIAL';
 
@@ -48,6 +48,7 @@ export interface KnowledgeVersionResourcePolicy {
 export function knowledgeFiltersFromDecision(
   decision: AuthorizationDecision,
   roleTemplateIds: readonly string[] = [],
+  principalUserId?: string,
 ): KnowledgeResourceAuthorizationFilters {
   const obligations = new Map(
     decision.obligations.map((obligation) => [obligation.type, obligation.parameters]),
@@ -69,7 +70,10 @@ export function knowledgeFiltersFromDecision(
     projectIds: readStringArray(project.projectIds),
     taskIds: readStringArray(task.taskIds),
     roleTemplateIds: uniqueStrings(roleTemplateIds),
-    principalDataLabels: readStringArray(dataLabels.principalLabels),
+    principalDataLabels: uniqueStrings([
+      ...readStringArray(dataLabels.principalLabels),
+      ...(principalUserId === undefined ? [] : [`USER:${principalUserId}`]),
+    ]),
   };
 }
 
@@ -116,7 +120,12 @@ export function knowledgeVersionResourcePolicyAllowed(
   }
   if (!hasResourceRestriction(policy)) return false;
   return (
-    arrayScopeAllowed(policy.organizationScopeIds, filters.organizationIds) &&
+    peopleScopeAllowed(
+      policy.organizationScopeIds,
+      filters.organizationIds,
+      policy.dataLabels,
+      filters.principalDataLabels,
+    ) &&
     arrayScopeAllowed(policy.projectScopeIds, filters.projectIds) &&
     arrayScopeAllowed(policy.taskScopeIds, filters.taskIds) &&
     arrayScopeAllowed(policy.roleTemplateScopeIds, filters.roleTemplateIds) &&
@@ -129,11 +138,6 @@ export function knowledgeVersionResourcePolicySql(
   version: Prisma.Sql,
   filters: KnowledgeResourceAuthorizationFilters,
 ): Prisma.Sql {
-  const organization = arrayOverlapSql(
-    Prisma.sql`${version}."organization_scope_ids"`,
-    filters.organizationIds,
-    'uuid',
-  );
   const project = arrayOverlapSql(
     Prisma.sql`${version}."project_scope_ids"`,
     filters.projectIds,
@@ -150,8 +154,14 @@ export function knowledgeVersionResourcePolicySql(
     Prisma.sql`${version}."classification"`,
     filters.principalDataLabels,
   );
+  const people = peopleScopeSql(
+    Prisma.sql`${version}."organization_scope_ids"`,
+    filters.organizationIds,
+    Prisma.sql`${version}."data_labels"`,
+    filters.principalDataLabels,
+  );
   return Prisma.sql`
-    ${version}."governance_review_status" IN ('APPROVED', 'MIGRATED')
+    ${version}."governance_review_status" IN ('PENDING', 'APPROVED', 'MIGRATED')
     AND ${version}."governance_hash" ~ '^[a-f0-9]{64}$'
     AND ${version}."effective_from" <= statement_timestamp()
     AND (
@@ -179,7 +189,7 @@ export function knowledgeVersionResourcePolicySql(
           OR cardinality(${version}."role_template_scope_ids") > 0
           OR cardinality(${version}."data_labels") > 0
         )
-        AND ${organization}
+        AND ${people}
         AND ${project}
         AND ${task}
         AND ${role}
@@ -230,13 +240,46 @@ function arrayOverlapSql(
 }
 
 function labelsSubsetSql(column: Prisma.Sql, allowedLabels: readonly string[]): Prisma.Sql {
-  if (allowedLabels.length === 0) return Prisma.sql`cardinality(${column}) = 0`;
-  const allowed = Prisma.join(
-    uniqueStrings(allowedLabels).map((label) => Prisma.sql`${label}::text`),
+  const allowedGovernanceLabels = uniqueStrings(
+    allowedLabels.filter((label) => !isMemberAccessLabel(label)),
   );
+  const allowedGovernanceSql =
+    allowedGovernanceLabels.length === 0
+      ? Prisma.sql`ARRAY[]::text[]`
+      : Prisma.sql`ARRAY[${Prisma.join(allowedGovernanceLabels.map((label) => Prisma.sql`${label}::text`))}]::text[]`;
   return Prisma.sql`(
-    cardinality(${column}) = 0
-    OR ${column} <@ ARRAY[${allowed}]::text[]
+    ARRAY(
+      SELECT label
+      FROM unnest(${column}) AS label
+      WHERE label NOT LIKE 'USER:%'
+    ) <@ ${allowedGovernanceSql}
+  )`;
+}
+
+function peopleScopeSql(
+  organizationColumn: Prisma.Sql,
+  allowedOrganizationIds: readonly string[],
+  labelColumn: Prisma.Sql,
+  allowedLabels: readonly string[],
+): Prisma.Sql {
+  const allowedOrganizationsSql =
+    allowedOrganizationIds.length === 0
+      ? Prisma.sql`ARRAY[]::uuid[]`
+      : Prisma.sql`ARRAY[${Prisma.join(uniqueStrings(allowedOrganizationIds).map((id) => Prisma.sql`${id}::uuid`))}]::uuid[]`;
+  const allowedMemberLabels = uniqueStrings(allowedLabels.filter(isMemberAccessLabel));
+  const allowedMembersSql =
+    allowedMemberLabels.length === 0
+      ? Prisma.sql`ARRAY[]::text[]`
+      : Prisma.sql`ARRAY[${Prisma.join(allowedMemberLabels.map((label) => Prisma.sql`${label}::text`))}]::text[]`;
+  return Prisma.sql`(
+    (
+      cardinality(${organizationColumn}) = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM unnest(${labelColumn}) AS label WHERE label LIKE 'USER:%'
+      )
+    )
+    OR ${organizationColumn} && ${allowedOrganizationsSql}
+    OR ${labelColumn} && ${allowedMembersSql}
   )`;
 }
 
@@ -271,7 +314,29 @@ function arrayScopeAllowed(required: readonly string[], allowed: readonly string
 
 function labelsAllowed(required: readonly string[], allowed: readonly string[]): boolean {
   const allowedSet = new Set(allowed);
-  return required.every((value) => allowedSet.has(value));
+  return required
+    .filter((value) => !isMemberAccessLabel(value))
+    .every((value) => allowedSet.has(value));
+}
+
+function peopleScopeAllowed(
+  requiredOrganizations: readonly string[],
+  allowedOrganizations: readonly string[],
+  requiredLabels: readonly string[],
+  allowedLabels: readonly string[],
+): boolean {
+  const requiredMembers = requiredLabels.filter(isMemberAccessLabel);
+  if (requiredOrganizations.length === 0 && requiredMembers.length === 0) return true;
+  const allowedOrganizationSet = new Set(allowedOrganizations);
+  const allowedLabelSet = new Set(allowedLabels);
+  return (
+    requiredOrganizations.some((value) => allowedOrganizationSet.has(value)) ||
+    requiredMembers.some((value) => allowedLabelSet.has(value))
+  );
+}
+
+function isMemberAccessLabel(value: string): boolean {
+  return value.startsWith('USER:');
 }
 
 function noResourceRestrictions(policy: KnowledgeVersionResourcePolicy): boolean {

@@ -84,6 +84,15 @@ class KnowledgeCapabilityDisabledError(RuntimeExecutionError):
         )
 
 
+class KnowledgeEmbeddingProfileMismatchError(RuntimeExecutionError):
+    def __init__(self) -> None:
+        super().__init__(
+            "KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH",
+            "the requested embedding index profile is not served by this runtime",
+            retryable=False,
+        )
+
+
 class ProviderTimeoutError(RuntimeExecutionError):
     def __init__(self) -> None:
         super().__init__("PROVIDER_TIMEOUT", "model provider timed out", retryable=True)

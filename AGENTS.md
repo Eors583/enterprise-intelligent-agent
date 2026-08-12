@@ -120,6 +120,10 @@ PostgreSQL   Python AI   IM/模型/工具/存储
 - Tool Gateway 是智能体调用外部工具的唯一执行入口。
 - Outbox/Worker 负责可靠处理消息、模型运行、工具执行和其他异步任务。
 - 模型、IM、存储和业务系统通过适配器接入，不在业务代码中绑定单一供应商。
+- 知识库是独立业务边界：智能体、项目、评测、管理端和第三方系统只能通过 `KnowledgeGateway`/`KnowledgeRetrievalGateway`、知识公共 API 或 `packages/contracts` 中的版本化知识事件使用知识能力。
+- 非知识边界代码严禁直接访问知识 Prisma 模型、`knowledge_*` 原始 SQL、Qdrant collection、知识对象存储键/目录或知识内部实现类；公共 Gateway 契约不得暴露 Prisma transaction、数据库记录、collection 名或对象存储 key。
+- 当前知识边界拥有 `knowledge-gateway`、`knowledge-ingestion`、`knowledge-retrieval`、`knowledge-search-index`、`knowledge-semantic`、`knowledge-graph-governance` 及明确登记的知识管理入口。新增边界例外必须先更新 ADR，不能只扩大架构测试白名单。
+- 跨知识边界不共享数据库事务；调用方使用稳定 ID、版本、哈希、幂等键和正式事件处理并发与最终一致性。`knowledge-boundary.architecture.spec.ts` 是 CI 红线，不能跳过或弱化断言来通过构建。
 
 ```text
 apps/
@@ -192,9 +196,19 @@ docs/                   产品方案、ADR、运行手册和 Codex 正式记录
 - `.env`、连接串、API Key、Cookie、UserSig 和客户机密不得提交或写入日志。
 - 当前工作区可能有其他任务的未提交修改；只修改本任务文件，不回滚或格式化无关内容。
 
-### 7.3 产品与 UI
+### 7.3 知识库边界变更
+
+1. 业务模块新增知识能力时，优先扩展传输中立的 Gateway DTO；不得向 Gateway 参数或返回值加入 Prisma、Qdrant、对象存储或内部类类型。
+2. 管理端、桌面端和第三方系统调用知识公共 HTTP API；同进程后端模块注入 Gateway port；异步消费者只订阅 `packages/contracts` 发布的版本化知识事件。
+3. 知识事件必须先定义 Zod 契约和版本，再写入 Outbox；破坏性字段变化发布新事件版本，不原地改变 `.v1` 语义。
+4. 面向生产拆分时，为知识数据、Qdrant 和对象存储使用独立服务身份与最小权限凭据；业务服务身份不得持有这些基础设施凭据。
+5. 任何需要修改知识边界归属、白名单或依赖方向的变更，都必须更新 `docs/adr/0008-knowledge-independent-business-boundary.md` 并运行架构测试。
+
+### 7.4 产品与 UI
 
 - 页面优先回答：目标是什么、进展如何、有什么风险、下一步做什么。
+- 页面按钮区的可用操作直接以清晰命名的按钮展示，不使用“高级”等 `details/summary` 点击展开入口隐藏操作按钮。
+- 字体、颜色、间距、圆角、阴影、控件尺寸和动效必须引用 `apps/admin/src/styles/design-tokens.css` 中登记的 Token，并同步维护 `docs/design-system/admin-ui-style-spec.md`；业务组件不得新增内联视觉样式或散落的颜色、字号和常规间距硬编码。
 - 普通用户不需要理解 Run、Invocation、Queue、Provider 等内部概念。
 - AI 建议必须允许确认、修改、拒绝或转人工。
 - UI 修改后应运行并打开真实客户端检查；不能启动时明确报告阻塞。

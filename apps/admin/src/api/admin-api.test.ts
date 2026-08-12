@@ -22,9 +22,12 @@ import {
 } from '@enterprise/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { requestMock } = vi.hoisted(() => ({ requestMock: vi.fn() }));
+const { requestMock, requestBlobMock } = vi.hoisted(() => ({
+  requestMock: vi.fn(),
+  requestBlobMock: vi.fn(),
+}));
 
-vi.mock('./client', () => ({ request: requestMock }));
+vi.mock('./client', () => ({ request: requestMock, requestBlob: requestBlobMock }));
 
 import {
   applyFeishuDirectoryPreview,
@@ -35,6 +38,7 @@ import {
   getFeishuOrganizationSyncStatus,
   getKnowledgeDocument,
   getKnowledgeDocumentVersion,
+  getKnowledgeDocumentSource,
   importKnowledgeWebDocument,
   issueDirectoryMemberInvitation,
   listPendingKnowledgeParseReviews,
@@ -47,6 +51,7 @@ import {
   rollbackKnowledgeDocumentVersion,
   uploadKnowledgeDocument,
   uploadKnowledgeDocumentVersion,
+  updateKnowledgeDocumentAccess,
 } from './admin-api';
 
 const syncStatus = {
@@ -69,6 +74,53 @@ describe('admin API', () => {
   beforeEach(() => {
     requestMock.mockReset();
     requestMock.mockResolvedValue(syncStatus);
+    requestBlobMock.mockReset();
+  });
+
+  it('updates document access through the stable document endpoint', async () => {
+    await updateKnowledgeDocumentAccess('knowledge/base', 'document/id', {
+      mode: 'RESTRICTED',
+      orgUnitIds: ['00000000-0000-7000-8000-000000000010'],
+      memberUserIds: ['00000000-0000-7000-8000-000000000011'],
+      expectedGovernanceRevision: 3,
+    });
+
+    expect(requestMock).toHaveBeenCalledWith(
+      '/admin/knowledge-bases/knowledge%2Fbase/documents/document%2Fid/access',
+      expect.objectContaining({
+        method: 'PATCH',
+        body: {
+          mode: 'RESTRICTED',
+          orgUnitIds: ['00000000-0000-7000-8000-000000000010'],
+          memberUserIds: ['00000000-0000-7000-8000-000000000011'],
+          expectedGovernanceRevision: 3,
+        },
+        schema: knowledgeDocumentSchema,
+      }),
+    );
+  });
+
+  it('loads an original knowledge file through the authenticated binary endpoint', async () => {
+    const response = {
+      blob: new Blob(['source'], { type: 'application/pdf' }),
+      fileName: '员工制度.pdf',
+      mimeType: 'application/pdf',
+    };
+    const controller = new AbortController();
+    requestBlobMock.mockResolvedValueOnce(response);
+
+    await expect(
+      getKnowledgeDocumentSource(
+        '00000000-0000-7000-8000-000000000001',
+        '00000000-0000-7000-8000-000000000002',
+        '00000000-0000-7000-8000-000000000003',
+        controller.signal,
+      ),
+    ).resolves.toBe(response);
+    expect(requestBlobMock).toHaveBeenCalledWith(
+      '/admin/knowledge-bases/00000000-0000-7000-8000-000000000001/documents/00000000-0000-7000-8000-000000000002/versions/00000000-0000-7000-8000-000000000003/source',
+      controller.signal,
+    );
   });
 
   it('loads sync state independently with an abort signal', async () => {
@@ -283,8 +335,10 @@ describe('admin API', () => {
       name: '企业制度知识库',
       description: null,
       status: 'DRAFT' as const,
+      space: { type: 'COMPANY' as const },
       orgUnitIds: [],
       orgUnitScopes: [],
+      memberUserIds: [],
     };
 
     await createKnowledgeBase(input);
@@ -435,9 +489,7 @@ describe('admin API', () => {
   });
 
   it('publishes drafts and rolls back with the expected-current guard', async () => {
-    const publication = {
-      evaluationRunId: '00000000-0000-7000-8000-000000000202',
-    };
+    const publication = {};
     await publishKnowledgeDocumentVersion(
       'knowledge/base',
       'document/id',

@@ -8,6 +8,7 @@ import type {
   AiEvaluationJudgeType,
   AiEvaluationMetric,
   Evidence,
+  KnowledgeRetrievalBenchmarkRunSummary,
   KnowledgeBase,
   ProcessDefinition,
   RoleAssignment,
@@ -44,18 +45,24 @@ import {
   datasetStatusLabel,
   EVALUATION_CATEGORIES,
   EVALUATION_METRICS,
+  evaluationCategoryLabel,
   parseTextList,
   parseUuidList,
 } from './view';
+import { KnowledgeRetrievalEvaluationPanel } from './KnowledgeRetrievalEvaluationPanel';
 
 export function DatasetGovernancePanel({
   datasets,
+  refreshToken,
   reloadDatasets,
+  onLatestRetrievalRunChange,
   onNotice,
   onError,
 }: {
   datasets: readonly AiEvaluationDataset[];
+  refreshToken: number;
   reloadDatasets: () => void;
+  onLatestRetrievalRunChange: (run: KnowledgeRetrievalBenchmarkRunSummary | null) => void;
   onNotice: (message: string) => void;
   onError: (message: string) => void;
 }): ReactNode {
@@ -73,6 +80,9 @@ export function DatasetGovernancePanel({
   const [badCases, setBadCases] = useState<readonly AiEvaluationBadCase[]>([]);
   const [referencesReady, setReferencesReady] = useState(false);
   const [caseCategory, setCaseCategory] = useState<AiEvaluationCategory>('FACTUALITY');
+  const [versionProfile, setVersionProfile] = useState<
+    'ENTERPRISE_RELEASE' | 'KNOWLEDGE_RETRIEVAL'
+  >('KNOWLEDGE_RETRIEVAL');
   const [reloadKey, setReloadKey] = useState(0);
   const [busy, setBusy] = useState(false);
 
@@ -151,7 +161,7 @@ export function DatasetGovernancePanel({
         }
       });
     return () => controller.abort();
-  }, [onError]);
+  }, [onError, refreshToken, reloadKey]);
 
   useEffect(() => {
     if (preferredDatasetId && datasets.some(({ id }) => id === preferredDatasetId)) {
@@ -187,7 +197,7 @@ export function DatasetGovernancePanel({
         if (!controller.signal.aborted) onError(messageFromError(caught));
       });
     return () => controller.abort();
-  }, [onError, reloadKey, selectedDatasetId]);
+  }, [onError, refreshToken, reloadKey, selectedDatasetId]);
 
   useEffect(() => {
     if (selectedVersionId === '') {
@@ -201,7 +211,7 @@ export function DatasetGovernancePanel({
         if (!controller.signal.aborted) onError(messageFromError(caught));
       });
     return () => controller.abort();
-  }, [onError, reloadKey, selectedVersionId]);
+  }, [onError, refreshToken, reloadKey, selectedVersionId]);
 
   const createDataset = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -267,16 +277,22 @@ export function DatasetGovernancePanel({
           modelRoutes,
           promptHashes,
         },
-        thresholds: [
-          {
-            metric,
-            direction: text(data, 'direction') as 'AT_LEAST' | 'AT_MOST' | 'ZERO',
-            threshold: Number(text(data, 'threshold')),
-            minimumSampleCount: Number(text(data, 'minimumSampleCount')),
-            required: true,
-          },
-        ],
-        requiredCategories: data.getAll('requiredCategories') as AiEvaluationCategory[],
+        thresholds:
+          versionProfile === 'KNOWLEDGE_RETRIEVAL'
+            ? knowledgeRetrievalThresholds()
+            : [
+                {
+                  metric,
+                  direction: text(data, 'direction') as 'AT_LEAST' | 'AT_MOST' | 'ZERO',
+                  threshold: Number(text(data, 'threshold')),
+                  minimumSampleCount: Number(text(data, 'minimumSampleCount')),
+                  required: true,
+                },
+              ],
+        requiredCategories:
+          versionProfile === 'KNOWLEDGE_RETRIEVAL'
+            ? ['CITATION']
+            : (data.getAll('requiredCategories') as AiEvaluationCategory[]),
         idempotencyKey: crypto.randomUUID(),
       });
       setSelectedVersionId(created.id);
@@ -354,6 +370,7 @@ export function DatasetGovernancePanel({
       });
       form.reset();
       reload();
+      reloadDatasets();
       onNotice('评测用例已写入草稿版本；事实、引用和目标用例不会接受空证据。');
     } catch (caught) {
       onError(messageFromError(caught));
@@ -531,21 +548,42 @@ export function DatasetGovernancePanel({
               版本说明
               <textarea name="description" required rows={2} />
             </label>
+            <label>
+              评测用途
+              <select
+                name="versionProfile"
+                value={versionProfile}
+                onChange={(event) =>
+                  setVersionProfile(
+                    event.target.value as 'ENTERPRISE_RELEASE' | 'KNOWLEDGE_RETRIEVAL',
+                  )
+                }
+              >
+                <option value="KNOWLEDGE_RETRIEVAL">知识库检索效果（推荐）</option>
+                <option value="ENTERPRISE_RELEASE">完整智能体发布评测</option>
+              </select>
+              <small>
+                “知识库检索效果”会自动配置 Recall@5、MRR、nDCG@10、来源支撑率和
+                P95，无需理解内部指标字段。
+              </small>
+            </label>
             <div className="evaluation-three-column">
-              <label>
-                已发布智能体版本
-                <select
-                  name="agentVersionIds"
-                  multiple
-                  size={Math.min(5, publishedAgents.length + 1)}
-                >
-                  {publishedAgents.map((agent) => (
-                    <option key={agent.versionId} value={agent.versionId}>
-                      {agent.name} · v{agent.version}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {versionProfile === 'ENTERPRISE_RELEASE' ? (
+                <label>
+                  已发布智能体版本
+                  <select
+                    name="agentVersionIds"
+                    multiple
+                    size={Math.min(5, publishedAgents.length + 1)}
+                  >
+                    {publishedAgents.map((agent) => (
+                      <option key={agent.versionId} value={agent.versionId}>
+                        {agent.name} · v{agent.version}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
               <label>
                 当前 READY 知识版本
                 <select
@@ -560,20 +598,22 @@ export function DatasetGovernancePanel({
                   ))}
                 </select>
               </label>
-              <label>
-                当前已发布工具版本
-                <select
-                  name="toolVersionIds"
-                  multiple
-                  size={Math.min(5, publishedTools.length + 1)}
-                >
-                  {publishedTools.map((tool) => (
-                    <option key={tool.currentVersionId!} value={tool.currentVersionId!}>
-                      {tool.name} · v{tool.currentVersion}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              {versionProfile === 'ENTERPRISE_RELEASE' ? (
+                <label>
+                  当前已发布工具版本
+                  <select
+                    name="toolVersionIds"
+                    multiple
+                    size={Math.min(5, publishedTools.length + 1)}
+                  >
+                    {publishedTools.map((tool) => (
+                      <option key={tool.currentVersionId!} value={tool.currentVersionId!}>
+                        {tool.name} · v{tool.currentVersion}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
             </div>
             {!referencesReady ? (
               <p>真实发布目录尚未加载完成；创建操作将被阻断。</p>
@@ -585,7 +625,10 @@ export function DatasetGovernancePanel({
             <small>
               模型、智能体、知识和工具版本只从当前已发布目录选择，旧对象兼容请通过迁移任务处理。
             </small>
-            <div className="evaluation-three-column">
+            <div
+              className="evaluation-three-column"
+              hidden={versionProfile === 'KNOWLEDGE_RETRIEVAL'}
+            >
               <label>
                 必需指标
                 <select name="metric" defaultValue="FACTUAL_ACCURACY">
@@ -613,7 +656,7 @@ export function DatasetGovernancePanel({
                 <input name="minimumSampleCount" type="number" min="1" defaultValue="1" />
               </label>
             </div>
-            <fieldset>
+            <fieldset hidden={versionProfile === 'KNOWLEDGE_RETRIEVAL'}>
               <legend>必需类别</legend>
               <div className="evaluation-check-grid">
                 {EVALUATION_CATEGORIES.map((category) => (
@@ -634,6 +677,18 @@ export function DatasetGovernancePanel({
             </button>
           </form>
         </details>
+      ) : null}
+
+      {selectedVersion ? (
+        <KnowledgeRetrievalEvaluationPanel
+          version={selectedVersion}
+          evidence={verifiedEvidence}
+          refreshToken={refreshToken}
+          onChanged={reload}
+          onLatestRunChange={onLatestRetrievalRunChange}
+          onNotice={onNotice}
+          onError={onError}
+        />
       ) : null}
 
       {selectedVersion?.status === 'DRAFT' ? (
@@ -771,7 +826,8 @@ export function DatasetGovernancePanel({
                       <option value="">不关联坏样本</option>
                       {mappedBadCases.map((badCase) => (
                         <option key={badCase.id} value={badCase.id}>
-                          {badCase.category} · {badCase.sanitizedInput.slice(0, 48)}
+                          {evaluationCategoryLabel(badCase.category)} ·{' '}
+                          {badCase.sanitizedInput.slice(0, 48)}
                         </option>
                       ))}
                     </select>
@@ -793,7 +849,7 @@ export function DatasetGovernancePanel({
                 <select name="caseId" required>
                   {cases.map((testCase) => (
                     <option key={testCase.id} value={testCase.id}>
-                      {testCase.caseKey} · {testCase.category}
+                      {testCase.caseKey} · {evaluationCategoryLabel(testCase.category)}
                     </option>
                   ))}
                 </select>
@@ -983,4 +1039,50 @@ function requiredData(data: FormData | undefined): FormData {
 
 function mergeUnique(...groups: readonly string[][]): string[] {
   return [...new Set(groups.flat())];
+}
+
+function knowledgeRetrievalThresholds(): Array<{
+  metric: AiEvaluationMetric;
+  direction: 'AT_LEAST' | 'AT_MOST';
+  threshold: number;
+  minimumSampleCount: number;
+  required: true;
+}> {
+  return [
+    {
+      metric: 'RETRIEVAL_RECALL_AT_5',
+      direction: 'AT_LEAST',
+      threshold: 0.8,
+      minimumSampleCount: 150,
+      required: true,
+    },
+    {
+      metric: 'RETRIEVAL_MRR',
+      direction: 'AT_LEAST',
+      threshold: 0.7,
+      minimumSampleCount: 150,
+      required: true,
+    },
+    {
+      metric: 'RETRIEVAL_NDCG_AT_10',
+      direction: 'AT_LEAST',
+      threshold: 0.7,
+      minimumSampleCount: 150,
+      required: true,
+    },
+    {
+      metric: 'CITATION_SUPPORT_RATE',
+      direction: 'AT_LEAST',
+      threshold: 0.95,
+      minimumSampleCount: 150,
+      required: true,
+    },
+    {
+      metric: 'P95_LATENCY_MS',
+      direction: 'AT_MOST',
+      threshold: 3_000,
+      minimumSampleCount: 200,
+      required: true,
+    },
+  ];
 }

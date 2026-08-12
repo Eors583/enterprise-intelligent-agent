@@ -23,6 +23,9 @@ const apiMocks = vi.hoisted(() => ({
   loadEvaluationReadiness: vi.fn(),
   ingestEvaluationBadCase: vi.fn(),
   triageEvaluationBadCase: vi.fn(),
+  listKnowledgeRetrievalBenchmarks: vi.fn(),
+  bulkImportKnowledgeRetrievalEvaluationCases: vi.fn(),
+  runKnowledgeRetrievalBenchmark: vi.fn(),
 }));
 const adminApiMocks = vi.hoisted(() => ({
   listAgents: vi.fn(),
@@ -54,6 +57,7 @@ beforeEach(() => {
   apiMocks.listEvaluationBadCases.mockResolvedValue(page([]));
   apiMocks.listEvaluationDatasetVersions.mockResolvedValue(page([]));
   apiMocks.listEvaluationCases.mockResolvedValue(page([]));
+  apiMocks.listKnowledgeRetrievalBenchmarks.mockResolvedValue(page([]));
   adminApiMocks.listAgents.mockResolvedValue({ items: [] });
   adminApiMocks.listKnowledgeBases.mockResolvedValue({ items: [] });
   adminApiMocks.listRoleAssignments.mockResolvedValue({ items: [] });
@@ -67,7 +71,7 @@ describe('AI evaluation governance DOM acceptance', () => {
     const dom = await renderInTestDom(createElement(AiEvaluationPage));
     try {
       await dom.flush();
-      expect(dom.container.textContent).toContain('AI 评测与发布门禁');
+      expect(dom.container.textContent).toContain('AI 质量评测');
       expect(dom.container.textContent).toContain('数据集、版本与受控用例');
       expect(dom.container.textContent).toContain('Runner、Run 与发布可信状态');
       expect(dom.container.textContent).toContain('负反馈与坏样本分流');
@@ -128,7 +132,7 @@ describe('AI evaluation governance DOM acceptance', () => {
     }
   });
 
-  it('uses published reference selectors and keeps legacy ids and prompt hashes advanced', async () => {
+  it('keeps the retrieval profile knowledge-focused and hides unrelated agent and tool references', async () => {
     apiMocks.listEvaluationDatasets.mockResolvedValue(
       page([
         {
@@ -228,10 +232,10 @@ describe('AI evaluation governance DOM acceptance', () => {
       await dom.flush();
       await dom.flush();
 
-      expect(dom.container.querySelector('select[name="agentVersionIds"]')).not.toBeNull();
+      expect(dom.container.querySelector('select[name="agentVersionIds"]')).toBeNull();
       expect(dom.container.querySelector('textarea[name="agentVersionIds"]')).toBeNull();
       expect(dom.container.querySelector('select[name="knowledgeVersionIds"]')).not.toBeNull();
-      expect(dom.container.querySelector('select[name="toolVersionIds"]')).not.toBeNull();
+      expect(dom.container.querySelector('select[name="toolVersionIds"]')).toBeNull();
       expect(dom.container.querySelector('select[name="roleAssignmentSelection"]')).not.toBeNull();
       expect(dom.container.querySelector('select[name="processVersionSelection"]')).not.toBeNull();
       expect(dom.container.querySelector('input[name="caseKey"]')).toBeNull();

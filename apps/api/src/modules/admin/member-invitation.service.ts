@@ -16,6 +16,7 @@ import { PasswordHasher } from '../auth/application/password-hasher.js';
 import { TokenService } from '../auth/application/token.service.js';
 import { AdminAccessService } from './admin-access.service.js';
 import { recordAdminAudit } from './admin-audit.js';
+import { createMemberDirectoryDetails } from './member-directory-details.js';
 import { lockOrganizationDirectory } from './organization-directory-lock.js';
 
 type InvitationRecord = Prisma.AuthActionTokenGetPayload<{
@@ -93,6 +94,8 @@ export class MemberInvitationService {
             email: request.email,
             emailNormalized: request.email,
             displayName: request.displayName,
+            ...(request.phone === undefined ? {} : { phone: request.phone }),
+            ...(request.avatarUrl === undefined ? {} : { avatarUrl: request.avatarUrl }),
             status: 'INACTIVE',
             role: request.role,
           },
@@ -116,7 +119,7 @@ export class MemberInvitationService {
                 request.orgUnitId,
                 request.title,
               );
-        await transaction.employment.create({
+        const employment = await transaction.employment.create({
           data: {
             tenantId: principal.tenantId,
             userId: user.id,
@@ -126,10 +129,28 @@ export class MemberInvitationService {
             workEmail: request.email,
             status: 'PENDING',
             isPrimary: true,
+            employmentType: request.employmentType,
+            ...(request.hireDate === undefined ? {} : { hireDate: new Date(request.hireDate) }),
+            ...(request.countryOrRegion === undefined
+              ? {}
+              : { countryOrRegion: request.countryOrRegion }),
+            ...(request.city === undefined ? {} : { city: request.city }),
             ...(request.employeeNumber === undefined
               ? {}
               : { employeeNumber: request.employeeNumber }),
           },
+          select: { id: true },
+        });
+        await createMemberDirectoryDetails(transaction, {
+          tenantId: principal.tenantId,
+          organizationId: organization.id,
+          employmentId: employment.id,
+          ...(request.directManagerUserId === undefined
+            ? {}
+            : { directManagerUserId: request.directManagerUserId }),
+          ...(request.dottedLineManagerUserId === undefined
+            ? {}
+            : { dottedLineManagerUserId: request.dottedLineManagerUserId }),
         });
         const invitation = await transaction.authActionToken.create({
           data: {

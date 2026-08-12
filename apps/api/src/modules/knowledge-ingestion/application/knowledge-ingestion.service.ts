@@ -5,14 +5,18 @@ import {
   forwardRef,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { defineKnowledgePublicEvent } from '@enterprise/contracts';
 import type {
   KnowledgeDocumentGovernancePolicy,
   KnowledgeGraphRebuildResponse,
+  KnowledgeStructuredDocumentPreview,
 } from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
+import type { Readable } from 'node:stream';
 
 import { AdminPrismaService } from '../../../database/admin-prisma.service.js';
 import { AdminAccessService, type AdminPrincipal } from '../../admin/admin-access.service.js';
@@ -26,17 +30,26 @@ import {
   KnowledgeAiRuntimeError,
 } from '../../knowledge-semantic/knowledge-ai-runtime.client.js';
 import {
+  KnowledgeSearchIndex,
+  type KnowledgeSearchIndexProfile,
+} from '../../knowledge-search-index/knowledge-search-index.port.js';
+import {
   KNOWLEDGE_DOCUMENT_PARSER,
   type KnowledgeDocumentParser,
 } from './knowledge-document-parser.port.js';
 import { KnowledgeIngestionAvailabilityService } from './knowledge-ingestion-availability.service.js';
 import type { ClaimedKnowledgeIngestionJob } from '../domain/knowledge-ingestion-job.repository.js';
-import { chunkKnowledgeDocument } from '../domain/knowledge-document.chunker.js';
+import {
+  chunkKnowledgeDocumentWithParents,
+  type KnowledgeDocumentChunk,
+  type KnowledgeDocumentParentChunk,
+} from '../domain/knowledge-document.chunker.js';
 import {
   projectKnowledgeGraph,
   type KnowledgeGraphProjection,
 } from '../domain/knowledge-graph.projector.js';
 import { assessKnowledgeParseQuality } from '../domain/knowledge-parse-quality.js';
+import { scanKnowledgeContent } from '../domain/knowledge-content-security.js';
 import {
   ControlledKnowledgeWebFetcher,
   KnowledgeWebFetchError,
@@ -65,12 +78,63 @@ import {
 const FILE_UPLOAD_RECOVERY_DELAY_MS = 5 * 60_000;
 const MAX_PERSISTED_ENTITY_ALIASES = 32;
 const MAX_PERSISTED_ENTITY_ALIAS_LENGTH = 160;
+const STRUCTURED_KNOWLEDGE_FORMAT = 'enterprise-knowledge-document/v1';
+const EMBEDDING_PERSIST_BATCH_SIZE = 64;
+
+const embeddingIndexVersionSelect = {
+  id: true,
+  version: true,
+  status: true,
+  model: true,
+  dimensions: true,
+  distance: true,
+  collectionName: true,
+} satisfies Prisma.KnowledgeEmbeddingIndexVersionSelect;
+
+interface EmbeddingIndexDescriptor {
+  readonly id: string;
+  readonly version: number;
+  readonly status: 'BUILDING' | 'ACTIVE' | 'RETIRED' | 'FAILED';
+  readonly model: string;
+  readonly dimensions: number;
+  readonly distance: string;
+  readonly collectionName: string | null;
+}
+
+function embeddingProfileExpectation(index: EmbeddingIndexDescriptor) {
+  return { model: index.model, dimensions: index.dimensions };
+}
+
+function knowledgeSearchIndexProfile(index: EmbeddingIndexDescriptor): KnowledgeSearchIndexProfile {
+  if (index.distance !== 'COSINE') throw new Error('KNOWLEDGE_INDEX_DISTANCE_UNSUPPORTED');
+  return {
+    indexVersionId: index.id,
+    collectionName: index.collectionName,
+    dimensions: index.dimensions,
+    distance: 'COSINE',
+  };
+}
+
+function deploymentDefaultSearchIndexProfile(dimensions: number): KnowledgeSearchIndexProfile {
+  return {
+    indexVersionId: 'deployment-default',
+    collectionName: null,
+    dimensions,
+    distance: 'COSINE',
+  };
+}
+
+function requireEmbeddingIndex(index: EmbeddingIndexDescriptor | null): EmbeddingIndexDescriptor {
+  if (index === null) throw new Error('KNOWLEDGE_EMBEDDING_INDEX_UNCONFIGURED');
+  return index;
+}
 
 interface IngestionIdentity {
   readonly tenantId: string;
   readonly knowledgeBaseId: string;
   readonly documentId: string;
   readonly documentVersionId: string;
+  readonly title: string;
   readonly jobId: string | null;
   readonly versionNumber: number;
   readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
@@ -119,9 +183,18 @@ class KnowledgeFileSecurityError extends Error {
 
 export interface KnowledgeEmbeddingRebuildResult {
   readonly documentVersionId: string;
+  readonly embeddingIndexVersionId: string;
+  readonly embeddingIndexVersion: number;
   readonly embeddingModel: string;
-  readonly dimensions: 1536;
+  readonly dimensions: number;
   readonly chunkCount: number;
+}
+
+export interface KnowledgeSourceDocument {
+  readonly body: Readable;
+  readonly size: number;
+  readonly mimeType: string;
+  readonly fileName: string;
 }
 
 export interface KnowledgeGraphPersistenceIdentity {
@@ -152,6 +225,10 @@ export class KnowledgeIngestionService {
       | 'retry'
       | 'rebuildEmbeddings'
       | 'rebuildKnowledgeGraph'
+      | 'syncSearchDocumentVersion'
+      | 'archiveSearchDocument'
+      | 'readStructuredDocumentPreview'
+      | 'readSourceDocument'
     >,
   ) {}
 
@@ -170,10 +247,12 @@ export class KnowledgeIngestionService {
 
   upload(input: {
     readonly knowledgeBaseId: string;
+    readonly folderId?: string | null;
     readonly title: string;
     readonly bytes: Buffer;
     readonly mimeType: string;
     readonly fileName: string;
+    readonly sourceUri?: string;
     readonly changeSummary?: string;
     readonly governance?: KnowledgeDocumentGovernancePolicy;
   }): Promise<string> {
@@ -187,6 +266,7 @@ export class KnowledgeIngestionService {
     readonly bytes: Buffer;
     readonly mimeType: string;
     readonly fileName: string;
+    readonly sourceUri?: string;
     readonly changeSummary?: string;
     readonly governance?: KnowledgeDocumentGovernancePolicy;
   }): Promise<string> {
@@ -211,6 +291,7 @@ export class KnowledgeIngestionService {
     readonly knowledgeBaseId: string;
     readonly documentId: string;
     readonly documentVersionId: string;
+    readonly embeddingIndexVersionId?: string;
   }): Promise<KnowledgeEmbeddingRebuildResult> {
     return this.processor.rebuildEmbeddings(this.access.requireKnowledgeWrite(), input);
   }
@@ -222,16 +303,49 @@ export class KnowledgeIngestionService {
   }): Promise<KnowledgeGraphRebuildResult> {
     return this.processor.rebuildKnowledgeGraph(this.access.requireKnowledgeWrite(), input);
   }
+
+  syncSearchDocumentVersion(input: {
+    readonly knowledgeBaseId: string;
+    readonly documentId: string;
+    readonly documentVersionId: string;
+    readonly active: boolean;
+    readonly embeddingIndexVersionId?: string;
+  }): Promise<void> {
+    return this.processor.syncSearchDocumentVersion(this.access.requireKnowledgeWrite(), input);
+  }
+
+  archiveSearchDocument(input: { readonly documentId: string }): Promise<void> {
+    return this.processor.archiveSearchDocument(this.access.requireKnowledgeWrite(), input);
+  }
+
+  readStructuredDocumentPreview(input: {
+    readonly knowledgeBaseId: string;
+    readonly documentId: string;
+    readonly documentVersionId: string;
+  }): Promise<KnowledgeStructuredDocumentPreview> {
+    return this.processor.readStructuredDocumentPreview(this.access.requireKnowledgeWrite(), input);
+  }
+
+  readSourceDocument(input: {
+    readonly knowledgeBaseId: string;
+    readonly documentId: string;
+    readonly documentVersionId: string;
+  }): Promise<KnowledgeSourceDocument> {
+    return this.processor.readSourceDocument(this.access.requireKnowledgeWrite(), input);
+  }
 }
 
 @Injectable()
 export class KnowledgeIngestionProcessor {
+  private readonly logger = new Logger(KnowledgeIngestionProcessor.name);
+
   constructor(
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
     @Inject(KNOWLEDGE_DOCUMENT_PARSER) private readonly parser: KnowledgeDocumentParser,
     @Inject(KNOWLEDGE_OBJECT_STORE) private readonly objects: KnowledgeObjectStore,
     @Inject(KNOWLEDGE_FILE_SCANNER) private readonly scanner: KnowledgeFileScanner,
     @Inject(KnowledgeAiRuntimeClient) private readonly semantic: KnowledgeAiRuntimeClient,
+    @Inject(KnowledgeSearchIndex) private readonly searchIndex: KnowledgeSearchIndex,
     @Inject(ControlledKnowledgeWebFetcher)
     private readonly webFetcher: ControlledKnowledgeWebFetcher,
     @Inject(KnowledgeIngestionAvailabilityService)
@@ -274,10 +388,12 @@ export class KnowledgeIngestionProcessor {
     principal: AdminPrincipal,
     input: {
       readonly knowledgeBaseId: string;
+      readonly folderId?: string | null;
       readonly title: string;
       readonly bytes: Buffer;
       readonly mimeType: string;
       readonly fileName: string;
+      readonly sourceUri?: string;
       readonly changeSummary?: string;
       readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
@@ -295,6 +411,7 @@ export class KnowledgeIngestionProcessor {
       readonly bytes: Buffer;
       readonly mimeType: string;
       readonly fileName: string;
+      readonly sourceUri?: string;
       readonly changeSummary?: string;
       readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
@@ -375,11 +492,13 @@ export class KnowledgeIngestionProcessor {
     principal: AdminPrincipal,
     input: {
       readonly knowledgeBaseId: string;
+      readonly folderId?: string | null;
       readonly documentId?: string;
       readonly title: string;
       readonly bytes: Buffer;
       readonly mimeType: string;
       readonly fileName: string;
+      readonly sourceUri?: string;
       readonly changeSummary?: string;
       readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
@@ -388,11 +507,13 @@ export class KnowledgeIngestionProcessor {
       tenantId: principal.tenantId,
       actorUserId: principal.userId,
       knowledgeBaseId: input.knowledgeBaseId,
+      ...(input.folderId === undefined ? {} : { folderId: input.folderId }),
       ...(input.documentId === undefined ? {} : { documentId: input.documentId }),
       title: input.title,
       sourceType: 'FILE',
       mimeType: input.mimeType,
       fileName: input.fileName,
+      ...(input.sourceUri === undefined ? {} : { sourceUri: input.sourceUri }),
       processing: true,
       enqueue: true,
       queueAvailableAt: new Date(Date.now() + FILE_UPLOAD_RECOVERY_DELAY_MS),
@@ -467,6 +588,7 @@ export class KnowledgeIngestionProcessor {
         where: { tenantId: principal.tenantId, id: documentVersionId, documentId },
         include: {
           ingestionJobs: { orderBy: { createdAt: 'desc' }, take: 1 },
+          document: { select: { title: true } },
         },
       });
       if (version === null) throw new NotFoundException('The document version was not found.');
@@ -494,6 +616,7 @@ export class KnowledgeIngestionProcessor {
         knowledgeBaseId: version.knowledgeBaseId,
         documentId: version.documentId,
         documentVersionId: version.id,
+        title: version.document.title,
         jobId: job.id,
         versionNumber: version.versionNumber,
         sourceType: version.sourceType,
@@ -513,6 +636,7 @@ export class KnowledgeIngestionProcessor {
       readonly knowledgeBaseId: string;
       readonly documentId: string;
       readonly documentVersionId: string;
+      readonly embeddingIndexVersionId?: string;
     },
   ): Promise<KnowledgeEmbeddingRebuildResult> {
     this.availability.assertPersistentWritesAvailable();
@@ -526,6 +650,40 @@ export class KnowledgeIngestionProcessor {
         input.knowledgeBaseId,
         input.documentId,
       );
+      const knowledgeBase = await transaction.knowledgeBase.findFirst({
+        where: { tenantId: principal.tenantId, id: input.knowledgeBaseId },
+        select: {
+          activeEmbeddingIndexVersion: { select: embeddingIndexVersionSelect },
+          pendingEmbeddingIndexVersion: { select: embeddingIndexVersionSelect },
+        },
+      });
+      const explicitlyRequested =
+        input.embeddingIndexVersionId === undefined
+          ? null
+          : await transaction.knowledgeEmbeddingIndexVersion.findFirst({
+              where: {
+                tenantId: principal.tenantId,
+                knowledgeBaseId: input.knowledgeBaseId,
+                id: input.embeddingIndexVersionId,
+              },
+              select: embeddingIndexVersionSelect,
+            });
+      if (input.embeddingIndexVersionId !== undefined && explicitlyRequested === null) {
+        throw new NotFoundException('The requested embedding index version was not found.');
+      }
+      const embeddingIndex =
+        explicitlyRequested ??
+        knowledgeBase?.pendingEmbeddingIndexVersion ??
+        knowledgeBase?.activeEmbeddingIndexVersion ??
+        null;
+      if (embeddingIndex === null) {
+        throw new ConflictException(
+          'Configure an embedding index version before rebuilding document embeddings.',
+        );
+      }
+      if (embeddingIndex.status !== 'ACTIVE' && embeddingIndex.status !== 'BUILDING') {
+        throw new ConflictException('The selected embedding index version cannot be rebuilt.');
+      }
       const version = await transaction.knowledgeDocumentVersion.findFirst({
         where: {
           tenantId: principal.tenantId,
@@ -542,6 +700,7 @@ export class KnowledgeIngestionProcessor {
         throw new ConflictException('The document version has no chunks to embed.');
       }
       return {
+        embeddingIndex,
         classification: knowledgeClassificationToAi(version.classification),
         chunks: version.chunks.map((chunk) => ({
           id: chunk.id,
@@ -555,6 +714,8 @@ export class KnowledgeIngestionProcessor {
       principal.tenantId,
       snapshot.chunks.map((chunk) => chunk.content),
       snapshot.classification,
+      undefined,
+      embeddingProfileExpectation(snapshot.embeddingIndex),
     );
     if (embeddingBatch.vectors.length !== snapshot.chunks.length) {
       throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH', true);
@@ -589,18 +750,19 @@ export class KnowledgeIngestionProcessor {
         }
         await transaction.$executeRaw`
           INSERT INTO public."knowledge_chunk_embeddings" (
-            "id", "tenant_id", "chunk_id", "embedding_model",
+            "id", "tenant_id", "chunk_id", "embedding_index_version_id", "embedding_model",
             "embedding_dimension", "content_hash", "embedding"
           ) VALUES (
             ${randomUUID()}::uuid,
             ${principal.tenantId}::uuid,
             ${chunk.id}::uuid,
+            ${snapshot.embeddingIndex.id}::uuid,
             ${embeddingBatch.model},
             ${embeddingBatch.dimensions},
             ${chunk.contentHash},
             ${vectorLiteral(vector)}::vector
           )
-          ON CONFLICT ("tenant_id", "chunk_id", "embedding_model")
+          ON CONFLICT ("tenant_id", "chunk_id", "embedding_index_version_id")
           DO UPDATE SET
             "embedding_dimension" = EXCLUDED."embedding_dimension",
             "content_hash" = EXCLUDED."content_hash",
@@ -616,6 +778,8 @@ export class KnowledgeIngestionProcessor {
         input.documentVersionId,
         {
           documentId: input.documentId,
+          embeddingIndexVersionId: snapshot.embeddingIndex.id,
+          embeddingIndexVersion: snapshot.embeddingIndex.version,
           embeddingModel: embeddingBatch.model,
           dimensions: embeddingBatch.dimensions,
           chunkCount: snapshot.chunks.length,
@@ -624,9 +788,280 @@ export class KnowledgeIngestionProcessor {
     });
     return {
       documentVersionId: input.documentVersionId,
+      embeddingIndexVersionId: snapshot.embeddingIndex.id,
+      embeddingIndexVersion: snapshot.embeddingIndex.version,
       embeddingModel: embeddingBatch.model,
       dimensions: embeddingBatch.dimensions,
       chunkCount: snapshot.chunks.length,
+    };
+  }
+
+  async syncSearchDocumentVersion(
+    principal: Pick<AdminPrincipal, 'tenantId'>,
+    input: {
+      readonly knowledgeBaseId: string;
+      readonly documentId: string;
+      readonly documentVersionId: string;
+      readonly active: boolean;
+      readonly embeddingIndexVersionId?: string;
+    },
+  ): Promise<void> {
+    const snapshot = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const knowledgeBase = await transaction.knowledgeBase.findFirst({
+        where: { tenantId: principal.tenantId, id: input.knowledgeBaseId },
+        select: {
+          activeEmbeddingIndexVersion: { select: embeddingIndexVersionSelect },
+        },
+      });
+      const embeddingIndex =
+        input.embeddingIndexVersionId === undefined
+          ? (knowledgeBase?.activeEmbeddingIndexVersion ?? null)
+          : await transaction.knowledgeEmbeddingIndexVersion.findFirst({
+              where: {
+                tenantId: principal.tenantId,
+                knowledgeBaseId: input.knowledgeBaseId,
+                id: input.embeddingIndexVersionId,
+              },
+              select: embeddingIndexVersionSelect,
+            });
+      const version = await transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId: input.knowledgeBaseId,
+          documentId: input.documentId,
+          id: input.documentVersionId,
+          status: { in: ['READY', 'ARCHIVED'] },
+        },
+        select: {
+          id: true,
+          classification: true,
+          governanceHash: true,
+          createdAt: true,
+          document: { select: { title: true } },
+          chunks: {
+            orderBy: [{ chunkIndex: 'asc' }, { id: 'asc' }],
+            select: {
+              id: true,
+              headingPath: true,
+              content: true,
+              contentHash: true,
+            },
+          },
+        },
+      });
+      if (version === null)
+        throw new NotFoundException('The indexed document version was not found.');
+      const embeddings =
+        embeddingIndex === null
+          ? []
+          : await transaction.$queryRaw<
+              Array<{ readonly chunk_id: string; readonly embedding: string }>
+            >(Prisma.sql`
+              SELECT DISTINCT ON (embedding."chunk_id")
+                embedding."chunk_id"::text AS chunk_id,
+                embedding."embedding"::text AS embedding
+              FROM public."knowledge_chunk_embeddings" embedding
+              JOIN public."knowledge_chunks" chunk
+                ON chunk."tenant_id" = embedding."tenant_id"
+               AND chunk."id" = embedding."chunk_id"
+              WHERE embedding."tenant_id" = ${principal.tenantId}::uuid
+                AND embedding."embedding_index_version_id" = ${embeddingIndex.id}::uuid
+                AND chunk."document_version_id" = ${input.documentVersionId}::uuid
+              ORDER BY embedding."chunk_id", embedding."updated_at" DESC, embedding."embedding_model"
+            `);
+      return {
+        embeddingIndex,
+        version,
+        vectorByChunkId: new Map(
+          embeddings.map((row) => [row.chunk_id, parseStoredVector(row.embedding)]),
+        ),
+      };
+    });
+    const searchIndexProfile =
+      snapshot.embeddingIndex === null
+        ? deploymentDefaultSearchIndexProfile(this.semantic.embeddingDimensions)
+        : knowledgeSearchIndexProfile(snapshot.embeddingIndex);
+    await this.searchIndex.replaceDocumentVersion({
+      profile: searchIndexProfile,
+      tenantId: principal.tenantId,
+      documentVersionId: input.documentVersionId,
+      active: input.active,
+      chunks: snapshot.version.chunks.map((chunk) => {
+        const vector = snapshot.vectorByChunkId.get(chunk.id);
+        return {
+          chunkId: chunk.id,
+          tenantId: principal.tenantId,
+          knowledgeBaseId: input.knowledgeBaseId,
+          documentId: input.documentId,
+          documentVersionId: input.documentVersionId,
+          title: snapshot.version.document.title,
+          headingPath: chunk.headingPath,
+          content: chunk.content,
+          contentHash: chunk.contentHash,
+          classification: snapshot.version.classification,
+          governanceHash: snapshot.version.governanceHash,
+          updatedAt: snapshot.version.createdAt.toISOString(),
+          ...(vector === undefined ? {} : { vector }),
+        };
+      }),
+    });
+    if (input.active) {
+      await this.searchIndex.publishDocumentVersion({
+        profile: searchIndexProfile,
+        tenantId: principal.tenantId,
+        documentId: input.documentId,
+        documentVersionId: input.documentVersionId,
+      });
+    }
+  }
+
+  async archiveSearchDocument(
+    principal: AdminPrincipal,
+    input: { readonly documentId: string },
+  ): Promise<void> {
+    const profiles = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const document = await transaction.knowledgeDocument.findFirst({
+        where: { tenantId: principal.tenantId, id: input.documentId },
+        select: {
+          knowledgeBase: {
+            select: {
+              activeEmbeddingIndexVersion: { select: embeddingIndexVersionSelect },
+              pendingEmbeddingIndexVersion: { select: embeddingIndexVersionSelect },
+            },
+          },
+        },
+      });
+      if (document === null) return [];
+      const configuredProfiles = [
+        document.knowledgeBase.activeEmbeddingIndexVersion,
+        document.knowledgeBase.pendingEmbeddingIndexVersion,
+      ].filter((profile): profile is NonNullable<typeof profile> => profile !== null);
+      return configuredProfiles.length === 0
+        ? [deploymentDefaultSearchIndexProfile(this.semantic.embeddingDimensions)]
+        : configuredProfiles.map(knowledgeSearchIndexProfile);
+    });
+    await Promise.all(
+      profiles.map((profile) =>
+        this.searchIndex.archiveDocument({
+          profile,
+          tenantId: principal.tenantId,
+          documentId: input.documentId,
+        }),
+      ),
+    );
+  }
+
+  async readStructuredDocumentPreview(
+    principal: AdminPrincipal,
+    input: {
+      readonly knowledgeBaseId: string;
+      readonly documentId: string;
+      readonly documentVersionId: string;
+    },
+  ): Promise<KnowledgeStructuredDocumentPreview> {
+    const version = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId: input.knowledgeBaseId,
+          documentId: input.documentId,
+          id: input.documentVersionId,
+        },
+        select: {
+          id: true,
+          structuredObjectKey: true,
+          structuredObjectSize: true,
+          structuredObjectSha256: true,
+          structuredFormat: true,
+        },
+      }),
+    );
+    if (version === null) throw new NotFoundException('The document version was not found.');
+    if (
+      version.structuredObjectKey === null ||
+      version.structuredObjectSize === null ||
+      version.structuredObjectSha256 === null ||
+      version.structuredFormat === null
+    ) {
+      throw new NotFoundException('The structured document artifact is not available.');
+    }
+    const object = await this.objects.readObject(version.structuredObjectKey);
+    if (
+      object.size !== version.structuredObjectSize ||
+      object.sha256 !== version.structuredObjectSha256
+    ) {
+      throw new KnowledgeObjectIntegrityError(
+        'Structured knowledge artifact does not match its version ledger.',
+      );
+    }
+    const bytes = await collectReadable(object.body, object.size, object.size);
+    let content: unknown;
+    try {
+      content = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch {
+      throw new KnowledgeObjectIntegrityError('Structured knowledge artifact is not valid JSON.');
+    }
+    const preview = structuredPreview(content);
+    return {
+      documentVersionId: version.id,
+      format: version.structuredFormat,
+      size: version.structuredObjectSize,
+      sha256: version.structuredObjectSha256,
+      truncated: preview.truncated,
+      content: preview.value,
+    };
+  }
+
+  async readSourceDocument(
+    principal: AdminPrincipal,
+    input: {
+      readonly knowledgeBaseId: string;
+      readonly documentId: string;
+      readonly documentVersionId: string;
+    },
+  ): Promise<KnowledgeSourceDocument> {
+    const version = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId: input.knowledgeBaseId,
+          documentId: input.documentId,
+          id: input.documentVersionId,
+        },
+        select: {
+          objectKey: true,
+          objectSize: true,
+          objectSha256: true,
+          mimeType: true,
+          fileName: true,
+          document: { select: { title: true } },
+        },
+      }),
+    );
+    if (version === null || version.objectKey === null) {
+      throw new NotFoundException('The original source file is not available.');
+    }
+    const object = await this.objects.readObject(version.objectKey);
+    if (version.objectSize !== null && object.size !== version.objectSize) {
+      object.body.destroy();
+      throw new KnowledgeObjectIntegrityError(
+        'Knowledge source object size does not match its version ledger.',
+      );
+    }
+    if (
+      version.objectSha256 !== null &&
+      object.sha256.toLowerCase() !== version.objectSha256.toLowerCase()
+    ) {
+      object.body.destroy();
+      throw new KnowledgeObjectIntegrityError(
+        'Knowledge source object checksum does not match its version ledger.',
+      );
+    }
+    return {
+      body: object.body,
+      size: object.size,
+      mimeType: version.mimeType ?? 'application/octet-stream',
+      fileName: sourceFileName(version.fileName ?? version.document.title),
     };
   }
 
@@ -740,6 +1175,7 @@ export class KnowledgeIngestionProcessor {
     readonly tenantId: string;
     readonly actorUserId: string;
     readonly knowledgeBaseId: string;
+    readonly folderId?: string | null;
     readonly documentId?: string;
     readonly title: string;
     readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
@@ -761,12 +1197,24 @@ export class KnowledgeIngestionProcessor {
       if (knowledgeBase === null || knowledgeBase.status === 'ARCHIVED') {
         throw new NotFoundException('The active knowledge base was not found.');
       }
+      if (input.documentId === undefined && input.folderId != null) {
+        const folder = await transaction.knowledgeFolder.findFirst({
+          where: {
+            tenantId: input.tenantId,
+            knowledgeBaseId: input.knowledgeBaseId,
+            id: input.folderId,
+          },
+          select: { id: true },
+        });
+        if (folder === null) throw new BadRequestException('The knowledge folder was not found.');
+      }
       const document =
         input.documentId === undefined
           ? await transaction.knowledgeDocument.create({
               data: {
                 tenantId: input.tenantId,
                 knowledgeBaseId: input.knowledgeBaseId,
+                folderId: input.folderId ?? null,
                 title: input.title,
                 sourceType: input.sourceType,
                 mimeType: input.mimeType,
@@ -873,6 +1321,7 @@ export class KnowledgeIngestionProcessor {
         knowledgeBaseId: input.knowledgeBaseId,
         documentId: document.id,
         documentVersionId: version.id,
+        title: document.title,
         jobId: job?.id ?? null,
         versionNumber,
         sourceType: input.sourceType,
@@ -920,6 +1369,7 @@ export class KnowledgeIngestionProcessor {
           objectSha256: true,
           contentText: true,
           createdById: true,
+          document: { select: { title: true } },
         },
       });
       if (version === null) throw new Error('KNOWLEDGE_DOCUMENT_VERSION_UNAVAILABLE');
@@ -929,6 +1379,7 @@ export class KnowledgeIngestionProcessor {
           knowledgeBaseId: version.knowledgeBaseId,
           documentId: version.documentId,
           documentVersionId: version.id,
+          title: version.document.title,
           jobId: claim.id,
           versionNumber: version.versionNumber,
           sourceType: version.sourceType,
@@ -1006,7 +1457,12 @@ export class KnowledgeIngestionProcessor {
         'admin.knowledge-document-version.ingestion-failed',
         'knowledge_document_version',
         claim.documentVersionId,
-        { errorCode: failure.code, attempts: claim.attempts, queued: true },
+        {
+          errorCode: failure.code,
+          attempts: claim.attempts,
+          failureAttempts: claim.failureAttempts,
+          queued: true,
+        },
       );
       return true;
     });
@@ -1108,6 +1564,14 @@ export class KnowledgeIngestionProcessor {
     workerId: string,
     lease: KnowledgeIngestionLeaseControl,
   ): Promise<void> {
+    const startedAt = performance.now();
+    const timings: Record<string, number> = {};
+    let stageStartedAt = startedAt;
+    const finishStage = (stage: string): void => {
+      const now = performance.now();
+      timings[stage] = Math.round(now - stageStartedAt);
+      stageStartedAt = now;
+    };
     assertKnowledgeIngestionLeaseActive(lease);
     await this.advance(identity, workerId, 'SECURITY_CHECK', 15);
     let securityScan: {
@@ -1139,6 +1603,7 @@ export class KnowledgeIngestionProcessor {
         securityScan = { verdict: 'clean', scanner: scan.scanner };
       }
     }
+    finishStage('securityScanMs');
     await this.advance(identity, workerId, 'PARSING', 30);
     await lease.assertOwned();
     const aiClassification = knowledgeClassificationToAi(identity.classification);
@@ -1154,29 +1619,137 @@ export class KnowledgeIngestionProcessor {
       ...(identity.fileName === null ? {} : { fileName: identity.fileName }),
       signal: lease.signal,
     });
+    finishStage('parseMs');
+    assertKnowledgeIngestionLeaseActive(lease);
+    await lease.assertOwned();
+    // Parsed content must be checked before any derived artifact, chunk,
+    // embedding, database row or external search index is produced.
+    // Findings intentionally stay in memory until the dedicated review ledger
+    // persists only redacted summaries; never include the matched value in an
+    // exception or log message.
+    if (scanKnowledgeContent(parsed.text).length > 0) {
+      throw new Error('KNOWLEDGE_CONTENT_SECURITY_REVIEW_REQUIRED');
+    }
+    const structuredBytes = serializeStructuredKnowledgeDocument(parsed);
+    const structuredObjectInput = {
+      tenantId: identity.tenantId,
+      documentId: identity.documentId,
+      versionId: identity.documentVersionId,
+      artifactKind: 'structured' as const,
+      contentType: 'application/json; charset=utf-8',
+      body: structuredBytes,
+    };
+    let structuredObject: StoredKnowledgeObject;
+    try {
+      structuredObject = await this.objects.putObject(structuredObjectInput);
+    } catch (error) {
+      if (!(error instanceof KnowledgeObjectConflictError)) throw error;
+      // A killed attempt can leave an uncommitted derived artifact behind. The
+      // immutable source object is never replaced; the current lease owner may
+      // regenerate only this structured derivative before chunks are committed.
+      await lease.assertOwned();
+      await this.objects.deleteObject(error.objectKey);
+      await lease.assertOwned();
+      structuredObject = await this.objects.putObject(structuredObjectInput);
+    }
+    finishStage('structuredObjectMs');
     assertKnowledgeIngestionLeaseActive(lease);
     await lease.assertOwned();
     await this.advance(identity, workerId, 'CHUNKING', 55);
-    const chunks = chunkParsedKnowledgeDocument(parsed);
+    const knowledgeConfiguration = await this.prisma.withTenant(identity.tenantId, (transaction) =>
+      transaction.knowledgeBase.findFirst({
+        where: { tenantId: identity.tenantId, id: identity.knowledgeBaseId },
+        select: {
+          chunkTargetTokens: true,
+          chunkOverlapTokens: true,
+          activeEmbeddingIndexVersion: { select: embeddingIndexVersionSelect },
+        },
+      }),
+    );
+    if (knowledgeConfiguration === null) throw new Error('KNOWLEDGE_BASE_UNAVAILABLE');
+    await lease.assertOwned();
+    const hierarchy = chunkParsedKnowledgeDocument(parsed, {
+      targetTokens: knowledgeConfiguration.chunkTargetTokens,
+      overlapTokens: knowledgeConfiguration.chunkOverlapTokens,
+    });
+    finishStage('chunkMs');
+    const chunks = hierarchy.chunks;
     if (chunks.length === 0) throw new Error('DOCUMENT_TEXT_EMPTY');
     const parseQuality = assessKnowledgeParseQuality({
       parsed,
       sourceByteLength: bytes.byteLength,
       chunkCount: chunks.length,
     });
-    const storedChunks = chunks.map((chunk) => ({ id: randomUUID(), ...chunk }));
-    await this.advance(identity, workerId, 'INDEXING', 80);
+    const storedParents = hierarchy.parents.map((parent) => ({ id: randomUUID(), ...parent }));
+    const chunkIds = chunks.map(() => randomUUID());
+    const storedChunks = chunks.map((chunk, index) => ({
+      id: requireArrayValue(chunkIds, index, 'KNOWLEDGE_CHUNK_ID_MISSING'),
+      ...chunk,
+      parentChunkId: requireArrayValue(
+        storedParents,
+        chunk.parentIndex,
+        'KNOWLEDGE_PARENT_CHUNK_MISSING',
+      ).id,
+      previousChunkId:
+        index === 0 ? null : requireArrayValue(chunkIds, index - 1, 'KNOWLEDGE_CHUNK_ID_MISSING'),
+      nextChunkId:
+        index + 1 >= chunkIds.length
+          ? null
+          : requireArrayValue(chunkIds, index + 1, 'KNOWLEDGE_CHUNK_ID_MISSING'),
+    }));
+    await this.advance(identity, workerId, 'INDEXING', 65);
     await lease.assertOwned();
-    const embeddingBatch = this.semantic.semanticEnabled
-      ? await this.semantic.embedAll(
-          identity.tenantId,
-          storedChunks.map((chunk) => chunk.content),
-          aiClassification,
-          lease.signal,
-        )
-      : null;
+    const embeddingIndex = knowledgeConfiguration.activeEmbeddingIndexVersion ?? null;
+    const embeddingBatch =
+      this.semantic.semanticEnabled && embeddingIndex !== null
+        ? await this.semantic.embedAll(
+            identity.tenantId,
+            storedChunks.map((chunk) => chunk.content),
+            aiClassification,
+            lease.signal,
+            embeddingProfileExpectation(embeddingIndex),
+          )
+        : null;
+    finishStage('embeddingMs');
     assertKnowledgeIngestionLeaseActive(lease);
     await lease.assertOwned();
+
+    if (embeddingBatch !== null && embeddingBatch.vectors.length !== storedChunks.length) {
+      throw new Error('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH');
+    }
+    await this.advance(identity, workerId, 'INDEXING', 78);
+    const indexedAt = new Date();
+    let automaticallyPublished = false;
+    await this.searchIndex.replaceDocumentVersion({
+      profile:
+        embeddingIndex === null
+          ? deploymentDefaultSearchIndexProfile(this.semantic.embeddingDimensions)
+          : knowledgeSearchIndexProfile(embeddingIndex),
+      tenantId: identity.tenantId,
+      documentVersionId: identity.documentVersionId,
+      active: false,
+      chunks: storedChunks.map((chunk, index) => ({
+        chunkId: chunk.id,
+        tenantId: identity.tenantId,
+        knowledgeBaseId: identity.knowledgeBaseId,
+        documentId: identity.documentId,
+        documentVersionId: identity.documentVersionId,
+        title: identity.title,
+        headingPath: chunk.headingPath,
+        content: chunk.content,
+        contentHash: chunk.contentHash,
+        classification: identity.classification,
+        governanceHash: identity.governanceHash,
+        updatedAt: indexedAt.toISOString(),
+        ...(embeddingBatch?.vectors[index] === undefined
+          ? {}
+          : { vector: embeddingBatch.vectors[index] }),
+      })),
+    });
+    finishStage('searchIndexMs');
+    assertKnowledgeIngestionLeaseActive(lease);
+    await lease.assertOwned();
+    await this.advance(identity, workerId, 'INDEXING', 90);
 
     await this.prisma.withTenant(identity.tenantId, async (transaction) => {
       await lockKnowledgeDocument(transaction, identity.tenantId, identity.documentId);
@@ -1210,6 +1783,24 @@ export class KnowledgeIngestionProcessor {
       await transaction.knowledgeChunk.deleteMany({
         where: { tenantId: identity.tenantId, documentVersionId: identity.documentVersionId },
       });
+      await transaction.knowledgeParentChunk.deleteMany({
+        where: { tenantId: identity.tenantId, documentVersionId: identity.documentVersionId },
+      });
+      await transaction.knowledgeParentChunk.createMany({
+        data: storedParents.map((parent) => ({
+          id: parent.id,
+          tenantId: identity.tenantId,
+          knowledgeBaseId: identity.knowledgeBaseId,
+          documentId: identity.documentId,
+          documentVersionId: identity.documentVersionId,
+          parentIndex: parent.parentIndex,
+          headingPath: parent.headingPath,
+          content: parent.content,
+          tokenCount: parent.tokenCount,
+          contentHash: parent.contentHash,
+          metadata: parent.metadata,
+        })),
+      });
       await transaction.knowledgeChunk.createMany({
         data: storedChunks.map((chunk) => ({
           id: chunk.id,
@@ -1217,6 +1808,9 @@ export class KnowledgeIngestionProcessor {
           knowledgeBaseId: identity.knowledgeBaseId,
           documentId: identity.documentId,
           documentVersionId: identity.documentVersionId,
+          parentChunkId: chunk.parentChunkId,
+          previousChunkId: chunk.previousChunkId,
+          nextChunkId: chunk.nextChunkId,
           chunkIndex: chunk.chunkIndex,
           headingPath: chunk.headingPath,
           content: chunk.content,
@@ -1235,43 +1829,59 @@ export class KnowledgeIngestionProcessor {
         if (embeddingBatch.vectors.length !== storedChunks.length) {
           throw new Error('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH');
         }
-        for (const [index, chunk] of storedChunks.entries()) {
-          const vector = embeddingBatch.vectors[index];
-          if (vector === undefined) throw new Error('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH');
-          await transaction.$executeRaw`
+        for (let offset = 0; offset < storedChunks.length; offset += EMBEDDING_PERSIST_BATCH_SIZE) {
+          const rows = storedChunks
+            .slice(offset, offset + EMBEDDING_PERSIST_BATCH_SIZE)
+            .map((chunk, batchIndex) => {
+              const vector = embeddingBatch.vectors[offset + batchIndex];
+              if (vector === undefined) throw new Error('KNOWLEDGE_EMBEDDING_COUNT_MISMATCH');
+              return Prisma.sql`(
+                ${randomUUID()}::uuid,
+                ${identity.tenantId}::uuid,
+                ${chunk.id}::uuid,
+                ${requireEmbeddingIndex(embeddingIndex).id}::uuid,
+                ${embeddingBatch.model},
+                ${embeddingBatch.dimensions},
+                ${chunk.contentHash},
+                ${vectorLiteral(vector)}::vector
+              )`;
+            });
+          await transaction.$executeRaw(Prisma.sql`
             INSERT INTO public."knowledge_chunk_embeddings" (
-              "id", "tenant_id", "chunk_id", "embedding_model",
+              "id", "tenant_id", "chunk_id", "embedding_index_version_id", "embedding_model",
               "embedding_dimension", "content_hash", "embedding"
-            ) VALUES (
-              ${randomUUID()}::uuid,
-              ${identity.tenantId}::uuid,
-              ${chunk.id}::uuid,
-              ${embeddingBatch.model},
-              ${embeddingBatch.dimensions},
-              ${chunk.contentHash},
-              ${vectorLiteral(vector)}::vector
-            )
-            ON CONFLICT ("tenant_id", "chunk_id", "embedding_model")
+            ) VALUES ${Prisma.join(rows)}
+            ON CONFLICT ("tenant_id", "chunk_id", "embedding_index_version_id")
             DO UPDATE SET
               "embedding_dimension" = EXCLUDED."embedding_dimension",
               "content_hash" = EXCLUDED."content_hash",
               "embedding" = EXCLUDED."embedding",
               "updated_at" = now()
-          `;
+          `);
         }
       }
-      const indexedAt = new Date();
       const document = await transaction.knowledgeDocument.findFirstOrThrow({
         where: { tenantId: identity.tenantId, id: identity.documentId },
-        select: { currentVersionId: true },
+        select: { currentVersionId: true, documentVersion: true },
       });
+      const shouldPublish =
+        identity.versionNumber >= document.documentVersion &&
+        (document.currentVersionId === null || identity.versionNumber > document.documentVersion);
+      const graphActivation = shouldPublish
+        ? await activateKnowledgeGraphProjection(transaction, {
+            tenantId: identity.tenantId,
+            knowledgeBaseId: identity.knowledgeBaseId,
+            documentId: identity.documentId,
+            documentVersionId: identity.documentVersionId,
+          })
+        : null;
       await transaction.knowledgeDocumentVersion.update({
         where: { id: identity.documentVersionId },
         data: {
           contentText: parsed.text,
           checksum: sha256(bytes),
           status: 'READY',
-          publishedAt: null,
+          publishedAt: shouldPublish ? indexedAt : null,
           parserName: parseQuality.parserName,
           parseQualityScore: parseQuality.score,
           parseReviewStatus:
@@ -1283,15 +1893,55 @@ export class KnowledgeIngestionProcessor {
           parseReviewedAt: null,
           parseReviewNote: null,
           parseDiagnostics: parseQuality.diagnostics,
+          structuredObjectKey: structuredObject.objectKey,
+          structuredObjectSize: structuredObject.size,
+          structuredObjectSha256: structuredObject.sha256,
+          structuredFormat: STRUCTURED_KNOWLEDGE_FORMAT,
         },
       });
-      if (document.currentVersionId === null) {
+      if (shouldPublish) {
         await transaction.knowledgeDocument.update({
           where: { id: identity.documentId },
           data: {
+            currentVersionId: identity.documentVersionId,
             status: 'READY',
+            documentVersion: identity.versionNumber,
+            contentText: parsed.text,
+            checksum: sha256(bytes),
+            objectKey:
+              identity.sourceType === 'FILE' || identity.sourceType === 'WEB'
+                ? buildKnowledgeObjectKey({
+                    tenantId: identity.tenantId,
+                    documentId: identity.documentId,
+                    versionId: identity.documentVersionId,
+                  })
+                : null,
+            mimeType: identity.mimeType,
+            fileName: identity.fileName,
           },
         });
+        const publicEvent = defineKnowledgePublicEvent({
+          eventType: 'knowledge.document-version.published.v1',
+          payload: {
+            knowledgeBaseId: identity.knowledgeBaseId,
+            documentId: identity.documentId,
+            documentVersionId: identity.documentVersionId,
+            version: identity.versionNumber,
+            graphProjectionId: graphActivation?.projectionId ?? null,
+            graphHash: graphActivation?.graphHash ?? null,
+            publishedAt: indexedAt.toISOString(),
+          },
+        });
+        await transaction.outboxEvent.create({
+          data: {
+            tenantId: identity.tenantId,
+            aggregateType: 'knowledge_document_version',
+            aggregateId: identity.documentVersionId,
+            eventType: publicEvent.eventType,
+            payload: publicEvent.payload,
+          },
+        });
+        automaticallyPublished = true;
       }
       await transaction.knowledgeIngestionJob.update({
         where: { id: jobId },
@@ -1327,8 +1977,10 @@ export class KnowledgeIngestionProcessor {
           ),
           semanticIndexed: embeddingBatch !== null,
           embeddingModel: embeddingBatch?.model ?? null,
-          current: false,
-          publicationRequired: true,
+          embeddingIndexVersionId: embeddingIndex?.id ?? null,
+          current: shouldPublish,
+          publicationRequired: false,
+          automaticPublication: shouldPublish,
           parseQualityScore: parseQuality.score,
           parseReviewRequired: identity.sourceType === 'FILE' || identity.sourceType === 'WEB',
           parseLowQualityReasons: parseQuality.diagnostics.lowQualityReasons,
@@ -1337,6 +1989,43 @@ export class KnowledgeIngestionProcessor {
         },
       );
     });
+    finishStage('postgresPersistMs');
+    this.logger.log(
+      JSON.stringify({
+        event: 'knowledge.ingestion.stage_timings',
+        tenantId: identity.tenantId,
+        knowledgeBaseId: identity.knowledgeBaseId,
+        documentId: identity.documentId,
+        documentVersionId: identity.documentVersionId,
+        mimeType: identity.mimeType,
+        sourceBytes: bytes.byteLength,
+        pageCount: parsed.pages?.length ?? null,
+        characterCount: parsed.metadata.characterCount,
+        parentChunkCount: storedParents.length,
+        chunkCount: storedChunks.length,
+        embeddingBatchCount: embeddingBatch === null ? 0 : Math.ceil(storedChunks.length / 64),
+        embeddingInputTokens: embeddingBatch?.inputTokens ?? null,
+        ...timings,
+        totalMs: Math.round(performance.now() - startedAt),
+      }),
+    );
+    if (automaticallyPublished) {
+      try {
+        await this.syncSearchDocumentVersion(
+          { tenantId: identity.tenantId },
+          {
+            knowledgeBaseId: identity.knowledgeBaseId,
+            documentId: identity.documentId,
+            documentVersionId: identity.documentVersionId,
+            active: true,
+          },
+        );
+      } catch (error) {
+        this.logger.warn(
+          `Knowledge document ${identity.documentVersionId} is usable in PostgreSQL, but external search-index activation must be retried (${error instanceof Error ? error.name : 'UnknownError'}).`,
+        );
+      }
+    }
   }
 
   private async advance(
@@ -1416,14 +2105,15 @@ export interface ActivatedKnowledgeGraphProjection {
 }
 
 /**
- * Promotes the exact governed candidate while the caller holds the document
+ * Promotes the exact candidate while the caller holds the document
  * advisory lock. Because this runs on the caller's Prisma transaction, the
  * document current-version CAS and graph lifecycle switch commit atomically.
+ * A missing projection is valid: graph retrieval is an optional enhancement.
  */
 export async function activateKnowledgeGraphProjection(
   transaction: Prisma.TransactionClient,
   identity: Omit<KnowledgeGraphPersistenceIdentity, 'actorUserId'>,
-): Promise<ActivatedKnowledgeGraphProjection> {
+): Promise<ActivatedKnowledgeGraphProjection | null> {
   const candidates = await transaction.$queryRaw<
     Array<{ readonly id: string; readonly graph_hash: string }>
   >(Prisma.sql`
@@ -1437,58 +2127,10 @@ export async function activateKnowledgeGraphProjection(
     FOR UPDATE
   `);
   const candidate = candidates[0];
-  if (candidate === undefined || candidates.length !== 1) {
-    throw new ConflictException(
-      'The document version has no unique candidate graph projection to publish.',
-    );
+  if (candidate === undefined) return null;
+  if (candidates.length !== 1) {
+    throw new ConflictException('The document version has multiple candidate graph projections.');
   }
-  const [readiness] = await transaction.$queryRaw<
-    Array<{
-      readonly open_schema_gap_count: number;
-      readonly ungoverned_relation_count: number;
-    }>
-  >(Prisma.sql`
-    SELECT
-      (
-        SELECT count(*)::int
-        FROM public."knowledge_graph_conflicts" conflict
-        WHERE conflict."tenant_id" = ${identity.tenantId}::uuid
-          AND conflict."knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
-          AND conflict."projection_id" = ${candidate.id}::uuid
-          AND conflict."status" IN ('OPEN', 'IN_REVIEW')
-      ) AS open_schema_gap_count,
-      (
-        SELECT count(DISTINCT evidence."relation_id")::int
-        FROM public."knowledge_relation_evidence" evidence
-        LEFT JOIN public."knowledge_relation_governance" governance
-          ON governance."tenant_id" = evidence."tenant_id"
-         AND governance."knowledge_base_id" = evidence."knowledge_base_id"
-         AND governance."relation_id" = evidence."relation_id"
-        LEFT JOIN public."knowledge_ontology_versions" ontology_version
-          ON ontology_version."tenant_id" = governance."tenant_id"
-         AND ontology_version."knowledge_base_id" = governance."knowledge_base_id"
-         AND ontology_version."id" = governance."ontology_version_id"
-         AND ontology_version."status" = 'PUBLISHED'
-        WHERE evidence."tenant_id" = ${identity.tenantId}::uuid
-          AND evidence."knowledge_base_id" = ${identity.knowledgeBaseId}::uuid
-          AND evidence."projection_id" = ${candidate.id}::uuid
-          AND (
-            governance."relation_id" IS NULL
-            OR ontology_version."id" IS NULL
-          )
-      ) AS ungoverned_relation_count
-  `);
-  if ((readiness?.open_schema_gap_count ?? 0) > 0) {
-    throw new ConflictException(
-      'The candidate graph has unresolved ontology schema gaps. Govern or reject them before publication.',
-    );
-  }
-  if ((readiness?.ungoverned_relation_count ?? 0) > 0) {
-    throw new ConflictException(
-      'The candidate graph contains relations without independently approved ontology governance.',
-    );
-  }
-
   await transaction.$executeRaw(Prisma.sql`
     UPDATE public."knowledge_graph_projections"
     SET
@@ -2276,19 +2918,31 @@ function stableIngestionJson(value: unknown): string {
     .join(',')}}`;
 }
 
-function chunkParsedKnowledgeDocument(parsed: ParsedKnowledgeDocument): Array<
-  ReturnType<typeof chunkKnowledgeDocument>[number] & {
-    metadata: Prisma.InputJsonObject;
-  }
-> {
+function chunkParsedKnowledgeDocument(
+  parsed: ParsedKnowledgeDocument,
+  options: { readonly targetTokens: number; readonly overlapTokens: number },
+): {
+  readonly parents: Array<KnowledgeDocumentParentChunk & { metadata: Prisma.InputJsonObject }>;
+  readonly chunks: Array<KnowledgeDocumentChunk & { metadata: Prisma.InputJsonObject }>;
+} {
   if (parsed.metadata.mimeType !== 'application/pdf') {
-    return chunkKnowledgeDocument({
-      content: parsed.text,
-      sourceType: parsed.metadata.sourceType,
-    }).map((chunk) => ({
-      ...chunk,
-      metadata: parsed.metadata as unknown as Prisma.InputJsonObject,
-    }));
+    const hierarchy = chunkKnowledgeDocumentWithParents(
+      {
+        content: parsed.text,
+        sourceType: parsed.metadata.sourceType,
+      },
+      options,
+    );
+    return {
+      parents: hierarchy.parents.map((parent) => ({
+        ...parent,
+        metadata: sourceLocatorMetadata(parsed, parent.headingPath),
+      })),
+      chunks: hierarchy.chunks.map((chunk) => ({
+        ...chunk,
+        metadata: sourceLocatorMetadata(parsed, chunk.headingPath),
+      })),
+    };
   }
 
   const pageCount = parsed.metadata.pageCount;
@@ -2303,36 +2957,63 @@ function chunkParsedKnowledgeDocument(parsed: ParsedKnowledgeDocument): Array<
     throw new DocumentParsingError('DOCUMENT_PARSE_FAILED');
   }
 
-  const chunks: Array<
-    ReturnType<typeof chunkKnowledgeDocument>[number] & {
-      metadata: Prisma.InputJsonObject;
-    }
-  > = [];
+  const parents: Array<KnowledgeDocumentParentChunk & { metadata: Prisma.InputJsonObject }> = [];
+  const chunks: Array<KnowledgeDocumentChunk & { metadata: Prisma.InputJsonObject }> = [];
   for (const [pageIndex, page] of pages.entries()) {
     // The parser includes empty pages, so a gap, duplicate, or reordering is a
     // provenance failure rather than a page that should be silently ignored.
     if (page.pageNumber !== pageIndex + 1) {
       throw new DocumentParsingError('DOCUMENT_PARSE_FAILED');
     }
-    const pageChunks = chunkKnowledgeDocument({
-      content: page.text,
-      sourceType: parsed.metadata.sourceType,
-    });
-    for (const pageChunk of pageChunks) {
+    const pageHierarchy = chunkKnowledgeDocumentWithParents(
+      {
+        content: page.text,
+        sourceType: parsed.metadata.sourceType,
+      },
+      options,
+    );
+    const parentOffset = parents.length;
+    const pageMetadata = {
+      ...parsed.metadata,
+      pageStart: page.pageNumber,
+      pageEnd: page.pageNumber,
+      pageCount,
+      parser: parsed.metadata.parser ?? PDF_PARSER_NAME,
+    } satisfies Prisma.InputJsonObject;
+    for (const pageParent of pageHierarchy.parents) {
+      parents.push({
+        ...pageParent,
+        parentIndex: parents.length,
+        metadata: pageMetadata,
+      });
+    }
+    for (const pageChunk of pageHierarchy.chunks) {
       chunks.push({
         ...pageChunk,
+        parentIndex: parentOffset + pageChunk.parentIndex,
         chunkIndex: chunks.length,
-        metadata: {
-          ...parsed.metadata,
-          pageStart: page.pageNumber,
-          pageEnd: page.pageNumber,
-          pageCount,
-          parser: parsed.metadata.parser ?? PDF_PARSER_NAME,
-        },
+        metadata: pageMetadata,
       });
     }
   }
-  return chunks;
+  return { parents, chunks };
+}
+
+function sourceLocatorMetadata(
+  parsed: ParsedKnowledgeDocument,
+  headingPath: readonly string[],
+): Prisma.InputJsonObject {
+  const sheetHeading = headingPath.find((heading) => heading.startsWith('工作表：'));
+  return {
+    ...parsed.metadata,
+    ...(sheetHeading === undefined ? {} : { sheetName: sheetHeading.slice('工作表：'.length) }),
+  } as unknown as Prisma.InputJsonObject;
+}
+
+function requireArrayValue<Value>(values: readonly Value[], index: number, code: string): Value {
+  const value = values[index];
+  if (value === undefined) throw new Error(code);
+  return value;
 }
 
 function vectorLiteral(vector: readonly number[]): string {
@@ -2342,11 +3023,84 @@ function vectorLiteral(vector: readonly number[]): string {
   return `[${vector.join(',')}]`;
 }
 
+function serializeStructuredKnowledgeDocument(parsed: ParsedKnowledgeDocument): Buffer {
+  const artifact =
+    parsed.structuredContent ??
+    ({
+      schemaVersion: STRUCTURED_KNOWLEDGE_FORMAT,
+      kind: parsed.pages === undefined ? 'document' : 'paged-document',
+      mimeType: parsed.metadata.mimeType,
+      parser: parsed.metadata.parser ?? null,
+      text: parsed.text,
+      ...(parsed.pages === undefined ? {} : { pages: parsed.pages }),
+    } satisfies Readonly<Record<string, unknown>>);
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(artifact);
+  } catch {
+    throw new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE');
+  }
+  if (serialized.length === 0) {
+    throw new DocumentParsingError('DOCUMENT_PARSER_INVALID_RESPONSE');
+  }
+  return Buffer.from(serialized, 'utf8');
+}
+
+function structuredPreview(content: unknown): {
+  readonly value: unknown;
+  readonly truncated: boolean;
+} {
+  let remainingNodes = 2_500;
+  let truncated = false;
+  const visit = (value: unknown, depth: number): unknown => {
+    remainingNodes -= 1;
+    if (remainingNodes < 0 || depth > 10) {
+      truncated = true;
+      return { $previewTruncated: true };
+    }
+    if (typeof value === 'string') {
+      if (value.length <= 4_000) return value;
+      truncated = true;
+      return `${value.slice(0, 4_000)}…`;
+    }
+    if (Array.isArray(value)) {
+      if (value.length > 100) truncated = true;
+      return value.slice(0, 100).map((item) => visit(item, depth + 1));
+    }
+    if (typeof value === 'object' && value !== null) {
+      return Object.fromEntries(
+        Object.entries(value as Record<string, unknown>).map(([key, item]) => [
+          key,
+          visit(item, depth + 1),
+        ]),
+      );
+    }
+    return value;
+  };
+  return { value: visit(content, 0), truncated };
+}
+
+function parseStoredVector(value: string): readonly number[] {
+  const normalized = value.trim();
+  if (!normalized.startsWith('[') || !normalized.endsWith(']')) {
+    throw new Error('KNOWLEDGE_EMBEDDING_DIMENSION_MISMATCH');
+  }
+  const vector = normalized
+    .slice(1, -1)
+    .split(',')
+    .map((component) => Number(component));
+  vectorLiteral(vector);
+  return vector;
+}
+
 function isRemoteDocumentParserMimeType(mimeType: string): boolean {
   return (
     mimeType === 'application/pdf' ||
     mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
+    mimeType === 'application/vnd.ms-powerpoint' ||
+    mimeType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+    mimeType.startsWith('image/')
   );
 }
 
@@ -2386,7 +3140,7 @@ function knowledgeGovernanceCreateData(
 ) {
   if (requested !== undefined) {
     return {
-      governanceOwnerUserId: requested.ownerUserId,
+      governanceOwnerUserId: actorUserId,
       classification: requested.classification,
       scopeMode: requested.scopeMode,
       organizationScopeIds: sortedUnique(requested.organizationScopeIds),
@@ -2403,7 +3157,7 @@ function knowledgeGovernanceCreateData(
   }
   if (previous !== null) {
     return {
-      governanceOwnerUserId: previous.governanceOwnerUserId ?? actorUserId,
+      governanceOwnerUserId: actorUserId,
       classification: previous.classification,
       scopeMode: previous.scopeMode,
       organizationScopeIds: [...previous.organizationScopeIds],
@@ -2491,7 +3245,13 @@ export function describeKnowledgeIngestionError(error: unknown): KnowledgeIngest
       code: error.code,
       message: safeErrorMessage(error.code),
       retryable:
-        error.code === 'DOCUMENT_PARSER_TIMEOUT' || error.code === 'DOCUMENT_PARSER_UNAVAILABLE',
+        error.code === 'DOCUMENT_PARSER_TIMEOUT' ||
+        error.code === 'DOCUMENT_PARSER_UNAVAILABLE' ||
+        // A syntactically invalid/empty response is a parser-service transport
+        // failure, not proof that the source document itself is invalid. Large
+        // enterprise batches can produce a transient truncated response while
+        // the same document succeeds on the next isolated request.
+        error.code === 'DOCUMENT_PARSER_INVALID_RESPONSE',
     };
   }
   if (error instanceof KnowledgeAiRuntimeError) {
@@ -2566,9 +3326,11 @@ function safeErrorMessage(code: string): string {
   const messages: Record<string, string> = {
     KNOWLEDGE_DOCUMENT_ARCHIVED: 'The document was archived before publication completed.',
     KNOWLEDGE_BASE_ARCHIVED: 'The knowledge base was archived before publication completed.',
+    KNOWLEDGE_CONTENT_SECURITY_REVIEW_REQUIRED:
+      '资料可能包含敏感信息，已停止建立索引，请完成安全复核后再处理。',
     UNSUPPORTED_MIME_TYPE: '不支持该文件类型。',
     DOCUMENT_EMPTY: '上传文件为空。',
-    DOCUMENT_TOO_LARGE: '文件超过 20 MB 限制。',
+    DOCUMENT_TOO_LARGE: '文件超过当前基础设施可处理的大小。',
     INVALID_FILE_SIGNATURE: '文件内容与声明的格式不一致。',
     INVALID_TEXT_ENCODING: '文本文件不是有效的 UTF-8 编码。',
     DOCUMENT_PARSE_FAILED: '文档解析失败，请确认文件未损坏。',
@@ -2584,4 +3346,13 @@ function safeErrorMessage(code: string): string {
     KNOWLEDGE_FILE_SCAN_UNAVAILABLE: '文件安全扫描服务暂时不可用，请稍后重试。',
   };
   return messages[code] ?? '文档处理失败，请重试或联系管理员。';
+}
+
+function sourceFileName(value: string): string {
+  const normalized = value
+    .normalize('NFKC')
+    .replace(/[\u0000-\u001f\u007f\\/]+/gu, '_')
+    .trim()
+    .slice(0, 500);
+  return normalized.length > 0 ? normalized : 'document.bin';
 }

@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client';
 import { AdminPrismaService } from '../../database/admin-prisma.service.js';
 import { AdminAccessService } from '../admin/admin-access.service.js';
 import { AgentOperationalReadinessService } from '../ai-safety-model-routing/agent-operational-readiness.service.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 
 interface PeopleRow {
   readonly total: number;
@@ -49,18 +50,6 @@ interface RunWindowRow {
   readonly not_helpful_feedback: number;
 }
 
-interface KnowledgeRow {
-  readonly active_bases: number;
-  readonly total_documents: number;
-  readonly ready_documents: number;
-  readonly failed_documents: number;
-  readonly pending_parse_reviews: number;
-  readonly rejected_parse_reviews: number;
-  readonly failed_ingestion_jobs: number;
-  readonly total_chunks: number;
-  readonly chunks_with_embeddings: number;
-}
-
 interface DirectoryRow {
   readonly latest_run_status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'DEAD_LETTER' | null;
   readonly latest_run_finished_at: Date | null;
@@ -83,6 +72,7 @@ export class AdminOverviewService {
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
     @Inject(AgentOperationalReadinessService)
     private readonly operationalReadiness: AgentOperationalReadinessService,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
   ) {}
 
   async read(): Promise<AdminOverviewResponse> {
@@ -92,8 +82,9 @@ export class AdminOverviewService {
     const monthFrom = new Date(
       Date.UTC(generatedAt.getUTCFullYear(), generatedAt.getUTCMonth(), 1),
     );
-    const snapshot = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
-      const people = await transaction.$queryRaw<PeopleRow[]>(Prisma.sql`
+    const [snapshot, knowledge] = await Promise.all([
+      this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        const people = await transaction.$queryRaw<PeopleRow[]>(Prisma.sql`
         SELECT
           count(*)::int AS total,
           count(*) FILTER (WHERE "status" = 'ACTIVE')::int AS active,
@@ -123,69 +114,15 @@ export class AdminOverviewService {
         FROM public."users"
         WHERE "tenant_id" = ${principal.tenantId}::uuid
       `);
-      const agents = await transaction.$queryRaw<AgentRow[]>(Prisma.sql`
+        const agents = await transaction.$queryRaw<AgentRow[]>(Prisma.sql`
         SELECT "id", "status"::text AS status
         FROM public."agent_instances"
         WHERE "tenant_id" = ${principal.tenantId}::uuid
         ORDER BY "id"
       `);
-      const today = await queryRunWindow(transaction, principal.tenantId, todayFrom, generatedAt);
-      const month = await queryRunWindow(transaction, principal.tenantId, monthFrom, generatedAt);
-      const knowledge = await transaction.$queryRaw<KnowledgeRow[]>(Prisma.sql`
-        SELECT
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_bases"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-              AND "status" = 'ACTIVE'
-          ) AS active_bases,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_documents"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-          ) AS total_documents,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_documents"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-              AND "status" = 'READY'
-          ) AS ready_documents,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_documents"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-              AND "status" = 'FAILED'
-          ) AS failed_documents,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_document_versions"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-              AND "parse_review_status" = 'PENDING'
-          ) AS pending_parse_reviews,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_document_versions"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-              AND "parse_review_status" = 'REJECTED'
-          ) AS rejected_parse_reviews,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_ingestion_jobs"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-              AND "status" = 'FAILED'
-          ) AS failed_ingestion_jobs,
-          (
-            SELECT count(*)::int
-            FROM public."knowledge_chunks"
-            WHERE "tenant_id" = ${principal.tenantId}::uuid
-          ) AS total_chunks,
-          (
-            SELECT count(DISTINCT embedding."chunk_id")::int
-            FROM public."knowledge_chunk_embeddings" embedding
-            WHERE embedding."tenant_id" = ${principal.tenantId}::uuid
-          ) AS chunks_with_embeddings
-      `);
-      const directory = await transaction.$queryRaw<DirectoryRow[]>(Prisma.sql`
+        const today = await queryRunWindow(transaction, principal.tenantId, todayFrom, generatedAt);
+        const month = await queryRunWindow(transaction, principal.tenantId, monthFrom, generatedAt);
+        const directory = await transaction.$queryRaw<DirectoryRow[]>(Prisma.sql`
         SELECT
           (
             SELECT "status"::text
@@ -215,7 +152,7 @@ export class AdminOverviewService {
               AND "apply_status" IN ('PENDING', 'FAILED')
           ) AS pending_preview_items
       `);
-      const operations = await transaction.$queryRaw<OperationsRow[]>(Prisma.sql`
+        const operations = await transaction.$queryRaw<OperationsRow[]>(Prisma.sql`
         SELECT
           (
             SELECT count(*)::int
@@ -249,16 +186,20 @@ export class AdminOverviewService {
               AND "created_at" >= ${new Date(generatedAt.getTime() - 86_400_000)}
           ) AS unknown_agent_runs_24h
       `);
-      return {
-        people: people[0] ?? emptyPeople(),
-        agents,
-        today,
-        month,
-        knowledge: knowledge[0] ?? emptyKnowledge(),
-        directory: directory[0] ?? emptyDirectory(),
-        operations: operations[0] ?? emptyOperations(),
-      };
-    });
+        return {
+          people: people[0] ?? emptyPeople(),
+          agents,
+          today,
+          month,
+          directory: directory[0] ?? emptyDirectory(),
+          operations: operations[0] ?? emptyOperations(),
+        };
+      }),
+      this.knowledge.readOperationalSummary({
+        tenantId: principal.tenantId,
+        userId: principal.userId,
+      }),
+    ]);
 
     const readiness = await this.operationalReadiness.inspectAgents(
       principal.tenantId,
@@ -281,19 +222,16 @@ export class AdminOverviewService {
     }
 
     const knowledgeSnapshot = {
-      activeBases: snapshot.knowledge.active_bases,
-      totalDocuments: snapshot.knowledge.total_documents,
-      readyDocuments: snapshot.knowledge.ready_documents,
-      failedDocuments: snapshot.knowledge.failed_documents,
-      pendingParseReviews: snapshot.knowledge.pending_parse_reviews,
-      rejectedParseReviews: snapshot.knowledge.rejected_parse_reviews,
-      failedIngestionJobs: snapshot.knowledge.failed_ingestion_jobs,
-      totalChunks: snapshot.knowledge.total_chunks,
-      chunksWithEmbeddings: snapshot.knowledge.chunks_with_embeddings,
-      chunksMissingEmbeddings: Math.max(
-        0,
-        snapshot.knowledge.total_chunks - snapshot.knowledge.chunks_with_embeddings,
-      ),
+      activeBases: knowledge.activeBases,
+      totalDocuments: knowledge.totalDocuments,
+      readyDocuments: knowledge.readyDocuments,
+      failedDocuments: knowledge.failedDocuments,
+      pendingParseReviews: knowledge.pendingParseReviews,
+      rejectedParseReviews: knowledge.rejectedParseReviews,
+      failedIngestionJobs: knowledge.failedIngestionJobs,
+      totalChunks: knowledge.totalChunks,
+      chunksWithEmbeddings: knowledge.chunksWithEmbeddings,
+      chunksMissingEmbeddings: Math.max(0, knowledge.totalChunks - knowledge.chunksWithEmbeddings),
     };
     const operationsSnapshot = {
       pendingOutboxEvents: snapshot.operations.pending_outbox_events,
@@ -692,20 +630,6 @@ function emptyRunWindow(): RunWindowRow {
     ungrounded_succeeded_runs: 0,
     helpful_feedback: 0,
     not_helpful_feedback: 0,
-  };
-}
-
-function emptyKnowledge(): KnowledgeRow {
-  return {
-    active_bases: 0,
-    total_documents: 0,
-    ready_documents: 0,
-    failed_documents: 0,
-    pending_parse_reviews: 0,
-    rejected_parse_reviews: 0,
-    failed_ingestion_jobs: 0,
-    total_chunks: 0,
-    chunks_with_embeddings: 0,
   };
 }
 

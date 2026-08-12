@@ -99,6 +99,7 @@ export interface PreparedAgentRun {
   readonly knowledgeSources?: readonly AgentRunKnowledgeSource[];
   readonly memoryContexts?: readonly AgentRunMemoryContext[];
   readonly knowledgeGroundingRequired?: boolean;
+  readonly knowledgeEvidenceFallbackEnabled?: boolean;
   readonly controlledModelConnectivityProbe?: boolean;
   readonly modelRoute?: import('@enterprise/contracts').TrustedModelRouteSnapshot;
   readonly inputSafetyDecision?: import('@enterprise/contracts').AiSafetyDecision;

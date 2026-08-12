@@ -123,15 +123,6 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
   }
 
   private async processClaim(claim: ClaimedKnowledgeIngestionJob): Promise<void> {
-    if (claim.attempts > this.maxAttempts) {
-      await this.transitionFailed(claim, {
-        code: 'KNOWLEDGE_INGESTION_ATTEMPTS_EXHAUSTED',
-        message: 'Document processing stopped after the configured retry limit.',
-        retryable: false,
-      });
-      return;
-    }
-
     const heartbeat = this.startHeartbeat(claim);
     let failure: unknown;
     try {
@@ -221,12 +212,13 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
     claim: ClaimedKnowledgeIngestionJob,
     failure: KnowledgeIngestionFailure,
   ): Promise<void> {
-    if (!failure.retryable || claim.attempts >= this.maxAttempts) {
+    const nextFailureAttempt = claim.failureAttempts + 1;
+    if (!failure.retryable || nextFailureAttempt >= this.maxAttempts) {
       await this.transitionFailed(claim, failure);
       return;
     }
     const delayMs = calculateKnowledgeIngestionRetryDelay(
-      claim.attempts,
+      nextFailureAttempt,
       this.retryBaseMs,
       this.retryMaxMs,
       Math.random,

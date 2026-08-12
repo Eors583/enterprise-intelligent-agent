@@ -1,7 +1,11 @@
 import type { AdminMember } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
 
-import { buildMemberUpdateRequest, isPlaceholderMemberEmail } from './MembersPage';
+import {
+  buildMemberInvitationRequest,
+  buildMemberUpdateRequest,
+  isPlaceholderMemberEmail,
+} from './MembersPage';
 
 const member: AdminMember = {
   id: '83ceae87-554e-451d-b411-c336f1d02bf9',
@@ -20,6 +24,37 @@ const member: AdminMember = {
 };
 
 describe('member synchronization ownership policy', () => {
+  it('builds a complete passwordless local member invitation payload', () => {
+    const form = new FormData();
+    for (const [name, value] of Object.entries({
+      displayName: '张晨',
+      email: 'zhang.chen@example.com',
+      role: 'MEMBER',
+      orgUnitId: 'd9428888-122b-4b7f-82cd-34e3f4f622b1',
+      phoneCountryCode: '+86',
+      phoneNumber: '13800000000',
+      employmentType: 'REGULAR',
+      hireDate: '2026-08-10',
+      countryOrRegion: '中国',
+      city: '深圳',
+      jobResponsibilities: '负责产品规划与交付。',
+      coreSkills: '产品设计、业务分析。',
+    })) {
+      form.set(name, value);
+    }
+
+    const request = buildMemberInvitationRequest(form);
+    expect(request).toMatchObject({
+      displayName: '张晨',
+      phone: '+86 13800000000',
+      employmentType: 'REGULAR',
+      hireDate: '2026-08-10',
+      countryOrRegion: '中国',
+      city: '深圳',
+    });
+    expect(request).not.toHaveProperty('personalManual');
+  });
+
   it('submits the local login email and enterprise role for a Feishu-managed member', () => {
     expect(
       buildMemberUpdateRequest(member, {

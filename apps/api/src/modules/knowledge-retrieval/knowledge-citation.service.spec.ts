@@ -17,6 +17,7 @@ const KNOWLEDGE_BASE_ID = '00000000-0000-7000-8000-000000000301';
 const DOCUMENT_ID = '00000000-0000-7000-8000-000000000401';
 const VERSION_ID = '00000000-0000-7000-8000-000000000501';
 const CHUNK_ID = '00000000-0000-7000-8000-000000000601';
+const PARENT_CHUNK_ID = '00000000-0000-7000-8000-000000000602';
 const MESSAGE_ID = '00000000-0000-7000-8000-000000000701';
 const RUN_ID = '00000000-0000-7000-8000-000000000702';
 const AGENT_ID = '00000000-0000-7000-8000-000000000703';
@@ -45,6 +46,26 @@ describe('KnowledgeCitationService', () => {
       chunkId: CHUNK_ID,
       headingPath: ['人事制度', '年假'],
       sourceType: 'MARKDOWN',
+      sourceFileName: null,
+      sourceMimeType: 'text/markdown',
+      sourceUri: null,
+      sourceDownloadAvailable: false,
+      sourceLocator: {
+        kind: 'SECTION',
+        pageStart: null,
+        pageEnd: null,
+        sheetName: null,
+        headingPath: ['人事制度', '年假'],
+      },
+      structuralContext: {
+        parent: {
+          id: PARENT_CHUNK_ID,
+          headingPath: ['人事制度', '年假'],
+          excerpt: '年假申请需至少提前一天发起。',
+        },
+        previous: null,
+        next: null,
+      },
       content: '年假申请需至少提前一天发起。',
       updatedAt: '2026-07-20T02:00:00.000Z',
     });
@@ -173,6 +194,9 @@ function chunkCandidate(options: ChunkCandidateOptions = {}) {
     knowledgeBaseId: KNOWLEDGE_BASE_ID,
     documentId: DOCUMENT_ID,
     documentVersionId: VERSION_ID,
+    parentChunkId: PARENT_CHUNK_ID,
+    previousChunkId: null,
+    nextChunkId: null,
     headingPath: ['人事制度', '年假'],
     content: '年假申请需至少提前一天发起。',
     metadata: {
@@ -181,12 +205,18 @@ function chunkCandidate(options: ChunkCandidateOptions = {}) {
       taskId: TASK_ID,
       dataLabels: ['role:hr'],
     },
+    parentChunk: {
+      id: PARENT_CHUNK_ID,
+      headingPath: ['人事制度', '年假'],
+      content: '年假申请需至少提前一天发起。',
+    },
     knowledgeBase: {
       id: KNOWLEDGE_BASE_ID,
       tenantId,
       name: '企业制度库',
       status: options.knowledgeBaseStatus ?? ('ACTIVE' as const),
       orgUnits: options.scopes ?? [],
+      members: [],
     },
     document: {
       id: DOCUMENT_ID,
@@ -203,6 +233,10 @@ function chunkCandidate(options: ChunkCandidateOptions = {}) {
       createdById: USER_ID,
       versionNumber: 3,
       sourceType: 'MARKDOWN' as const,
+      mimeType: 'text/markdown',
+      fileName: null,
+      objectKey: null,
+      sourceUri: null,
       status: options.versionStatus ?? ('READY' as const),
       createdAt: new Date('2026-07-20T01:00:00.000Z'),
       publishedAt: new Date('2026-07-20T02:00:00.000Z'),
@@ -382,7 +416,9 @@ function createFixture(
   } as unknown as IdentityService;
   const prisma = { withTenant } as unknown as PrismaService;
   return {
-    service: new KnowledgeCitationService(identity, prisma, new AuthorizationDecisionService()),
+    service: new KnowledgeCitationService(identity, prisma, new AuthorizationDecisionService(), {
+      readObject: vi.fn(),
+    } as never),
     withTenant,
     auditCreate,
   };

@@ -12,6 +12,7 @@ interface ClaimedRow {
   readonly tenant_id: string;
   readonly document_version_id: string;
   readonly attempts: number;
+  readonly failure_attempts: number;
   readonly lease_expires_at: Date;
   readonly created_at: Date;
 }
@@ -29,9 +30,19 @@ export class PrismaKnowledgeIngestionJobRepository extends KnowledgeIngestionJob
   }): Promise<readonly ClaimedKnowledgeIngestionJob[]> {
     return this.withWorkerRole(async (transaction) => {
       const rows = await transaction.$queryRaw<ClaimedRow[]>(Prisma.sql`
-        WITH candidates AS MATERIALIZED (
+        WITH tenant_activity AS MATERIALIZED (
+          SELECT
+            activity."tenant_id",
+            MAX(activity."updated_at") AS last_activity_at
+          FROM public."knowledge_ingestion_jobs" AS activity
+          WHERE activity."attempts" > 0
+          GROUP BY activity."tenant_id"
+        ),
+        candidates AS MATERIALIZED (
           SELECT job."id"
           FROM public."knowledge_ingestion_jobs" AS job
+          LEFT JOIN tenant_activity
+            ON tenant_activity."tenant_id" = job."tenant_id"
           WHERE (
             (
               job."status" = 'PENDING'::"KnowledgeIngestionStatus"
@@ -42,7 +53,16 @@ export class PrismaKnowledgeIngestionJobRepository extends KnowledgeIngestionJob
               AND job."lease_expires_at" <= clock_timestamp()
             )
           )
-          ORDER BY job."available_at", job."created_at", job."id"
+          -- Give an idle tenant a turn before continuing a busy tenant's backlog.
+          -- Within that tenant-level fairness boundary, preserve failure and
+          -- lease-reclaim priority without bypassing the availability gate.
+          ORDER BY
+            tenant_activity.last_activity_at NULLS FIRST,
+            job."failure_attempts",
+            job."attempts",
+            job."available_at",
+            job."created_at",
+            job."id"
           LIMIT ${input.batchSize}
           FOR UPDATE SKIP LOCKED
         )
@@ -65,6 +85,7 @@ export class PrismaKnowledgeIngestionJobRepository extends KnowledgeIngestionJob
           job."tenant_id"::text AS tenant_id,
           job."document_version_id"::text AS document_version_id,
           job."attempts" AS attempts,
+          job."failure_attempts" AS failure_attempts,
           job."lease_expires_at" AS lease_expires_at,
           job."created_at" AS created_at
       `);
@@ -73,6 +94,7 @@ export class PrismaKnowledgeIngestionJobRepository extends KnowledgeIngestionJob
         tenantId: row.tenant_id,
         documentVersionId: row.document_version_id,
         attempts: row.attempts,
+        failureAttempts: row.failure_attempts,
         leaseExpiresAt: row.lease_expires_at,
         createdAt: row.created_at,
       }));
@@ -130,6 +152,7 @@ export class PrismaKnowledgeIngestionJobRepository extends KnowledgeIngestionJob
           "stage" = 'UPLOADED'::"KnowledgeIngestionStage",
           "status" = 'PENDING'::"KnowledgeIngestionStatus",
           "progress" = 5,
+          "failure_attempts" = "failure_attempts" + 1,
           "available_at" = ${input.availableAt},
           "claimed_by" = NULL,
           "lease_expires_at" = NULL,

@@ -295,7 +295,7 @@ export function KnowledgeIntegrityEvaluationWizard({
   return (
     <Modal
       title={`系统完整性评测 · “${document.title}” v${version.versionNumber}`}
-      description="一站式建立候选版本评测集、等待异人审核、调用可信 HMAC Runner，并把通过的 Run 交给发布门禁。"
+      description="按需建立候选版本评测集、运行可信 HMAC Runner 并复核结果；该流程用于质量参考，不阻塞初版发布。"
       onClose={onClose}
       dismissible={!busy}
       size="wide"

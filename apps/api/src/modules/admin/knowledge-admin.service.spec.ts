@@ -1,10 +1,10 @@
+import { createHash } from 'node:crypto';
+
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { AdminPrismaService } from '../../database/admin-prisma.service.js';
-import type { AiEvaluationService } from '../ai-evaluation/ai-evaluation.service.js';
-import type { KnowledgeIngestionService } from '../knowledge-ingestion/application/knowledge-ingestion.service.js';
-import type { KnowledgeRetrievalService } from '../knowledge-retrieval/knowledge-retrieval.service.js';
+import type { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 import type { KnowledgeAiRuntimeClient } from '../knowledge-semantic/knowledge-ai-runtime.client.js';
 import type { AdminAccessService } from './admin-access.service.js';
 import { KnowledgeAdminService } from './knowledge-admin.service.js';
@@ -15,12 +15,117 @@ const USER_ID = '00000000-0000-7000-8000-000000000003';
 const KNOWLEDGE_BASE_ID = '00000000-0000-7000-8000-000000000004';
 const DOCUMENT_ID = '00000000-0000-7000-8000-000000000005';
 const DOCUMENT_VERSION_ID = '00000000-0000-7000-8000-000000000007';
-const EVALUATION_RUN_ID = '00000000-0000-7000-8000-000000000008';
-const EVALUATION_DATASET_VERSION_ID = '00000000-0000-7000-8000-000000000009';
-const EVALUATION_SNAPSHOT_HASH = 'b'.repeat(64);
 const DATABASE_NOW = new Date('2026-07-29T05:00:00.000Z');
 
 describe('KnowledgeAdminService', () => {
+  it('creates a BUILDING embedding index version from the currently served Runtime profile', async () => {
+    const createdAt = new Date('2026-08-06T00:00:00.000Z');
+    const pendingId = '00000000-0000-7000-8000-000000000088';
+    const create = vi.fn().mockResolvedValue({
+      id: pendingId,
+      tenantId: TENANT_ID,
+      knowledgeBaseId: KNOWLEDGE_BASE_ID,
+      version: 2,
+      status: 'BUILDING',
+      provider: 'local_fastembed',
+      model: 'BAAI/bge-base-zh-v1.5',
+      dimensions: 768,
+      distance: 'COSINE',
+      normalization: 'L2',
+      collectionName: 'knowledge_0000000000007000_v2_d768',
+      createdById: ADMIN_ID,
+      createdAt,
+      activatedAt: null,
+      retiredAt: null,
+      failureCode: null,
+    });
+    const updateKnowledgeBase = vi.fn().mockResolvedValue({});
+    const service = createService({
+      semantic: readySemanticClient('local_fastembed', 'BAAI/bge-base-zh-v1.5', 768),
+      transaction: {
+        $queryRaw: vi.fn().mockResolvedValue([]),
+        knowledgeBase: {
+          findFirst: vi.fn().mockResolvedValue({
+            activeEmbeddingIndexVersion: {
+              provider: 'openai_compatible',
+              model: 'text-embedding-3-small',
+              dimensions: 1536,
+              distance: 'COSINE',
+              normalization: 'L2',
+            },
+            pendingEmbeddingIndexVersion: null,
+          }),
+          update: updateKnowledgeBase,
+        },
+        knowledgeEmbeddingIndexVersion: {
+          aggregate: vi.fn().mockResolvedValue({ _max: { version: 1 } }),
+          create,
+        },
+        auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      },
+    });
+
+    await expect(
+      service.createEmbeddingIndexVersion(KNOWLEDGE_BASE_ID, {
+        provider: 'local_fastembed',
+        model: 'BAAI/bge-base-zh-v1.5',
+        dimensions: 768,
+        distance: 'COSINE',
+        normalization: 'L2',
+      }),
+    ).resolves.toMatchObject({ id: pendingId, version: 2, status: 'BUILDING', dimensions: 768 });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          dimensions: 768,
+          collectionName: expect.stringMatching(/_v2_d768$/u),
+        }),
+      }),
+    );
+    expect(updateKnowledgeBase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ pendingEmbeddingIndexVersionId: pendingId }),
+      }),
+    );
+  });
+
+  it('refuses to activate a pending index until every current chunk has a matching embedding', async () => {
+    const pendingId = '00000000-0000-7000-8000-000000000088';
+    const updateIndex = vi.fn();
+    const updateKnowledgeBase = vi.fn();
+    const service = createService({
+      transaction: {
+        $queryRaw: vi
+          .fn()
+          .mockResolvedValueOnce([])
+          .mockResolvedValueOnce([{ chunk_count: 3, embedded_count: 2 }]),
+        knowledgeBase: {
+          findFirst: vi.fn().mockResolvedValue({
+            activeEmbeddingIndexVersionId: '00000000-0000-7000-8000-000000000077',
+            pendingEmbeddingIndexVersionId: pendingId,
+          }),
+          update: updateKnowledgeBase,
+        },
+        knowledgeEmbeddingIndexVersion: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: pendingId,
+            version: 2,
+            status: 'BUILDING',
+            model: 'BAAI/bge-base-zh-v1.5',
+            dimensions: 768,
+          }),
+          update: updateIndex,
+        },
+      },
+    });
+
+    await expect(
+      service.activateEmbeddingIndexVersion(KNOWLEDGE_BASE_ID, pendingId),
+    ).rejects.toThrow('Embedding rebuild is incomplete (2/3 current chunks).');
+    expect(updateIndex).not.toHaveBeenCalled();
+    expect(updateKnowledgeBase).not.toHaveBeenCalled();
+  });
+
   it('uses an explicit lightweight document select for knowledge-base lists', async () => {
     const findMany = vi.fn().mockResolvedValue([]);
     const service = createService({ transaction: { knowledgeBase: { findMany } } });
@@ -52,6 +157,13 @@ describe('KnowledgeAdminService', () => {
     const transaction = {
       $queryRaw: queryRaw,
       $executeRaw: vi.fn().mockResolvedValue(1),
+      orgUnit: {
+        findFirst: vi
+          .fn()
+          .mockResolvedValue({ id: '00000000-0000-7000-8000-000000000010', name: 'Product' }),
+      },
+      user: { count: vi.fn().mockResolvedValue(1) },
+      knowledgeBaseMember: { createMany: vi.fn().mockResolvedValue({ count: 1 }) },
       knowledgeBase: { create, findFirst },
       auditEvent: { create: vi.fn().mockResolvedValue({}) },
     };
@@ -61,14 +173,25 @@ describe('KnowledgeAdminService', () => {
       service.create({
         name: 'Employee handbook',
         status: 'DRAFT',
+        space: {
+          type: 'DEPARTMENT',
+          targetId: '00000000-0000-7000-8000-000000000010',
+        },
         orgUnitIds: [],
+        memberUserIds: [USER_ID],
       }),
     ).resolves.toMatchObject({ key: 'employee-handbook-2' });
 
     expect(queryRaw).toHaveBeenCalledOnce();
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ tenantId: TENANT_ID, key: 'employee-handbook-2' }),
+        data: expect.objectContaining({
+          tenantId: TENANT_ID,
+          key: 'employee-handbook-2',
+          spaceType: 'DEPARTMENT',
+          spaceTargetId: '00000000-0000-7000-8000-000000000010',
+          spaceTargetName: 'Product',
+        }),
       }),
     );
     expect(queryRaw.mock.invocationCallOrder[0]).toBeLessThan(create.mock.invocationCallOrder[0]!);
@@ -77,6 +200,9 @@ describe('KnowledgeAdminService', () => {
     });
     expect(findFirst.mock.calls[1]?.[0]).toMatchObject({
       where: { tenantId: TENANT_ID, key: 'employee-handbook-2' },
+    });
+    expect(transaction.knowledgeBaseMember.createMany).toHaveBeenCalledWith({
+      data: [{ tenantId: TENANT_ID, knowledgeBaseId: KNOWLEDGE_BASE_ID, userId: USER_ID }],
     });
   });
 
@@ -99,6 +225,7 @@ describe('KnowledgeAdminService', () => {
       name: 'Legacy handbook',
       status: 'DRAFT',
       orgUnitIds: [],
+      memberUserIds: [],
     });
 
     expect(create).toHaveBeenCalledWith(
@@ -107,6 +234,50 @@ describe('KnowledgeAdminService', () => {
       }),
     );
     expect(findFirst).toHaveBeenCalledTimes(1);
+  });
+
+  it('binds member knowledge to the authenticated account instead of a requested member', async () => {
+    const requestedMemberId = '00000000-0000-7000-8000-000000000099';
+    const create = vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID, key: 'personal-notes' });
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn().mockResolvedValue(1),
+      user: {
+        findFirst: vi.fn().mockResolvedValue({ id: ADMIN_ID, displayName: 'Current admin' }),
+      },
+      knowledgeBase: {
+        create,
+        findFirst: vi
+          .fn()
+          .mockResolvedValueOnce(null)
+          .mockResolvedValueOnce(storedKnowledgeBase('personal-notes')),
+      },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = createService({ transaction });
+
+    await service.create({
+      name: 'Personal notes',
+      status: 'DRAFT',
+      space: { type: 'MEMBER', targetId: requestedMemberId },
+      orgUnitIds: [],
+      memberUserIds: [],
+    });
+
+    expect(transaction.user.findFirst).toHaveBeenCalledWith({
+      where: { tenantId: TENANT_ID, id: ADMIN_ID, status: 'ACTIVE' },
+      select: { id: true, displayName: true },
+    });
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          createdById: ADMIN_ID,
+          spaceType: 'MEMBER',
+          spaceTargetId: ADMIN_ID,
+          spaceTargetName: 'Current admin',
+        }),
+      }),
+    );
   });
 
   it('routes text publication through the versioned ingestion service', async () => {
@@ -151,6 +322,12 @@ describe('KnowledgeAdminService', () => {
 
   it('uploads a new file version into the existing stable document', async () => {
     const transaction = {
+      knowledgeBase: {
+        findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }),
+      },
+      knowledgeDocumentVersion: {
+        findFirst: vi.fn().mockResolvedValue(null),
+      },
       knowledgeDocument: {
         findFirst: vi.fn().mockResolvedValue({
           id: DOCUMENT_ID,
@@ -188,6 +365,53 @@ describe('KnowledgeAdminService', () => {
     expect(response.id).toBe(DOCUMENT_ID);
   });
 
+  it('reuses an existing file version when the uploaded bytes are identical', async () => {
+    const bytes = Buffer.from('same file');
+    const transaction = {
+      knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+      knowledgeDocumentVersion: {
+        findFirst: vi.fn().mockResolvedValue({
+          versionNumber: 2,
+          document: {
+            id: DOCUMENT_ID,
+            title: 'Employee handbook',
+            fileName: 'handbook.pdf',
+            documentVersion: 2,
+            updatedAt: new Date(),
+          },
+        }),
+      },
+      knowledgeDocument: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: DOCUMENT_ID,
+          title: 'Employee handbook',
+          sourceType: 'FILE',
+          status: 'READY',
+        }),
+      },
+    };
+    const ingestion = { uploadFileVersion: vi.fn() };
+    const service = createService({ transaction, ingestion });
+    const existing = { ...documentResponse('READY'), sourceType: 'FILE' as const };
+    vi.spyOn(service, 'getDocument').mockResolvedValue(existing);
+
+    await expect(
+      service.uploadDocumentVersion(KNOWLEDGE_BASE_ID, DOCUMENT_ID, {
+        bytes,
+        mimeType: 'application/pdf',
+        fileName: 'handbook.pdf',
+      }),
+    ).resolves.toBe(existing);
+    expect(ingestion.uploadFileVersion).not.toHaveBeenCalled();
+    expect(transaction.knowledgeDocumentVersion.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          objectSha256: createHash('sha256').update(bytes).digest('hex'),
+        }),
+      }),
+    );
+  });
+
   it('does not accept an uploaded file version for a text document', async () => {
     const transaction = {
       knowledgeDocument: {
@@ -212,10 +436,102 @@ describe('KnowledgeAdminService', () => {
     expect(ingestion.uploadFileVersion).not.toHaveBeenCalled();
   });
 
+  it('detects an exact file duplicate by server-side SHA-256 metadata', async () => {
+    const versionFindFirst = vi.fn().mockResolvedValue({
+      versionNumber: 3,
+      document: {
+        id: DOCUMENT_ID,
+        title: 'Employee handbook',
+        fileName: 'handbook.pdf',
+        documentVersion: 3,
+        updatedAt: DATABASE_NOW,
+      },
+    });
+    const service = createService({
+      transaction: {
+        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+        knowledgeDocumentVersion: { findFirst: versionFindFirst },
+      },
+    });
+
+    await expect(
+      service.inspectUpload(KNOWLEDGE_BASE_ID, {
+        fileName: 'copy.pdf',
+        size: 128,
+        sha256: 'a'.repeat(64),
+      }),
+    ).resolves.toMatchObject({
+      decision: 'EXACT_DUPLICATE',
+      matchingDocument: { id: DOCUMENT_ID, matchedVersion: 3 },
+    });
+    expect(versionFindFirst).toHaveBeenCalledOnce();
+    expect(versionFindFirst.mock.calls[0]?.[0]).toMatchObject({
+      where: { objectSha256: 'a'.repeat(64) },
+    });
+  });
+
+  it('recommends a new version for a same-name file with different content', async () => {
+    const versionFindFirst = vi
+      .fn()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        versionNumber: 2,
+        document: {
+          id: DOCUMENT_ID,
+          title: 'Employee handbook',
+          fileName: 'handbook.pdf',
+          documentVersion: 2,
+          updatedAt: DATABASE_NOW,
+        },
+      });
+    const service = createService({
+      transaction: {
+        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+        knowledgeDocumentVersion: { findFirst: versionFindFirst },
+      },
+    });
+
+    await expect(
+      service.inspectUpload(KNOWLEDGE_BASE_ID, {
+        fileName: 'HANDBOOK.PDF',
+        size: 256,
+        sha256: 'b'.repeat(64),
+      }),
+    ).resolves.toMatchObject({
+      decision: 'NEW_VERSION_CANDIDATE',
+      matchingDocument: { id: DOCUMENT_ID, matchedVersion: 2 },
+    });
+    expect(versionFindFirst.mock.calls[1]?.[0]).toMatchObject({
+      where: { fileName: { equals: 'HANDBOOK.PDF', mode: 'insensitive' } },
+    });
+  });
+
   it('tests retrieval as the selected tenant user and preserves measured lexical scores', async () => {
     const transaction = {
-      knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+      knowledgeBase: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: KNOWLEDGE_BASE_ID,
+          activeEmbeddingIndexVersion: {
+            id: '00000000-0000-7000-8000-000000000099',
+          },
+        }),
+      },
       user: { findFirst: vi.fn().mockResolvedValue({ id: USER_ID }) },
+      knowledgeChunk: {
+        findMany: vi.fn().mockResolvedValue([
+          {
+            id: '00000000-0000-7000-8000-000000000006',
+            metadata: { pageStart: 7, pageEnd: 8, sheetName: 'Leave' },
+            documentVersion: {
+              mimeType: 'application/pdf',
+              fileName: 'leave-policy.pdf',
+              sourceUri: null,
+              objectKey: 'source-key',
+              structuredObjectKey: 'structured-key',
+            },
+          },
+        ]),
+      },
     };
     const retrieval = {
       search: vi.fn().mockResolvedValue({
@@ -282,6 +598,13 @@ describe('KnowledgeAdminService', () => {
     expect(response.noAnswer).toBe(false);
     expect(response.items[0]).toMatchObject({
       excerpt: 'Employees receive ten days.',
+      pageStart: 7,
+      pageEnd: 8,
+      sheetName: 'Leave',
+      sourceMimeType: 'application/pdf',
+      sourceFileName: 'leave-policy.pdf',
+      sourceDownloadAvailable: true,
+      structuredPreviewAvailable: true,
       keywordScore: 0.75,
       fuzzyScore: 0.25,
       finalScore: 0.575,
@@ -393,7 +716,7 @@ describe('KnowledgeAdminService', () => {
     expect(ingestion.createTextVersion).not.toHaveBeenCalled();
   });
 
-  it('publishes an indexed Knowledge Version only with its exact passing Evaluation Run', async () => {
+  it('publishes an indexed Knowledge Version without review or evaluation gates', async () => {
     const candidate = {
       id: DOCUMENT_VERSION_ID,
       versionNumber: 2,
@@ -430,7 +753,7 @@ describe('KnowledgeAdminService', () => {
       $executeRaw: vi.fn().mockResolvedValue(1),
       knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ status: 'ACTIVE' }) },
       knowledgeDocumentVersion: {
-        findFirst: vi.fn().mockResolvedValueOnce(candidate).mockResolvedValueOnce(indexedVersion),
+        findFirst: vi.fn().mockResolvedValue(indexedVersion),
         updateMany: updateVersion,
       },
       knowledgeDocument: {
@@ -444,39 +767,21 @@ describe('KnowledgeAdminService', () => {
       auditEvent: { create: vi.fn().mockResolvedValue({}) },
       outboxEvent: { create: vi.fn().mockResolvedValue({}) },
     };
-    const evaluations = {
-      requireReferencedRunReady: vi.fn().mockResolvedValue({
-        ready: true,
-        datasetVersionId: EVALUATION_DATASET_VERSION_ID,
-        currentSnapshotHash: EVALUATION_SNAPSHOT_HASH,
-        passingRunId: EVALUATION_RUN_ID,
-      }),
-    };
-    const service = createService({ transaction, evaluations });
+    const service = createService({ transaction });
     vi.spyOn(service, 'getDocument').mockResolvedValue(documentResponse('READY'));
 
-    await service.publishDocumentVersion(KNOWLEDGE_BASE_ID, DOCUMENT_ID, DOCUMENT_VERSION_ID, {
-      evaluationRunId: EVALUATION_RUN_ID,
-    });
-
-    expect(evaluations.requireReferencedRunReady).toHaveBeenCalledWith({
-      evaluationRunId: EVALUATION_RUN_ID,
-      subjectType: 'KNOWLEDGE_VERSION',
-      subjectId: DOCUMENT_VERSION_ID,
-      subjectVersion: 2,
-    });
+    await service.publishDocumentVersion(KNOWLEDGE_BASE_ID, DOCUMENT_ID, DOCUMENT_VERSION_ID, {});
     expect(updateVersion).toHaveBeenCalledWith(
       expect.objectContaining({
         where: expect.objectContaining({
           id: DOCUMENT_VERSION_ID,
           publishedAt: null,
-          parseReviewStatus: 'APPROVED',
         }),
         data: expect.objectContaining({
           publishedAt: DATABASE_NOW,
-          evaluationRunId: EVALUATION_RUN_ID,
-          evaluationDatasetVersionId: EVALUATION_DATASET_VERSION_ID,
-          evaluationSnapshotHash: EVALUATION_SNAPSHOT_HASH,
+          evaluationRunId: null,
+          evaluationDatasetVersionId: null,
+          evaluationSnapshotHash: null,
         }),
       }),
     );
@@ -489,48 +794,6 @@ describe('KnowledgeAdminService', () => {
         }),
       }),
     );
-  });
-
-  it('blocks file publication until the independent parse review is approved', async () => {
-    const evaluations = { requireReferencedRunReady: vi.fn() };
-    const updateMany = vi.fn();
-    const service = createService({
-      transaction: {
-        $queryRaw: vi.fn().mockResolvedValue([{ databaseNow: DATABASE_NOW }]),
-        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ status: 'ACTIVE' }) },
-        knowledgeDocumentVersion: {
-          findFirst: vi
-            .fn()
-            .mockResolvedValueOnce({
-              id: DOCUMENT_VERSION_ID,
-              versionNumber: 2,
-              status: 'READY',
-              publishedAt: null,
-            })
-            .mockResolvedValueOnce({
-              id: DOCUMENT_VERSION_ID,
-              versionNumber: 2,
-              sourceType: 'FILE',
-              status: 'READY',
-              publishedAt: null,
-              ...approvedGovernanceRecord(),
-              parseReviewStatus: 'PENDING',
-              evaluationRunId: null,
-              _count: { chunks: 2 },
-            }),
-          updateMany,
-        },
-      },
-      evaluations,
-    });
-
-    await expect(
-      service.publishDocumentVersion(KNOWLEDGE_BASE_ID, DOCUMENT_ID, DOCUMENT_VERSION_ID, {
-        evaluationRunId: EVALUATION_RUN_ID,
-      }),
-    ).rejects.toThrow('independent approved parse review');
-    expect(evaluations.requireReferencedRunReady).not.toHaveBeenCalled();
-    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it.each(['FILE', 'WEB'] as const)(
@@ -657,6 +920,7 @@ describe('KnowledgeAdminService', () => {
       expect.objectContaining({
         where: expect.objectContaining({ governanceRevision: 3, publishedAt: null }),
         data: expect.objectContaining({
+          governanceOwnerUserId: ADMIN_ID,
           governanceRevision: { increment: 1 },
           projectScopeIds: [
             '00000000-0000-7000-8000-000000000010',
@@ -685,6 +949,119 @@ describe('KnowledgeAdminService', () => {
         }),
       }),
     );
+  });
+
+  it('updates current document access with a revision CAS and preserves non-member governance labels', async () => {
+    const departmentId = '00000000-0000-7000-8000-000000000021';
+    const memberId = '00000000-0000-7000-8000-000000000022';
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const auditCreate = vi.fn().mockResolvedValue({});
+    const outboxCreate = vi.fn().mockResolvedValue({});
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      knowledgeDocument: {
+        findFirst: vi.fn().mockResolvedValue({
+          documentVersion: 1,
+          currentVersionId: DOCUMENT_VERSION_ID,
+          currentVersion: {
+            id: DOCUMENT_VERSION_ID,
+            versionNumber: 1,
+            governanceRevision: 5,
+            governanceHash: 'a'.repeat(64),
+            classification: 'INTERNAL',
+            projectScopeIds: [],
+            taskScopeIds: [],
+            roleTemplateScopeIds: [],
+            dataLabels: ['role:finance', 'USER:00000000-0000-7000-8000-000000000099'],
+          },
+        }),
+      },
+      orgUnit: { count: vi.fn().mockResolvedValue(1) },
+      user: { count: vi.fn().mockResolvedValue(1) },
+      knowledgeDocumentVersion: {
+        updateMany,
+        findFirstOrThrow: vi.fn().mockResolvedValue({
+          governanceRevision: 6,
+          governanceHash: 'b'.repeat(64),
+          governanceReviewStatus: 'PENDING',
+        }),
+      },
+      auditEvent: { create: auditCreate },
+      outboxEvent: { create: outboxCreate },
+    };
+    const service = createService({ transaction });
+    vi.spyOn(service, 'getDocument').mockResolvedValue({} as never);
+
+    await service.updateDocumentAccess(KNOWLEDGE_BASE_ID, DOCUMENT_ID, {
+      mode: 'RESTRICTED',
+      orgUnitIds: [departmentId],
+      memberUserIds: [memberId],
+      expectedGovernanceRevision: 5,
+    });
+
+    expect(updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          id: DOCUMENT_VERSION_ID,
+          governanceRevision: 5,
+        }),
+        data: expect.objectContaining({
+          scopeMode: 'RESTRICTED',
+          organizationScopeIds: [departmentId],
+          dataLabels: [`USER:${memberId}`, 'role:finance'],
+          governanceRevision: { increment: 1 },
+        }),
+      }),
+    );
+    expect(auditCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ action: 'admin.knowledge-document.access-updated' }),
+      }),
+    );
+    expect(outboxCreate).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: 'knowledge.document-version.governance-updated.v1',
+        }),
+      }),
+    );
+  });
+
+  it('rejects document access changes while a newer document version is unfinished', async () => {
+    const updateMany = vi.fn();
+    const service = createService({
+      transaction: {
+        $queryRaw: vi.fn().mockResolvedValue([]),
+        knowledgeDocument: {
+          findFirst: vi.fn().mockResolvedValue({
+            documentVersion: 2,
+            currentVersionId: DOCUMENT_VERSION_ID,
+            currentVersion: {
+              id: DOCUMENT_VERSION_ID,
+              versionNumber: 1,
+              governanceRevision: 5,
+              governanceHash: 'a'.repeat(64),
+              classification: 'INTERNAL',
+              projectScopeIds: [],
+              taskScopeIds: [],
+              roleTemplateScopeIds: [],
+              dataLabels: [],
+            },
+          }),
+        },
+        knowledgeDocumentVersion: { updateMany },
+      },
+    });
+
+    await expect(
+      service.updateDocumentAccess(KNOWLEDGE_BASE_ID, DOCUMENT_ID, {
+        mode: 'INHERIT',
+        orgUnitIds: [],
+        memberUserIds: [],
+        expectedGovernanceRevision: 5,
+      }),
+    ).rejects.toThrow('Finish or remove the newer document version');
+    expect(updateMany).not.toHaveBeenCalled();
   });
 
   it('requires an independent reviewer and records a successful governance approval', async () => {
@@ -767,101 +1144,11 @@ describe('KnowledgeAdminService', () => {
     );
   });
 
-  it('blocks publication before evaluation when version governance is not independently approved', async () => {
-    const evaluations = { requireReferencedRunReady: vi.fn() };
-    const updateMany = vi.fn();
-    const service = createService({
-      transaction: {
-        $queryRaw: vi.fn().mockResolvedValue([]),
-        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ status: 'ACTIVE' }) },
-        knowledgeDocumentVersion: {
-          findFirst: vi
-            .fn()
-            .mockResolvedValueOnce({
-              id: DOCUMENT_VERSION_ID,
-              versionNumber: 2,
-              status: 'READY',
-              publishedAt: null,
-            })
-            .mockResolvedValueOnce({
-              id: DOCUMENT_VERSION_ID,
-              versionNumber: 2,
-              sourceType: 'MARKDOWN',
-              status: 'READY',
-              publishedAt: null,
-              governanceReviewStatus: 'PENDING',
-              effectiveFrom: new Date('2026-07-01T00:00:00.000Z'),
-              expiresAt: null,
-              _count: { chunks: 2 },
-            }),
-          updateMany,
-        },
-      },
-      evaluations,
-    });
-
-    await expect(
-      service.publishDocumentVersion(KNOWLEDGE_BASE_ID, DOCUMENT_ID, DOCUMENT_VERSION_ID, {
-        evaluationRunId: EVALUATION_RUN_ID,
-      }),
-    ).rejects.toThrow('independent governance approval');
-    expect(evaluations.requireReferencedRunReady).not.toHaveBeenCalled();
-    expect(updateMany).not.toHaveBeenCalled();
-  });
-
-  it('does not mutate publication state when the referenced Evaluation Run is blocked', async () => {
-    const updateVersion = vi.fn();
-    const evaluations = {
-      requireReferencedRunReady: vi
-        .fn()
-        .mockRejectedValue(new ConflictException('evaluation blocked')),
-    };
-    const service = createService({
-      transaction: {
-        $queryRaw: vi.fn().mockResolvedValue([{ databaseNow: DATABASE_NOW }]),
-        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ status: 'ACTIVE' }) },
-        knowledgeDocumentVersion: {
-          findFirst: vi
-            .fn()
-            .mockResolvedValueOnce({
-              id: DOCUMENT_VERSION_ID,
-              versionNumber: 2,
-              status: 'READY',
-              publishedAt: null,
-            })
-            .mockResolvedValueOnce({
-              id: DOCUMENT_VERSION_ID,
-              versionNumber: 2,
-              status: 'READY',
-              publishedAt: null,
-              ...approvedGovernanceRecord(),
-              evaluationRunId: null,
-              _count: { chunks: 1 },
-            }),
-          updateMany: updateVersion,
-        },
-        knowledgeDocument: {
-          findFirst: vi.fn().mockResolvedValue({
-            currentVersionId: null,
-            documentVersion: 0,
-            status: 'READY',
-          }),
-        },
-      },
-      evaluations,
-    });
-
-    await expect(
-      service.publishDocumentVersion(KNOWLEDGE_BASE_ID, DOCUMENT_ID, DOCUMENT_VERSION_ID, {
-        evaluationRunId: EVALUATION_RUN_ID,
-      }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(updateVersion).not.toHaveBeenCalled();
-  });
-
-  it('archives without inventing a document content version', async () => {
+  it('archives the empty knowledge base after deleting its last active document', async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const updateKnowledgeBase = vi.fn().mockResolvedValue({ count: 1 });
     const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: KNOWLEDGE_BASE_ID }]),
       knowledgeDocument: {
         findFirst: vi.fn().mockResolvedValue({
           id: DOCUMENT_ID,
@@ -871,8 +1158,10 @@ describe('KnowledgeAdminService', () => {
           documentVersion: 3,
         }),
         updateMany,
+        count: vi.fn().mockResolvedValue(0),
         findFirstOrThrow: vi.fn().mockResolvedValue(storedDocument('ARCHIVED', 3)),
       },
+      knowledgeBase: { updateMany: updateKnowledgeBase },
       auditEvent: { create: vi.fn().mockResolvedValue({}) },
     };
     const service = createService({ transaction });
@@ -885,7 +1174,42 @@ describe('KnowledgeAdminService', () => {
         data: { status: 'ARCHIVED' },
       }),
     );
+    expect(transaction.$queryRaw).toHaveBeenCalledOnce();
+    expect(updateKnowledgeBase).toHaveBeenCalledWith({
+      where: {
+        id: KNOWLEDGE_BASE_ID,
+        tenantId: TENANT_ID,
+        status: { not: 'ARCHIVED' },
+      },
+      data: { status: 'ARCHIVED', version: { increment: 1 } },
+    });
     expect(archived).toMatchObject({ status: 'ARCHIVED', documentVersion: 3 });
+  });
+
+  it('keeps the knowledge base when another active document remains', async () => {
+    const updateKnowledgeBase = vi.fn().mockResolvedValue({ count: 1 });
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ id: KNOWLEDGE_BASE_ID }]),
+      knowledgeDocument: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: DOCUMENT_ID,
+          tenantId: TENANT_ID,
+          knowledgeBaseId: KNOWLEDGE_BASE_ID,
+          status: 'READY',
+          documentVersion: 3,
+        }),
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+        count: vi.fn().mockResolvedValue(1),
+        findFirstOrThrow: vi.fn().mockResolvedValue(storedDocument('ARCHIVED', 3)),
+      },
+      knowledgeBase: { updateMany: updateKnowledgeBase },
+      auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const service = createService({ transaction });
+
+    await service.archiveDocument(KNOWLEDGE_BASE_ID, DOCUMENT_ID, 3);
+
+    expect(updateKnowledgeBase).not.toHaveBeenCalled();
   });
 
   it('returns full text only from an explicitly requested document version', async () => {
@@ -946,12 +1270,19 @@ describe('KnowledgeAdminService', () => {
         findMany: vi.fn().mockResolvedValue([
           {
             id: '00000000-0000-7000-8000-000000000008',
+            parentChunkId: '00000000-0000-7000-8000-000000000009',
+            previousChunkId: null,
+            nextChunkId: null,
             chunkIndex: 1,
             headingPath: ['Benefits', 'Leave'],
             content: 'Employees receive annual leave.',
             tokenCount: 8,
             contentHash: 'a'.repeat(64),
             metadata: { pageStart: 2, pageEnd: 3 },
+            parentChunk: {
+              headingPath: ['Benefits', 'Leave'],
+              content: 'Employees receive annual leave.',
+            },
             embeddings: [{ embeddingModel: 'embedding-v1' }, { embeddingModel: 'embedding-v2' }],
           },
         ]),
@@ -977,13 +1308,19 @@ describe('KnowledgeAdminService', () => {
       items: [
         {
           id: '00000000-0000-7000-8000-000000000008',
+          parentChunkId: '00000000-0000-7000-8000-000000000009',
+          previousChunkId: null,
+          nextChunkId: null,
           chunkIndex: 1,
           headingPath: ['Benefits', 'Leave'],
+          parentHeadingPath: ['Benefits', 'Leave'],
+          parentExcerpt: 'Employees receive annual leave.',
           content: 'Employees receive annual leave.',
           tokenCount: 8,
           contentHash: 'a'.repeat(64),
           pageStart: 2,
           pageEnd: 3,
+          sheetName: null,
           embeddingModels: ['embedding-v1', 'embedding-v2'],
         },
       ],
@@ -1007,33 +1344,7 @@ describe('KnowledgeAdminService', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
   });
 
-  it('does not activate an empty or unindexed knowledge base', async () => {
-    const updateMany = vi.fn();
-    const transaction = {
-      knowledgeBase: {
-        findFirst: vi.fn().mockResolvedValue({
-          id: KNOWLEDGE_BASE_ID,
-          tenantId: TENANT_ID,
-          status: 'DRAFT',
-          version: 1,
-        }),
-        updateMany,
-      },
-      knowledgeDocument: { findMany: vi.fn().mockResolvedValue([]) },
-    };
-    const service = createService({ transaction });
-
-    await expect(
-      service.update(KNOWLEDGE_BASE_ID, {
-        status: 'ACTIVE',
-        expectedVersion: 1,
-      }),
-    ).rejects.toBeInstanceOf(ConflictException);
-    expect(updateMany).not.toHaveBeenCalled();
-    expect(transaction.knowledgeDocument.findMany).toHaveBeenCalled();
-  });
-
-  it('activates a semantically ready knowledge base while graph curation remains optional', async () => {
+  it('activates a knowledge base without readiness or graph gates', async () => {
     const current = {
       id: KNOWLEDGE_BASE_ID,
       tenantId: TENANT_ID,
@@ -1043,6 +1354,7 @@ describe('KnowledgeAdminService', () => {
       status: 'DRAFT',
       version: 1,
       orgUnits: [],
+      members: [],
       documents: [],
       _count: { documents: 1 },
       updatedAt: new Date('2026-07-27T00:00:00.000Z'),
@@ -1050,40 +1362,13 @@ describe('KnowledgeAdminService', () => {
     const updated = { ...current, status: 'ACTIVE', version: 2 };
     const transaction = {
       knowledgeBase: {
-        findFirst: vi
-          .fn()
-          .mockResolvedValueOnce(current)
-          .mockResolvedValueOnce(current)
-          .mockResolvedValueOnce(updated),
+        findFirst: vi.fn().mockResolvedValueOnce(current).mockResolvedValueOnce(updated),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
-      knowledgeDocument: { findFirst: vi.fn().mockResolvedValue({ id: DOCUMENT_ID }) },
       auditEvent: { create: vi.fn().mockResolvedValue({}) },
     };
     const service = createService({ transaction });
-    vi.spyOn(service, 'readiness').mockResolvedValue({
-      knowledgeBaseId: KNOWLEDGE_BASE_ID,
-      documents: { total: 1, ready: 1, failed: 0, processing: 0, draft: 0, archived: 0 },
-      publishedChunkCount: 1,
-      embeddedChunkCount: 1,
-      semanticCoverage: 1,
-      embedding: {
-        status: 'READY',
-        provider: 'openai_compatible',
-        model: 'embedding-v1',
-        dimensions: 1536,
-      },
-      rerank: {
-        status: 'READY',
-        provider: 'cohere_compatible',
-        model: 'reranker-v1',
-        dimensions: null,
-      },
-      retrievalMode: 'HYBRID',
-      degradedReason: null,
-      activationAllowed: true,
-      activationBlockers: [],
-    });
+    const readiness = vi.spyOn(service, 'readiness');
     const graphOverview = vi.spyOn(service, 'graphOverview');
 
     await expect(
@@ -1092,11 +1377,12 @@ describe('KnowledgeAdminService', () => {
         expectedVersion: 1,
       }),
     ).resolves.toMatchObject({ status: 'ACTIVE', version: 2 });
+    expect(readiness).not.toHaveBeenCalled();
     expect(graphOverview).not.toHaveBeenCalled();
     expect(transaction.knowledgeBase.updateMany).toHaveBeenCalledOnce();
   });
 
-  it('does not reapply new activation gates to an already active knowledge base', async () => {
+  it('updates an active knowledge base without invoking retrieval diagnostics', async () => {
     const active = {
       id: KNOWLEDGE_BASE_ID,
       tenantId: TENANT_ID,
@@ -1106,6 +1392,7 @@ describe('KnowledgeAdminService', () => {
       status: 'ACTIVE',
       version: 1,
       orgUnits: [],
+      members: [],
       documents: [],
       _count: { documents: 0 },
       updatedAt: new Date('2026-07-27T00:00:00.000Z'),
@@ -1113,11 +1400,7 @@ describe('KnowledgeAdminService', () => {
     const updated = { ...active, name: 'Updated policies', version: 2 };
     const transaction = {
       knowledgeBase: {
-        findFirst: vi
-          .fn()
-          .mockResolvedValueOnce(active)
-          .mockResolvedValueOnce(active)
-          .mockResolvedValueOnce(updated),
+        findFirst: vi.fn().mockResolvedValueOnce(active).mockResolvedValueOnce(updated),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
       knowledgeDocument: { findFirst: vi.fn() },
@@ -1152,7 +1435,14 @@ describe('KnowledgeAdminService', () => {
 
   it('reports current-model vector coverage and safe provider readiness', async () => {
     const transaction = {
-      knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+      knowledgeBase: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: KNOWLEDGE_BASE_ID,
+          activeEmbeddingIndexVersion: {
+            id: '00000000-0000-7000-8000-000000000099',
+          },
+        }),
+      },
       knowledgeDocument: {
         findMany: vi.fn().mockResolvedValue([
           {
@@ -1217,7 +1507,6 @@ describe('KnowledgeAdminService', () => {
       rerank: { status: 'READY', model: 'reranker-v1' },
       retrievalMode: 'LEXICAL',
       degradedReason: 'EMBEDDING_COVERAGE_INCOMPLETE',
-      activationAllowed: false,
     });
     expect(transaction.knowledgeChunk.count).toHaveBeenCalledWith({
       where: {
@@ -1226,7 +1515,9 @@ describe('KnowledgeAdminService', () => {
         documentVersionId: {
           in: [DOCUMENT_VERSION_ID, '00000000-0000-7000-8000-000000000008'],
         },
-        embeddings: { some: { embeddingModel: 'embedding-v1' } },
+        embeddings: {
+          some: { embeddingIndexVersionId: '00000000-0000-7000-8000-000000000099' },
+        },
       },
     });
   });
@@ -1298,7 +1589,7 @@ describe('KnowledgeAdminService', () => {
       relationCount: 0,
       mentionCount: 0,
       evidenceCount: 0,
-      strongRetrievalReady: false,
+      diagnostics: expect.arrayContaining(['NO_ENTITIES', 'NO_RELATIONS']),
     });
     const sql = queryRaw.mock.calls.map((call) => prismaSqlText(call[0])).join('\n');
     expect(sql).toContain(`mentioned_entity."status" = 'ACTIVE'::"KnowledgeGraphRecordStatus"`);
@@ -1340,12 +1631,16 @@ describe('KnowledgeAdminService', () => {
 
 function createService(input: {
   transaction?: Record<string, unknown>;
-  evaluations?: Record<string, unknown>;
   ingestion?: Record<string, unknown>;
   retrieval?: Record<string, unknown>;
   semantic?: Record<string, unknown>;
 }): KnowledgeAdminService {
-  const transaction = input.transaction ?? {};
+  const transaction = {
+    tenant: {
+      findFirst: vi.fn().mockResolvedValue({ id: TENANT_ID, name: 'Example Tenant' }),
+    },
+    ...(input.transaction ?? {}),
+  };
   const prisma = {
     withTenant: vi.fn((_tenantId: string, operation: (value: unknown) => unknown) =>
       operation(transaction),
@@ -1359,19 +1654,15 @@ function createService(input: {
       authenticationSource: 'session',
     })),
   };
+  const ingestion = {
+    syncSearchDocumentVersion: vi.fn().mockResolvedValue(undefined),
+    archiveSearchDocument: vi.fn().mockResolvedValue(undefined),
+    ...input.ingestion,
+  };
   return new KnowledgeAdminService(
     prisma as unknown as AdminPrismaService,
     access as unknown as AdminAccessService,
-    (input.evaluations ?? {
-      requireReferencedRunReady: vi.fn().mockResolvedValue({
-        ready: true,
-        datasetVersionId: EVALUATION_DATASET_VERSION_ID,
-        currentSnapshotHash: EVALUATION_SNAPSHOT_HASH,
-        passingRunId: EVALUATION_RUN_ID,
-      }),
-    }) as unknown as AiEvaluationService,
-    (input.ingestion ?? {}) as unknown as KnowledgeIngestionService,
-    (input.retrieval ?? {}) as unknown as KnowledgeRetrievalService,
+    { ...ingestion, ...(input.retrieval ?? {}) } as unknown as KnowledgeGateway,
     (input.semantic ?? {
       semanticEnabled: false,
       rerankEnabled: false,
@@ -1387,6 +1678,22 @@ function createService(input: {
       }),
     }) as unknown as KnowledgeAiRuntimeClient,
   );
+}
+
+function readySemanticClient(
+  provider: 'openai_compatible' | 'local_fastembed',
+  model: string,
+  dimensions: number,
+): Record<string, unknown> {
+  return {
+    semanticEnabled: true,
+    rerankEnabled: false,
+    embeddingDimensions: dimensions,
+    capabilities: vi.fn().mockResolvedValue({
+      embeddings: { status: 'ready', provider, model, dimensions },
+      rerank: { status: 'disabled', provider: 'disabled', model: null },
+    }),
+  };
 }
 
 function prismaSqlText(value: unknown): string {
@@ -1405,6 +1712,8 @@ function documentResponse(status: 'DRAFT' | 'READY') {
   return {
     id: DOCUMENT_ID,
     knowledgeBaseId: KNOWLEDGE_BASE_ID,
+    folderId: null,
+    folderPath: null,
     title: 'Employee handbook',
     sourceType: 'MARKDOWN' as const,
     mimeType: 'text/markdown',
@@ -1427,11 +1736,25 @@ function storedKnowledgeBase(key: string) {
     name: 'Employee handbook',
     description: null,
     status: 'DRAFT' as const,
+    spaceType: 'COMPANY' as const,
+    spaceTargetId: TENANT_ID,
+    spaceTargetName: 'Example Tenant',
+    retrievalMode: 'HYBRID',
+    retrievalTopK: 8,
+    retrievalScoreThreshold: 0.08,
+    retrievalSemanticWeight: 0.7,
+    retrievalKeywordWeight: 0.3,
+    retrievalRerankEnabled: true,
+    relationshipRetrievalEnabled: true,
+    maxChunksPerDocument: 3,
+    chunkTargetTokens: 500,
+    chunkOverlapTokens: 80,
     version: 1,
     createdById: ADMIN_ID,
     createdAt: new Date('2026-07-29T00:00:00.000Z'),
     updatedAt: new Date('2026-07-29T00:00:00.000Z'),
     orgUnits: [],
+    members: [],
     documents: [],
     _count: { documents: 0 },
   };

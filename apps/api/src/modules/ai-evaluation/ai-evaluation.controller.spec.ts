@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { AiEvaluationController } from './ai-evaluation.controller.js';
 import { AiEvaluationService } from './ai-evaluation.service.js';
+import { KnowledgeRetrievalBenchmarkService } from './knowledge-retrieval-benchmark.service.js';
 
 const DATASET_ID = '10000000-0000-4000-8000-000000000001';
 const VERSION_ID = '10000000-0000-4000-8000-000000000002';
@@ -38,11 +39,20 @@ describe('AiEvaluationController', () => {
     readiness: vi.fn(),
     requireReleaseReady: vi.fn(),
   };
+  const retrievalBenchmarks = {
+    bulkImport: vi.fn(),
+    listRuns: vi.fn(),
+    run: vi.fn(),
+    getRun: vi.fn(),
+  };
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       controllers: [AiEvaluationController],
-      providers: [{ provide: AiEvaluationService, useValue: service }],
+      providers: [
+        { provide: AiEvaluationService, useValue: service },
+        { provide: KnowledgeRetrievalBenchmarkService, useValue: retrievalBenchmarks },
+      ],
     }).compile();
     app = module.createNestApplication();
     app.setGlobalPrefix('api/v1');

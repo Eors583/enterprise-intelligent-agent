@@ -145,7 +145,7 @@ transaction-local `app.tenant_id`，禁止使用连接级 tenant setting。
 | 经营与流程          | 价值、战略、目标、任务、指标、证据、流程状态、业务事件和结构化协同          |
 | Tool Gateway        | 注册、JSON Schema、组合身份、风险分级、确认/审批、幂等、回执、对账和补偿    |
 | 知识、记忆与经验    | 摄取/版本/检索/引用、图谱治理、五层记忆、经验审核发布与知识投影             |
-| AI 运行与评测       | Run/事件游标、模型路由、坏例回流、数据集/运行证明和发布门禁                 |
+| AI 运行与评测       | Run/事件游标、模型路由、坏例回流、数据集/运行证明和可选质量检查             |
 | 身份、审计与 FinOps | MFA/设备/OIDC/SAML/SCIM、哈希链审计、价格/预算/成本/收益/ROI 和独立成本复核 |
 
 Tool Gateway 的供应商计量使用 `UNATTESTED`、`PROVIDER_ATTESTED` 和

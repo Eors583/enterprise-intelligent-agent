@@ -346,6 +346,27 @@ describe('AgentRunWorker', () => {
     runtime.releaseExecution({ runId: EXTERNAL_ID, status: 'cancelled' });
     await ordinaryTick;
   });
+
+  it('fills an unused execution slot while an earlier Runtime stream is still active', async () => {
+    const secondEvent = event({
+      id: '00000000-0000-7000-8000-000000000812',
+      aggregateId: '00000000-0000-7000-8000-000000000813',
+      payload: { runId: '00000000-0000-7000-8000-000000000813' },
+    });
+    const queue = new SequencedQueue([[event()], [secondEvent]]);
+    const runs = new FakeRuns({ kind: 'ready', run: preparedRun() });
+    const runtime = new BlockingExecuteRuntime();
+    const worker = createWorker(queue, runs, runtime, 'AVAILABLE', 2);
+
+    await expect(worker.runAvailableOnce()).resolves.toBe(1);
+    await runtime.executeStarted;
+    await expect(worker.runAvailableOnce()).resolves.toBe(1);
+
+    expect(queue.claimedBatchSizes).toEqual([2, 1]);
+    runtime.releaseExecution({ runId: EXTERNAL_ID, status: 'cancelled' });
+    await worker.onApplicationShutdown();
+    expect(runtime.calls.filter((call) => call === 'execute')).toHaveLength(2);
+  });
 });
 
 describe('validateGroundedOutput', () => {
@@ -541,6 +562,23 @@ describe('validateGroundedOutput', () => {
       citations: [],
     });
   });
+  it('falls back to authorized evidence when a model omits verifiable source markers', () => {
+    const source = knowledgeSource({ excerpt: 'The verified acceptance code is 青杉-0727.' });
+
+    const result = validateGroundedOutput(
+      'An unsupported model summary without a source marker.',
+      preparedRun({
+        knowledgeGroundingRequired: true,
+        knowledgeEvidenceFallbackEnabled: true,
+        knowledgeSources: [source],
+      }),
+    );
+
+    expect(result.content).toContain('青杉-0727');
+    expect(result.content).toContain('[来源1]');
+    expect(result.content).not.toContain('unsupported model summary');
+    expect(result.citations).toEqual([source]);
+  });
 });
 
 const EVENT_ID = '00000000-0000-7000-8000-000000000801';
@@ -627,12 +665,14 @@ function createWorker(
   runs: AgentRunRepository,
   runtime: AgentRuntimeClient,
   operationalStatus: 'AVAILABLE' | 'NOT_READY' | 'DEGRADED' | 'UNKNOWN' = 'AVAILABLE',
+  concurrency = 1,
 ): AgentRunWorker {
   const values = validateEnvironment({
     NODE_ENV: 'test',
     REPOSITORY_DRIVER: 'prisma',
     DATABASE_URL: 'postgresql://localhost/test',
     AGENT_RUN_WORKER_ENABLED: 'true',
+    AGENT_RUN_WORKER_CONCURRENCY: String(concurrency),
   });
   return new AgentRunWorker(
     new ConfigService<EnvironmentVariables, true>(values),
@@ -673,11 +713,15 @@ class FakeQueue extends AgentRunQueueRepository {
     super();
   }
 
-  claim(): Promise<readonly ClaimedAgentRunEvent[]> {
+  claim(
+    _input: Parameters<AgentRunQueueRepository['claim']>[0],
+  ): Promise<readonly ClaimedAgentRunEvent[]> {
     return Promise.resolve(this.events);
   }
 
-  claimCancellations(): Promise<readonly ClaimedAgentRunEvent[]> {
+  claimCancellations(
+    _input: Parameters<AgentRunQueueRepository['claimCancellations']>[0],
+  ): Promise<readonly ClaimedAgentRunEvent[]> {
     return Promise.resolve(this.cancellationEvents);
   }
 
@@ -699,6 +743,21 @@ class FakeQueue extends AgentRunQueueRepository {
   defer(input: Parameters<AgentRunQueueRepository['defer']>[0]): Promise<boolean> {
     this.deferred.push(input);
     return Promise.resolve(true);
+  }
+}
+
+class SequencedQueue extends FakeQueue {
+  readonly claimedBatchSizes: number[] = [];
+
+  constructor(private readonly batches: readonly (readonly ClaimedAgentRunEvent[])[]) {
+    super([]);
+  }
+
+  override claim(
+    input: Parameters<AgentRunQueueRepository['claim']>[0],
+  ): Promise<readonly ClaimedAgentRunEvent[]> {
+    this.claimedBatchSizes.push(input.batchSize);
+    return Promise.resolve(this.batches[this.claimedBatchSizes.length - 1] ?? []);
   }
 }
 

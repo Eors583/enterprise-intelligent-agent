@@ -19,7 +19,6 @@ import {
   updateRoleVersionDraft,
 } from '@/api/admin-api';
 import { FieldError, Modal, Spinner } from '@/components/ui';
-import { PassingEvaluationRunSelect } from '@/features/ai-evaluation/PassingEvaluationRunSelect';
 
 import { roleBlueprintErrorMessage } from './role-blueprint-view';
 
@@ -340,7 +339,6 @@ export function RoleVersionTransitionModal({
 }): ReactNode {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [evaluationRunId, setEvaluationRunId] = useState('');
   const copy = transitionCopy(action, blueprint, version);
 
   const submit = async (): Promise<void> => {
@@ -352,10 +350,7 @@ export function RoleVersionTransitionModal({
         action === 'submit'
           ? await submitRoleVersion(blueprint.id, version.id, input)
           : action === 'publish'
-            ? await publishRoleVersion(blueprint.id, version.id, {
-                ...input,
-                evaluationRunId: evaluationRunId.trim(),
-              })
+            ? await publishRoleVersion(blueprint.id, version.id, input)
             : await retireRoleVersion(blueprint.id, version.id, input);
       onSaved(saved);
     } catch (caught) {
@@ -378,16 +373,6 @@ export function RoleVersionTransitionModal({
         </strong>
         <p>{copy.impact}</p>
       </div>
-      {action === 'publish' ? (
-        <PassingEvaluationRunSelect
-          subjectType="AGENT_VERSION"
-          subjectId={version.id}
-          subjectVersion={version.version}
-          value={evaluationRunId}
-          onChange={setEvaluationRunId}
-          disabled={submitting}
-        />
-      ) : null}
       <FieldError message={error} />
       <div className="modal-actions">
         <button className="button secondary" type="button" onClick={onClose} disabled={submitting}>
@@ -397,7 +382,7 @@ export function RoleVersionTransitionModal({
           className={`button ${action === 'retire' ? 'danger' : 'primary'}`}
           type="button"
           onClick={() => void submit()}
-          disabled={submitting || (action === 'publish' && evaluationRunId.trim() === '')}
+          disabled={submitting}
         >
           {submitting ? <Spinner label="正在处理…" /> : copy.confirm}
         </button>
@@ -505,7 +490,7 @@ function transitionCopy(
   if (action === 'publish') {
     return {
       title: `发布 v${version.version}`,
-      description: '只有已通过独立审核的版本可以发布。',
+      description: '草稿或测试中的版本可直接发布；审核与评测不再阻塞初版验证。',
       impact:
         '发布会在同一事务中将此前版本标记为已退役，并成为新任命唯一可选版本；已绑定旧版本的现有任命仍按任命快照继续运行。',
       confirm: '确认发布',

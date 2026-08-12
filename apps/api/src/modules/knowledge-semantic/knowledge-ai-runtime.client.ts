@@ -7,13 +7,19 @@ import type { AiDataClassification } from '@enterprise/contracts';
 import { isExternalKnowledgeAiApproved } from '../ai-safety-model-routing/ai-data-classification.js';
 
 const MAX_EMBEDDING_BATCH = 64;
+const MAX_EMBEDDING_BATCH_CONCURRENCY = 2;
 const MAX_RERANK_DOCUMENTS = 100;
 
 export interface KnowledgeEmbeddingBatch {
   readonly model: string;
-  readonly dimensions: 1536;
+  readonly dimensions: number;
   readonly vectors: readonly (readonly number[])[];
   readonly inputTokens: number | null;
+}
+
+export interface KnowledgeEmbeddingProfileExpectation {
+  readonly model: string;
+  readonly dimensions: number;
 }
 
 export interface KnowledgeRerankResult {
@@ -60,7 +66,7 @@ export class KnowledgeAiRuntimeClient {
   readonly vectorSearchMode: 'exact' | 'hnsw';
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private readonly dimensions: 1536;
+  private readonly dimensions: number;
   private readonly serviceToken: string | undefined;
 
   constructor(@Inject(ConfigService) config: ConfigService<EnvironmentVariables, true>) {
@@ -73,7 +79,7 @@ export class KnowledgeAiRuntimeClient {
     this.vectorSearchMode = config.get('KNOWLEDGE_VECTOR_SEARCH_MODE', { infer: true });
   }
 
-  get embeddingDimensions(): 1536 {
+  get embeddingDimensions(): number {
     return this.dimensions;
   }
 
@@ -82,6 +88,7 @@ export class KnowledgeAiRuntimeClient {
     inputs: readonly string[],
     classification: AiDataClassification,
     signal?: AbortSignal,
+    expectedProfile?: KnowledgeEmbeddingProfileExpectation,
   ): Promise<KnowledgeEmbeddingBatch> {
     assertExternalKnowledgeAiApproved(classification, 'KNOWLEDGE_EMBEDDING');
     if (!this.semanticEnabled) {
@@ -101,10 +108,24 @@ export class KnowledgeAiRuntimeClient {
       {
         tenant_id: tenantId,
         inputs,
+        ...(expectedProfile === undefined
+          ? {}
+          : {
+              expected_model: expectedProfile.model,
+              expected_dimensions: expectedProfile.dimensions,
+            }),
       },
       signal,
     );
-    return parseEmbeddingResponse(payload, inputs.length, this.dimensions);
+    const response = parseEmbeddingResponse(
+      payload,
+      inputs.length,
+      expectedProfile?.dimensions ?? this.dimensions,
+    );
+    if (expectedProfile !== undefined && response.model !== expectedProfile.model) {
+      throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH', false);
+    }
+    return response;
   }
 
   async embedAll(
@@ -112,21 +133,35 @@ export class KnowledgeAiRuntimeClient {
     inputs: readonly string[],
     classification: AiDataClassification,
     signal?: AbortSignal,
+    expectedProfile?: KnowledgeEmbeddingProfileExpectation,
   ): Promise<KnowledgeEmbeddingBatch> {
     assertExternalKnowledgeAiApproved(classification, 'KNOWLEDGE_EMBEDDING');
     if (inputs.length === 0) {
-      return { model: '', dimensions: this.dimensions, vectors: [], inputTokens: 0 };
+      return {
+        model: expectedProfile?.model ?? '',
+        dimensions: expectedProfile?.dimensions ?? this.dimensions,
+        vectors: [],
+        inputTokens: 0,
+      };
+    }
+    const batches: Array<readonly string[]> = [];
+    for (let offset = 0; offset < inputs.length; offset += MAX_EMBEDDING_BATCH) {
+      batches.push(inputs.slice(offset, offset + MAX_EMBEDDING_BATCH));
+    }
+    const results: KnowledgeEmbeddingBatch[] = [];
+    for (let offset = 0; offset < batches.length; offset += MAX_EMBEDDING_BATCH_CONCURRENCY) {
+      results.push(
+        ...(await Promise.all(
+          batches
+            .slice(offset, offset + MAX_EMBEDDING_BATCH_CONCURRENCY)
+            .map((batch) => this.embed(tenantId, batch, classification, signal, expectedProfile)),
+        )),
+      );
     }
     const vectors: Array<readonly number[]> = [];
     let model: string | null = null;
     let inputTokens: number | null = 0;
-    for (let offset = 0; offset < inputs.length; offset += MAX_EMBEDDING_BATCH) {
-      const batch = await this.embed(
-        tenantId,
-        inputs.slice(offset, offset + MAX_EMBEDDING_BATCH),
-        classification,
-        signal,
-      );
+    for (const batch of results) {
       if (model !== null && model !== batch.model) {
         throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_MODEL_CHANGED', true);
       }
@@ -137,7 +172,7 @@ export class KnowledgeAiRuntimeClient {
     }
     return {
       model: model ?? '',
-      dimensions: this.dimensions,
+      dimensions: expectedProfile?.dimensions ?? this.dimensions,
       vectors,
       inputTokens,
     };
@@ -321,7 +356,7 @@ function parseRerankCapability(value: unknown): KnowledgeRuntimeCapabilities['re
 function parseEmbeddingResponse(
   value: unknown,
   expectedCount: number,
-  expectedDimensions: 1536,
+  expectedDimensions: number,
 ): KnowledgeEmbeddingBatch {
   if (
     !isRecord(value) ||

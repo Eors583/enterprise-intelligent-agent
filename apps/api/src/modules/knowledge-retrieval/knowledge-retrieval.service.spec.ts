@@ -21,6 +21,38 @@ const OTHER_ORG_UNIT_ID = '00000000-0000-7000-8000-000000000006';
 const CANDIDATE_VERSION_ID = '00000000-0000-7000-8000-000000000009';
 
 describe('KnowledgeRetrievalService', () => {
+  it('resolves the employee accessible Knowledge Bases from the authoritative admin scope', async () => {
+    const transaction = accessibleTransaction();
+    transaction.knowledgeBase.findMany.mockResolvedValue([
+      {
+        id: KNOWLEDGE_BASE_ID,
+        status: 'ACTIVE',
+        orgUnits: [],
+        members: [],
+      },
+      {
+        id: '00000000-0000-7000-8000-000000000007',
+        status: 'ACTIVE',
+        orgUnits: [],
+        members: [{ userId: '00000000-0000-7000-8000-000000000099' }],
+      },
+    ]);
+    const service = createService(transaction, semanticClient());
+
+    await expect(
+      service.resolveAccessibleKnowledgeBaseIds({
+        tenantId: TENANT_ID,
+        userId: USER_ID,
+      }),
+    ).resolves.toEqual([KNOWLEDGE_BASE_ID]);
+
+    expect(transaction.knowledgeBase.findMany).toHaveBeenCalledWith({
+      where: { tenantId: TENANT_ID, status: 'ACTIVE' },
+      include: { orgUnits: true, members: true },
+      orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
+    });
+  });
+
   it('authorizes before calling the semantic provider or tenant repository', async () => {
     const transaction = accessibleTransaction();
     const semantic = semanticClient();
@@ -49,7 +81,7 @@ describe('KnowledgeRetrievalService', () => {
     expect(transaction.user.findFirst).not.toHaveBeenCalled();
   });
 
-  it('uses reciprocal-rank fusion so a chunk present in both candidate lists wins', async () => {
+  it('uses configured weighted fusion so a chunk present in both candidate lists wins', async () => {
     const lexicalRows = [
       candidate('chunk-a', 'document-a', 6, 1),
       candidate('chunk-b', 'document-b', 5, 0.8),
@@ -68,16 +100,34 @@ describe('KnowledgeRetrievalService', () => {
     expect(result).toMatchObject({
       mode: 'HYBRID',
       embeddingModel: 'embedding-model-v1',
-      reranker: 'RRF',
+      reranker: 'WEIGHTED_SCORE',
       degradedReason: null,
       lexicalCandidateCount: 2,
       vectorCandidateCount: 2,
     });
-    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-b', 'chunk-a', 'chunk-c']);
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-b', 'chunk-c', 'chunk-a']);
     expect(result.items[0]?.fusionScore).toBeGreaterThan(result.items[1]?.fusionScore ?? 0);
     expect(result.semanticCoverage).toBeCloseTo(2 / 3);
     expect(transaction.$executeRawUnsafe).toHaveBeenCalledWith('SET LOCAL enable_indexscan = off');
     expect(transaction.$executeRawUnsafe).toHaveBeenCalledWith('SET LOCAL enable_bitmapscan = off');
+  });
+
+  it('returns no evidence for a semantically nearby result without direct support', async () => {
+    const transaction = accessibleTransaction();
+    transaction.$queryRaw
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        { ...candidate('chunk-unrelated', 'document-unrelated', 0, 0), semantic_score: 0.98 },
+      ]);
+    const service = createService(transaction, semanticClient());
+
+    const result = await service.search({
+      ...searchInput(),
+      query: 'What is the authorization code for lunar base Zephyr?',
+    });
+
+    expect(result.items).toEqual([]);
+    expect(result.vectorCandidateCount).toBe(1);
   });
 
   it('degrades to lexical retrieval with an explicit safe reason when embedding fails', async () => {
@@ -102,6 +152,52 @@ describe('KnowledgeRetrievalService', () => {
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
     expect(transaction.$queryRaw).toHaveBeenCalledOnce();
     expect(transaction.$executeRawUnsafe).not.toHaveBeenCalled();
+  });
+
+  it('keeps late Chinese query terms so natural questions can recall an exact answer phrase', async () => {
+    const transaction = accessibleTransaction();
+    transaction.$queryRaw.mockResolvedValueOnce([
+      candidate('chunk-canary', 'document-canary', 1, 0),
+    ]);
+    const service = createService(transaction, semanticClient({ semanticEnabled: false }));
+
+    const result = await service.search({
+      ...searchInput(),
+      query: '请告诉我知识库验收口令是什么',
+    });
+
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-canary']);
+    const query = transaction.$queryRaw.mock.calls[0]?.[0] as Prisma.Sql;
+    expect(query.values).toContain('%验收%');
+    expect(query.values).toContain('%口令%');
+  });
+
+  it('uses a configured TopK below the default when the caller does not override the limit', async () => {
+    const transaction = accessibleTransaction();
+    transaction.knowledgeBase.findMany.mockResolvedValue([
+      {
+        id: KNOWLEDGE_BASE_ID,
+        status: 'ACTIVE',
+        orgUnits: [],
+        members: [],
+        retrievalTopK: 1,
+      },
+    ]);
+    transaction.$queryRaw.mockResolvedValueOnce([
+      candidate('chunk-a', 'document-a', 6, 0.9),
+      candidate('chunk-b', 'document-b', 5, 0.8),
+    ]);
+    const service = createService(transaction, semanticClient({ semanticEnabled: false }));
+
+    const input = searchInput();
+    const result = await service.search({
+      tenantId: input.tenantId,
+      userId: input.userId,
+      knowledgeBaseIds: input.knowledgeBaseIds,
+      query: input.query,
+    });
+
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
   });
 
   it('labels results as lexical when the active embedding model has no vector candidates', async () => {
@@ -225,7 +321,7 @@ describe('KnowledgeRetrievalService', () => {
     expect(result.lexicalCandidateCount).toBe(1);
   });
 
-  it('falls back to RRF and exposes a safe reason when the cross-encoder fails', async () => {
+  it('falls back to weighted fusion and exposes a safe reason when the cross-encoder fails', async () => {
     const transaction = accessibleTransaction();
     transaction.$queryRaw
       .mockResolvedValueOnce([candidate('chunk-a', 'document-a', 6, 0.9)])
@@ -240,14 +336,14 @@ describe('KnowledgeRetrievalService', () => {
 
     expect(result).toMatchObject({
       mode: 'HYBRID',
-      reranker: 'RRF',
+      reranker: 'WEIGHTED_SCORE',
       rerankerModel: null,
       degradedReason: 'KNOWLEDGE_SEMANTIC_SEARCH_UNAVAILABLE',
     });
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
   });
 
-  it('falls back to hybrid RRF when the cross-encoder filters every valid vector candidate', async () => {
+  it('falls back to weighted fusion when the cross-encoder filters every valid vector candidate', async () => {
     const transaction = accessibleTransaction();
     transaction.$queryRaw
       .mockResolvedValueOnce([])
@@ -265,7 +361,7 @@ describe('KnowledgeRetrievalService', () => {
 
     expect(result).toMatchObject({
       mode: 'HYBRID',
-      reranker: 'RRF',
+      reranker: 'WEIGHTED_SCORE',
       rerankerModel: null,
       degradedReason: 'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK',
     });
@@ -354,7 +450,7 @@ describe('KnowledgeRetrievalService', () => {
   it('allows only an explicitly selected draft knowledge base in an admin preview search', async () => {
     const transaction = accessibleTransaction();
     transaction.knowledgeBase.findMany.mockResolvedValue([
-      { id: KNOWLEDGE_BASE_ID, status: 'DRAFT', orgUnits: [] },
+      { id: KNOWLEDGE_BASE_ID, status: 'DRAFT', orgUnits: [], members: [] },
     ]);
     transaction.$queryRaw.mockResolvedValueOnce([
       candidate('chunk-draft', 'document-draft', 6, 0.9),
@@ -373,7 +469,7 @@ describe('KnowledgeRetrievalService', () => {
         id: { in: [KNOWLEDGE_BASE_ID] },
         OR: [{ status: 'ACTIVE' }, { status: 'DRAFT', id: { in: [KNOWLEDGE_BASE_ID] } }],
       },
-      include: { orgUnits: true },
+      include: { orgUnits: true, members: true },
     });
   });
 
@@ -432,7 +528,7 @@ describe('KnowledgeRetrievalService', () => {
         id: { in: [KNOWLEDGE_BASE_ID] },
         OR: [{ status: 'ACTIVE' }],
       },
-      include: { orgUnits: true },
+      include: { orgUnits: true, members: true },
     });
     expect(transaction.$queryRaw).not.toHaveBeenCalled();
   });
@@ -643,8 +739,13 @@ function createService(
   return new KnowledgeRetrievalService(
     prisma as unknown as PrismaService,
     semantic as unknown as KnowledgeAiRuntimeClient,
+    {
+      driver: 'postgres',
+      query: vi.fn().mockResolvedValue([]),
+    } as never,
     relationships as unknown as KnowledgeRelationshipExpander,
     authorization,
+    { tryQuery: vi.fn().mockResolvedValue(null) } as never,
   );
 }
 
@@ -658,9 +759,22 @@ function accessibleTransaction() {
         .mockResolvedValue([{ id: ORG_UNIT_ID, parentId: null, organizationId: ORGANIZATION_ID }]),
     },
     knowledgeBase: {
-      findMany: vi
-        .fn()
-        .mockResolvedValue([{ id: KNOWLEDGE_BASE_ID, status: 'ACTIVE', orgUnits: [] }]),
+      findMany: vi.fn().mockResolvedValue([
+        {
+          id: KNOWLEDGE_BASE_ID,
+          status: 'ACTIVE',
+          orgUnits: [],
+          members: [],
+          activeEmbeddingIndexVersion: {
+            id: '00000000-0000-7000-8000-000000000099',
+            provider: 'legacy_runtime',
+            model: 'embedding-model-v1',
+            dimensions: 1_536,
+            distance: 'COSINE',
+            collectionName: null,
+          },
+        },
+      ]),
     },
     $queryRaw: vi.fn(),
     $executeRawUnsafe: vi.fn().mockResolvedValue(0),

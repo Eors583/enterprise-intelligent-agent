@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Post } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Param, ParseUUIDPipe, Post, Put } from '@nestjs/common';
 import {
   activateCompetencyVersionRequestSchema,
   analyzeOrganizationChangeRequestSchema,
@@ -16,6 +16,7 @@ import {
   triangleHealthSnapshotRequestSchema,
   transitionCompetencyAppealRequestSchema,
   transitionDevelopmentActionRequestSchema,
+  updatePersonalManualRequestSchema,
   type ActivateCompetencyVersionRequest,
   type AnalyzeOrganizationChangeRequest,
   type ApplyOrganizationChangeRequest,
@@ -32,9 +33,11 @@ import {
   type TriangleHealthSnapshotRequest,
   type TransitionCompetencyAppealRequest,
   type TransitionDevelopmentActionRequest,
+  type UpdatePersonalManualRequest,
 } from '@enterprise/contracts';
 
 import { SchemaValidationPipe } from '../../common/pipes/schema-validation.pipe.js';
+import { PersonalManualSelfService } from './personal-manual-self.service.js';
 import { PeopleOrganizationService } from './people-organization.service.js';
 
 @Controller('admin/people-organization')
@@ -185,11 +188,26 @@ export class PeopleSelfServiceController {
   constructor(
     @Inject(PeopleOrganizationService)
     private readonly service: PeopleOrganizationService,
+    @Inject(PersonalManualSelfService)
+    private readonly personalManual: PersonalManualSelfService,
   ) {}
 
   @Get('me')
   profile() {
     return this.service.employeeProfile();
+  }
+
+  @Get('me/personal-manual')
+  personalManualProfile() {
+    return this.personalManual.get();
+  }
+
+  @Put('me/personal-manual')
+  updatePersonalManual(
+    @Body(new SchemaValidationPipe(updatePersonalManualRequestSchema))
+    request: UpdatePersonalManualRequest,
+  ) {
+    return this.personalManual.update(request);
   }
 
   @Post('assessments/:assessmentId/confirmations')

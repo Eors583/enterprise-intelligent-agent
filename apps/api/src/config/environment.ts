@@ -106,8 +106,13 @@ export interface EnvironmentVariables {
   readonly KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: boolean;
   readonly KNOWLEDGE_RERANK_ENABLED: boolean;
   readonly KNOWLEDGE_AI_TIMEOUT_MS: number;
-  readonly KNOWLEDGE_EMBEDDING_DIMENSIONS: 1536;
+  readonly KNOWLEDGE_EMBEDDING_DIMENSIONS: number;
   readonly KNOWLEDGE_VECTOR_SEARCH_MODE: 'exact' | 'hnsw';
+  readonly KNOWLEDGE_SEARCH_INDEX_DRIVER: 'postgres' | 'qdrant';
+  readonly KNOWLEDGE_QDRANT_URL?: string;
+  readonly KNOWLEDGE_QDRANT_API_KEY?: string;
+  readonly KNOWLEDGE_QDRANT_COLLECTION: string;
+  readonly KNOWLEDGE_QDRANT_TIMEOUT_MS: number;
   readonly KNOWLEDGE_OBJECT_STORE_DRIVER: 'local' | 's3';
   readonly KNOWLEDGE_OBJECT_STORE_MAX_BYTES: number;
   readonly KNOWLEDGE_OBJECT_STORE_LOCAL_ROOT?: string;
@@ -129,9 +134,17 @@ export interface EnvironmentVariables {
   readonly KNOWLEDGE_DOCLING_API_KEY?: string;
   readonly KNOWLEDGE_DOCLING_TIMEOUT_MS: number;
   readonly KNOWLEDGE_DOCLING_MAX_RESPONSE_BYTES: number;
+  readonly KNOWLEDGE_TIKA_BASE_URL?: string;
+  readonly KNOWLEDGE_TIKA_TIMEOUT_MS?: number;
+  readonly KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES?: number;
   readonly KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS: readonly string[];
   readonly KNOWLEDGE_WEB_IMPORT_TIMEOUT_MS: number;
   readonly KNOWLEDGE_WEB_IMPORT_MAX_BYTES: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS: readonly string[];
+  readonly KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_MAX_PAGES: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE: boolean;
   readonly KNOWLEDGE_PERSISTENT_WRITES_ENABLED: boolean;
   readonly KNOWLEDGE_INGESTION_WORKER_ENABLED: boolean;
   readonly KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: number;
@@ -478,7 +491,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const agentRunWorkerConcurrency = parseInteger(
     source.AGENT_RUN_WORKER_CONCURRENCY,
     'AGENT_RUN_WORKER_CONCURRENCY',
-    1,
+    4,
     1,
     8,
   );
@@ -613,11 +626,31 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     source.KNOWLEDGE_EMBEDDING_DIMENSIONS,
     'KNOWLEDGE_EMBEDDING_DIMENSIONS',
     1_536,
-    1_536,
-    1_536,
-  ) as 1536;
+    1,
+    16_000,
+  );
   const knowledgeVectorSearchMode = parseKnowledgeVectorSearchMode(
     source.KNOWLEDGE_VECTOR_SEARCH_MODE,
+  );
+  const knowledgeSearchIndexDriver = parseKnowledgeSearchIndexDriver(
+    source.KNOWLEDGE_SEARCH_INDEX_DRIVER,
+  );
+  const knowledgeQdrantUrl = parseOptionalServiceOrigin(
+    source.KNOWLEDGE_QDRANT_URL,
+    'KNOWLEDGE_QDRANT_URL',
+    nodeEnvironment,
+  );
+  const knowledgeQdrantApiKey = parseOptionalSecret(
+    source.KNOWLEDGE_QDRANT_API_KEY,
+    'KNOWLEDGE_QDRANT_API_KEY',
+  );
+  const knowledgeQdrantCollection = parseQdrantCollection(source.KNOWLEDGE_QDRANT_COLLECTION);
+  const knowledgeQdrantTimeoutMs = parseInteger(
+    source.KNOWLEDGE_QDRANT_TIMEOUT_MS,
+    'KNOWLEDGE_QDRANT_TIMEOUT_MS',
+    10_000,
+    500,
+    120_000,
   );
   const knowledgeObjectStoreDriver = parseKnowledgeObjectStoreDriver(
     source.KNOWLEDGE_OBJECT_STORE_DRIVER,
@@ -627,7 +660,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     'KNOWLEDGE_OBJECT_STORE_MAX_BYTES',
     52_428_800,
     1_048_576,
-    536_870_912,
+    2_147_483_647,
   );
   const knowledgeObjectStoreLocalRoot = parseOptionalAbsolutePath(
     source.KNOWLEDGE_OBJECT_STORE_LOCAL_ROOT,
@@ -712,6 +745,25 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     1_024,
     134_217_728,
   );
+  const knowledgeTikaBaseUrl = parseOptionalServiceOrigin(
+    source.KNOWLEDGE_TIKA_BASE_URL,
+    'KNOWLEDGE_TIKA_BASE_URL',
+    nodeEnvironment,
+  );
+  const knowledgeTikaTimeoutMs = parseInteger(
+    source.KNOWLEDGE_TIKA_TIMEOUT_MS,
+    'KNOWLEDGE_TIKA_TIMEOUT_MS',
+    120_000,
+    1_000,
+    900_000,
+  );
+  const knowledgeTikaMaxResponseBytes = parseInteger(
+    source.KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES,
+    'KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES',
+    33_554_432,
+    1_024,
+    134_217_728,
+  );
   const knowledgeWebImportAllowedHosts = parseKnowledgeWebImportAllowedHosts(
     source.KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS,
   );
@@ -728,6 +780,34 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     5_242_880,
     1_024,
     20_971_520,
+  );
+  const knowledgeSourceSyncAllowedHosts = parseKnowledgeSourceSyncAllowedHosts(
+    source.KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS,
+  );
+  const knowledgeSourceSyncTimeoutMs = parseInteger(
+    source.KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS,
+    'KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS',
+    20_000,
+    500,
+    120_000,
+  );
+  const knowledgeSourceSyncManifestMaxBytes = parseInteger(
+    source.KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES,
+    'KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES',
+    2_097_152,
+    1_024,
+    10_485_760,
+  );
+  const knowledgeSourceSyncMaxPages = parseInteger(
+    source.KNOWLEDGE_SOURCE_SYNC_MAX_PAGES,
+    'KNOWLEDGE_SOURCE_SYNC_MAX_PAGES',
+    100,
+    1,
+    1_000,
+  );
+  const knowledgeSourceSyncAllowLocalFixture = parseBoolean(
+    source.KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE,
+    false,
   );
   const knowledgePersistentWritesEnabled = parseBoolean(
     source.KNOWLEDGE_PERSISTENT_WRITES_ENABLED,
@@ -1113,6 +1193,16 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   if (knowledgeRerankEnabled && !knowledgeSemanticSearchEnabled) {
     throw new Error('KNOWLEDGE_RERANK_ENABLED=true requires semantic search.');
   }
+  if (knowledgeSearchIndexDriver === 'qdrant' && knowledgeQdrantUrl === undefined) {
+    throw new Error('KNOWLEDGE_QDRANT_URL is required when KNOWLEDGE_SEARCH_INDEX_DRIVER=qdrant.');
+  }
+  if (
+    nodeEnvironment === 'production' &&
+    knowledgeSearchIndexDriver === 'qdrant' &&
+    knowledgeQdrantApiKey === undefined
+  ) {
+    throw new Error('KNOWLEDGE_QDRANT_API_KEY is required for Qdrant in production.');
+  }
   if (knowledgeIngestionRetryBaseMs > knowledgeIngestionRetryMaxMs) {
     throw new Error(
       'KNOWLEDGE_INGESTION_RETRY_BASE_MS must not exceed KNOWLEDGE_INGESTION_RETRY_MAX_MS.',
@@ -1209,6 +1299,9 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     throw new Error(
       'KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS must explicitly allow at least one host in production.',
     );
+  }
+  if (nodeEnvironment === 'production' && knowledgeSourceSyncAllowLocalFixture) {
+    throw new Error('KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE is forbidden in production.');
   }
 
   return {
@@ -1341,6 +1434,13 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     KNOWLEDGE_AI_TIMEOUT_MS: knowledgeAiTimeoutMs,
     KNOWLEDGE_EMBEDDING_DIMENSIONS: knowledgeEmbeddingDimensions,
     KNOWLEDGE_VECTOR_SEARCH_MODE: knowledgeVectorSearchMode,
+    KNOWLEDGE_SEARCH_INDEX_DRIVER: knowledgeSearchIndexDriver,
+    ...(knowledgeQdrantUrl === undefined ? {} : { KNOWLEDGE_QDRANT_URL: knowledgeQdrantUrl }),
+    ...(knowledgeQdrantApiKey === undefined
+      ? {}
+      : { KNOWLEDGE_QDRANT_API_KEY: knowledgeQdrantApiKey }),
+    KNOWLEDGE_QDRANT_COLLECTION: knowledgeQdrantCollection,
+    KNOWLEDGE_QDRANT_TIMEOUT_MS: knowledgeQdrantTimeoutMs,
     KNOWLEDGE_OBJECT_STORE_DRIVER: knowledgeObjectStoreDriver,
     KNOWLEDGE_OBJECT_STORE_MAX_BYTES: knowledgeObjectStoreMaxBytes,
     ...(knowledgeObjectStoreLocalRoot === undefined
@@ -1380,9 +1480,19 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
       : { KNOWLEDGE_DOCLING_API_KEY: knowledgeDoclingApiKey }),
     KNOWLEDGE_DOCLING_TIMEOUT_MS: knowledgeDoclingTimeoutMs,
     KNOWLEDGE_DOCLING_MAX_RESPONSE_BYTES: knowledgeDoclingMaxResponseBytes,
+    ...(knowledgeTikaBaseUrl === undefined
+      ? {}
+      : { KNOWLEDGE_TIKA_BASE_URL: knowledgeTikaBaseUrl }),
+    KNOWLEDGE_TIKA_TIMEOUT_MS: knowledgeTikaTimeoutMs,
+    KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES: knowledgeTikaMaxResponseBytes,
     KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS: knowledgeWebImportAllowedHosts,
     KNOWLEDGE_WEB_IMPORT_TIMEOUT_MS: knowledgeWebImportTimeoutMs,
     KNOWLEDGE_WEB_IMPORT_MAX_BYTES: knowledgeWebImportMaxBytes,
+    KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS: knowledgeSourceSyncAllowedHosts,
+    KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS: knowledgeSourceSyncTimeoutMs,
+    KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES: knowledgeSourceSyncManifestMaxBytes,
+    KNOWLEDGE_SOURCE_SYNC_MAX_PAGES: knowledgeSourceSyncMaxPages,
+    KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE: knowledgeSourceSyncAllowLocalFixture,
     KNOWLEDGE_PERSISTENT_WRITES_ENABLED: knowledgePersistentWritesEnabled,
     KNOWLEDGE_INGESTION_WORKER_ENABLED: knowledgeIngestionWorkerEnabled,
     KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: knowledgeIngestionPollIntervalMs,
@@ -1415,6 +1525,22 @@ function parseKnowledgeVectorSearchMode(value: unknown): 'exact' | 'hnsw' {
   const parsed = value ?? 'exact';
   if (parsed !== 'exact' && parsed !== 'hnsw') {
     throw new Error('KNOWLEDGE_VECTOR_SEARCH_MODE must be exact or hnsw.');
+  }
+  return parsed;
+}
+
+function parseKnowledgeSearchIndexDriver(value: unknown): 'postgres' | 'qdrant' {
+  const parsed = value ?? 'postgres';
+  if (parsed !== 'postgres' && parsed !== 'qdrant') {
+    throw new Error('KNOWLEDGE_SEARCH_INDEX_DRIVER must be postgres or qdrant.');
+  }
+  return parsed;
+}
+
+function parseQdrantCollection(value: unknown): string {
+  const parsed = parseOptionalString(value) ?? 'enterprise_knowledge_chunks_v1';
+  if (parsed.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(parsed)) {
+    throw new Error('KNOWLEDGE_QDRANT_COLLECTION is invalid.');
   }
   return parsed;
 }
@@ -2013,6 +2139,28 @@ function parseKnowledgeWebImportAllowedHosts(value: unknown): readonly string[] 
   if (hosts.some((host) => !hostnamePattern.test(host))) {
     throw new Error(
       'KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS entries must be exact DNS hostnames without wildcards.',
+    );
+  }
+  return hosts;
+}
+
+function parseKnowledgeSourceSyncAllowedHosts(value: unknown): readonly string[] {
+  const hosts = (parseOptionalString(value) ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase().replace(/\.$/u, ''))
+    .filter(Boolean);
+  if (hosts.length > 100 || new Set(hosts).size !== hosts.length) {
+    throw new Error(
+      'KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS must contain at most 100 unique exact hostnames.',
+    );
+  }
+  const dnsHostnamePattern =
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+  if (
+    hosts.some((host) => host !== 'localhost' && isIP(host) === 0 && !dnsHostnamePattern.test(host))
+  ) {
+    throw new Error(
+      'KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS entries must be exact hostnames or IP addresses without wildcards.',
     );
   }
   return hosts;

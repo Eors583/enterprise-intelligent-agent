@@ -21,8 +21,8 @@ const VERSION_ID = '00000000-0000-7000-8000-000000000201';
 
 beforeEach(() => pickerMock.mockReset());
 
-describe('release Evaluation Run selector integration', () => {
-  it('binds Role publication to the exact Agent Version identity', () => {
+describe('optional evaluation integration', () => {
+  it('does not require an Evaluation Run selector for Role publication', () => {
     const version = {
       id: VERSION_ID,
       version: 7,
@@ -45,37 +45,63 @@ describe('release Evaluation Run selector integration', () => {
       }),
     );
 
-    expect(pickerMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        subjectType: 'AGENT_VERSION',
-        subjectId: VERSION_ID,
-        subjectVersion: 7,
-      }),
-    );
+    expect(pickerMock).not.toHaveBeenCalled();
   });
 
-  it('binds Knowledge publication to the exact document-version identity', async () => {
+  it('keeps knowledge publication and technical repair actions out of the ordinary document UI', async () => {
     const dom = await renderInTestDom(
       createElement(KnowledgeDocumentsPanel, {
         item: knowledgeBase(),
+        organization: null,
+        organizationReady: false,
         onCreateDocument: vi.fn(),
         onEditDocument: vi.fn(),
         onChanged: vi.fn(),
       }),
     );
     try {
-      const publish = [...dom.container.querySelectorAll('button')].find(
-        (button) => button.textContent?.trim() === '发布',
+      const labels = [...dom.container.querySelectorAll('button')].map((button) =>
+        button.textContent?.trim(),
       );
-      expect(publish).not.toBeUndefined();
-      if (publish) await dom.click(publish);
-      expect(pickerMock).toHaveBeenCalledWith(
-        expect.objectContaining({
-          subjectType: 'KNOWLEDGE_VERSION',
-          subjectId: VERSION_ID,
-          subjectVersion: 2,
-        }),
-      );
+      expect(labels).not.toContain('发布');
+      expect(labels).not.toContain('重建向量');
+      expect(labels).not.toContain('重建关系');
+      expect(labels).not.toContain('查看切片');
+      expect(labels).not.toContain('结构化预览');
+      expect(labels).toContain('权限变更');
+      expect(pickerMock).not.toHaveBeenCalled();
+      expect(dom.container.textContent).toContain('当前可用');
+      expect(
+        dom.container
+          .querySelector('.knowledge-document-status-stack')
+          ?.querySelectorAll('.status-pill'),
+      ).toHaveLength(1);
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('shows only one status when the latest document version is already current', async () => {
+    const item = knowledgeBase();
+    const document = item.documents[0]!;
+    document.versions = document.versions.filter(
+      (version) => version.id === document.currentVersionId,
+    );
+    const dom = await renderInTestDom(
+      createElement(KnowledgeDocumentsPanel, {
+        item,
+        organization: null,
+        organizationReady: false,
+        onCreateDocument: vi.fn(),
+        onEditDocument: vi.fn(),
+        onChanged: vi.fn(),
+      }),
+    );
+    try {
+      const statusStack = dom.container.querySelector('.knowledge-document-status-stack');
+      expect(statusStack?.querySelectorAll('.status-pill')).toHaveLength(1);
+      expect(statusStack?.textContent).toContain('当前可用 v1');
+      expect(statusStack?.textContent).not.toContain('最新 v1 · 可用');
     } finally {
       await dom.cleanup();
     }
@@ -89,15 +115,37 @@ function knowledgeBase(): KnowledgeBase {
     name: '销售知识库',
     description: null,
     status: 'ACTIVE',
+    space: {
+      type: 'DEPARTMENT',
+      targetId: '00000000-0000-7000-8000-000000000099',
+      targetName: '销售部',
+    },
     version: 1,
+    retrievalConfig: {
+      mode: 'HYBRID',
+      topK: 8,
+      scoreThreshold: 0.08,
+      semanticWeight: 0.7,
+      keywordWeight: 0.3,
+      rerankEnabled: true,
+      relationshipRetrievalEnabled: true,
+      maxChunksPerDocument: 3,
+    },
+    chunkingConfig: { targetTokens: 500, overlapTokens: 80 },
+    activeEmbeddingIndexVersion: null,
+    pendingEmbeddingIndexVersion: null,
     orgUnitIds: [],
     orgUnitScopes: [],
+    memberUserIds: [],
     documentCount: 1,
+    folders: [],
     updatedAt: '2026-07-28T00:00:00.000Z',
     documents: [
       {
         id: '00000000-0000-7000-8000-000000000100',
         knowledgeBaseId: '00000000-0000-7000-8000-000000000001',
+        folderId: null,
+        folderPath: null,
         title: '销售手册',
         sourceType: 'FILE',
         mimeType: 'application/pdf',

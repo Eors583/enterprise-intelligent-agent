@@ -3,6 +3,7 @@ import type {
   AiEvaluationDataset,
   AiEvaluationRun,
   AiEvaluationRunner,
+  KnowledgeRetrievalBenchmarkRunSummary,
 } from '@enterprise/contracts';
 import { useEffect, useState, type ReactNode } from 'react';
 
@@ -17,6 +18,7 @@ import {
 } from './api';
 import { BadCaseGovernancePanel } from './BadCaseGovernancePanel';
 import { DatasetGovernancePanel } from './DatasetGovernancePanel';
+import { KnowledgeRetrievalQualityDashboard } from './KnowledgeRetrievalQualityDashboard';
 import { RunGovernancePanel } from './RunGovernancePanel';
 import './ai-evaluation.css';
 
@@ -25,6 +27,8 @@ export function AiEvaluationPage(): ReactNode {
   const [runs, setRuns] = useState<readonly AiEvaluationRun[]>([]);
   const [runners, setRunners] = useState<readonly AiEvaluationRunner[]>([]);
   const [badCases, setBadCases] = useState<readonly AiEvaluationBadCase[]>([]);
+  const [latestRetrievalRun, setLatestRetrievalRun] =
+    useState<KnowledgeRetrievalBenchmarkRunSummary | null>(null);
   const [loading, setLoading] = useState(true);
   const [reloadKey, setReloadKey] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
@@ -62,7 +66,7 @@ export function AiEvaluationPage(): ReactNode {
       <header className="page-header">
         <div>
           <span className="eyebrow">AI EVALUATION GOVERNANCE</span>
-          <h1>AI 评测与发布门禁</h1>
+          <h1>AI 质量评测</h1>
           <p>
             用版本化数据集、可信证据、签名
             Runner、独立验证和快照一致性管理智能体与知识发布。此页面不生成假分数，也不会把用户反馈直接升级为可信证据。
@@ -100,9 +104,13 @@ export function AiEvaluationPage(): ReactNode {
         </article>
       </div>
 
+      <KnowledgeRetrievalQualityDashboard run={latestRetrievalRun} />
+
       <DatasetGovernancePanel
         datasets={datasets}
+        refreshToken={reloadKey}
         reloadDatasets={reload}
+        onLatestRetrievalRunChange={setLatestRetrievalRun}
         onNotice={setNotice}
         onError={setError}
       />
@@ -115,6 +123,7 @@ export function AiEvaluationPage(): ReactNode {
       />
       <BadCaseGovernancePanel
         badCases={badCases}
+        refreshToken={reloadKey}
         reload={reload}
         onNotice={setNotice}
         onError={setError}

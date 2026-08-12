@@ -9,6 +9,30 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./admin": {
+      "types": "./dist/admin.d.ts",
+      "import": "./dist/admin.js"
+    },
+    "./api-error": {
+      "types": "./dist/api-error.d.ts",
+      "import": "./dist/api-error.js"
+    },
+    "./auth": {
+      "types": "./dist/auth.d.ts",
+      "import": "./dist/auth.js"
+    },
+    "./auth-session": {
+      "types": "./dist/auth-session.d.ts",
+      "import": "./dist/auth-session.js"
+    },
+    "./identity-governance": {
+      "types": "./dist/identity-governance.d.ts",
+      "import": "./dist/identity-governance.js"
+    },
+    "./personal-manual": {
+      "types": "./dist/personal-manual.d.ts",
+      "import": "./dist/personal-manual.js"
     }
   },
   "files": [

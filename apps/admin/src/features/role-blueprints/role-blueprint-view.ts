@@ -35,7 +35,7 @@ export function roleVersionActions(
     canSubmit: version.status === 'DRAFT',
     canReview: inReview && version.createdById !== currentUserId,
     reviewBlockedForAuthor: inReview && version.createdById === currentUserId,
-    canPublish: version.status === 'TESTING' && version.reviewStatus === 'APPROVED',
+    canPublish: version.status === 'DRAFT' || version.status === 'TESTING',
     canRetire: version.status === 'PUBLISHED',
     canRollback:
       (version.status === 'PUBLISHED' || version.status === 'RETIRED') &&
@@ -77,9 +77,9 @@ export function roleVersionStageDescription(version: RoleVersion): string {
   if (version.status === 'DRAFT' && version.reviewStatus === 'CHANGES_REQUESTED') {
     return '审核人已要求修改；编辑草稿后可重新提交。';
   }
-  if (version.status === 'DRAFT') return '尚未进入审核，可继续编辑。';
+  if (version.status === 'DRAFT') return '可继续编辑，也可直接发布用于初版验证。';
   if (version.status === 'TESTING' && version.reviewStatus === 'IN_REVIEW') {
-    return '等待另一位企业所有者或管理员审核。';
+    return '审核可继续进行，也可直接发布用于初版验证。';
   }
   if (version.status === 'TESTING' && version.reviewStatus === 'APPROVED') {
     return '独立审核已通过，可以发布。';
@@ -244,7 +244,10 @@ export function roleBlueprintErrorMessage(error: unknown): string {
       'Only an in-review Role Version can be reviewed.',
       '只有处于待审核状态的版本可以审批或退回。请刷新后重试。',
     ],
-    ['Only an approved Role Version can be published.', '只有通过独立审核的版本可以发布。'],
+    [
+      'Only a draft or testing Role Version can be published.',
+      '只有草稿或测试中的版本可以发布，请刷新后重试。',
+    ],
     ['Only a published Role Version can be retired.', '只有已发布版本可以停用。'],
     [
       'A draft or testing Role Version cannot be a rollback source.',

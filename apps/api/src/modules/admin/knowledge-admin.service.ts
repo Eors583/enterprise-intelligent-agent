@@ -8,7 +8,10 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import {
+  defineKnowledgePublicEvent,
+  knowledgeGovernanceReviewStatusSchema,
   type CreateKnowledgeBaseRequest,
+  type CreateKnowledgeEmbeddingIndexVersionRequest,
   type CreateKnowledgeDocumentRequest,
   type KnowledgeBase,
   type KnowledgeBaseIndexReadiness,
@@ -19,34 +22,43 @@ import {
   type KnowledgeDocumentGovernancePolicy,
   type KnowledgeDocumentSummary,
   type KnowledgeDocumentVersionDetail,
+  type EnsureKnowledgeFoldersRequest,
+  type KnowledgeFolderListResponse,
+  type InspectKnowledgeUploadRequest,
+  type KnowledgeUploadInspection,
   type KnowledgeParseReviewQueueResponse,
   type KnowledgeEmbeddingRebuildResponse,
+  type KnowledgeEmbeddingIndexVersion,
+  type KnowledgeEmbeddingIndexVersionListResponse,
   type KnowledgeGraphOverview,
   type KnowledgeGraphQuery,
   type KnowledgeGraphRebuildResponse,
   type KnowledgeGraphResponse,
+  type KnowledgeStructuredDocumentPreview,
   type PublishKnowledgeDocumentVersionRequest,
   type KnowledgeRetrievalTestRequest,
   type KnowledgeRetrievalTestResponse,
+  type KnowledgeRetrievalConfig,
+  type KnowledgeSpaceSelection,
+  type KnowledgeChunkingConfig,
   type RollbackKnowledgeDocumentVersionRequest,
   type ImportKnowledgeWebDocumentRequest,
   type ReviewKnowledgeDocumentParseRequest,
   type ReviewKnowledgeDocumentGovernanceRequest,
   type UpdateKnowledgeDocumentVersionGovernanceRequest,
+  type UpdateKnowledgeDocumentAccessRequest,
   type UpdateKnowledgeBaseRequest,
   type UpdateKnowledgeDocumentRequest,
 } from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
 
 import { AdminPrismaService } from '../../database/admin-prisma.service.js';
-import { AiEvaluationService } from '../ai-evaluation/ai-evaluation.service.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 import {
   activateKnowledgeGraphProjection,
-  KnowledgeIngestionService,
   persistKnowledgeGraphProjection,
 } from '../knowledge-ingestion/application/knowledge-ingestion.service.js';
 import { projectKnowledgeGraph } from '../knowledge-ingestion/domain/knowledge-graph.projector.js';
-import { KnowledgeRetrievalService } from '../knowledge-retrieval/knowledge-retrieval.service.js';
 import {
   KnowledgeAiRuntimeClient,
   type KnowledgeRuntimeCapabilities,
@@ -144,9 +156,7 @@ export class KnowledgeAdminService {
   constructor(
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
-    @Inject(AiEvaluationService) private readonly evaluations: AiEvaluationService,
-    @Inject(KnowledgeIngestionService) private readonly ingestion: KnowledgeIngestionService,
-    @Inject(KnowledgeRetrievalService) private readonly retrieval: KnowledgeRetrievalService,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
     @Inject(KnowledgeAiRuntimeClient) private readonly semantic: KnowledgeAiRuntimeClient,
   ) {}
 
@@ -162,11 +172,66 @@ export class KnowledgeAdminService {
     });
   }
 
+  async ensureFolders(
+    knowledgeBaseId: string,
+    request: EnsureKnowledgeFoldersRequest,
+  ): Promise<KnowledgeFolderListResponse> {
+    const principal = this.access.requireKnowledgeWrite();
+    const requestedPaths = [...new Set(request.paths.map(normalizeKnowledgeFolderPath))].sort(
+      (left, right) =>
+        left.split('/').length - right.split('/').length || left.localeCompare(right),
+    );
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      for (const requestedPath of requestedPaths) {
+        let parentId: string | null = null;
+        const segments = requestedPath.split('/');
+        for (let index = 0; index < segments.length; index += 1) {
+          const path = segments.slice(0, index + 1).join('/');
+          let folder = await transaction.knowledgeFolder.findFirst({
+            where: { tenantId: principal.tenantId, knowledgeBaseId, path },
+            select: { id: true },
+          });
+          folder ??= await transaction.knowledgeFolder.create({
+            data: {
+              tenantId: principal.tenantId,
+              knowledgeBaseId,
+              parentId,
+              name: segments[index]!,
+              path,
+              createdById: principal.userId,
+            },
+            select: { id: true },
+          });
+          parentId = folder.id;
+        }
+      }
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.knowledge-folder.ensured',
+        'knowledge_base',
+        knowledgeBaseId,
+        { paths: requestedPaths },
+      );
+      const items = await transaction.knowledgeFolder.findMany({
+        where: { tenantId: principal.tenantId, knowledgeBaseId },
+        orderBy: [{ path: 'asc' }, { id: 'asc' }],
+        include: { _count: { select: { documents: true, children: true } } },
+      });
+      return { items: items.map(mapKnowledgeFolder) };
+    });
+  }
+
   async readiness(knowledgeBaseId: string): Promise<KnowledgeBaseIndexReadiness> {
     const principal = this.access.requireKnowledgeWrite();
     const capabilities = await this.safeKnowledgeCapabilities(principal.tenantId);
     return this.prisma.withTenant(principal.tenantId, async (transaction) => {
-      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      const knowledgeBase = await transaction.knowledgeBase.findFirst({
+        where: { tenantId: principal.tenantId, id: knowledgeBaseId },
+        select: { activeEmbeddingIndexVersion: true },
+      });
+      if (knowledgeBase === null) throw knowledgeBaseNotFound();
       const documents = await transaction.knowledgeDocument.findMany({
         where: { tenantId: principal.tenantId, knowledgeBaseId },
         orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
@@ -205,15 +270,15 @@ export class KnowledgeAdminService {
           ? [document.currentVersion.id]
           : [],
       );
-      const embeddingModel = capabilities.embedding.model;
+      const activeEmbeddingIndexVersionId = knowledgeBase.activeEmbeddingIndexVersion?.id ?? null;
       const embeddedChunkCount =
-        embeddingModel !== null && currentVersionIds.length > 0
+        activeEmbeddingIndexVersionId !== null && currentVersionIds.length > 0
           ? await transaction.knowledgeChunk.count({
               where: {
                 tenantId: principal.tenantId,
                 knowledgeBaseId,
                 documentVersionId: { in: currentVersionIds },
-                embeddings: { some: { embeddingModel } },
+                embeddings: { some: { embeddingIndexVersionId: activeEmbeddingIndexVersionId } },
               },
             })
           : 0;
@@ -379,8 +444,7 @@ export class KnowledgeAdminService {
         evidenceCoverage: readiness.evidenceCoverage,
         entityTypes: entityTypes.map((row) => ({ type: row.key, count: row.count })),
         relationTypes: relationTypes.map((row) => ({ predicate: row.key, count: row.count })),
-        strongRetrievalReady: readiness.strongRetrievalReady,
-        readinessBlockers: [...readiness.readinessBlockers],
+        diagnostics: [...readiness.diagnostics],
         lastBuiltAt: overview.last_built_at?.toISOString() ?? null,
       };
     });
@@ -585,19 +649,23 @@ export class KnowledgeAdminService {
 
   async create(request: CreateKnowledgeBaseRequest): Promise<KnowledgeBase> {
     const principal = this.access.requireKnowledgeWrite();
-    if (request.status === 'ACTIVE') {
-      throw new ConflictException(
-        'A new knowledge base must remain draft until enterprise readiness checks pass.',
-      );
-    }
+    const capabilities = await this.safeKnowledgeCapabilities(principal.tenantId);
     try {
       return await this.prisma.withTenant(principal.tenantId, async (transaction) => {
         const scopes = normalizeKnowledgeScopes(request.orgUnitScopes, request.orgUnitIds);
+        const memberUserIds = uniqueIds(request.memberUserIds ?? []);
+        const space = await resolveKnowledgeSpace(
+          transaction,
+          principal.tenantId,
+          principal.userId,
+          request.space ?? { type: 'COMPANY' },
+        );
         await this.requireOrgUnits(
           transaction,
           principal.tenantId,
           scopes.map((scope) => scope.orgUnitId),
         );
+        await this.requireKnowledgeAccessMembers(transaction, principal.tenantId, memberUserIds);
         await lockKnowledgeBaseKeyspace(transaction, principal.tenantId);
         const knowledgeBaseKey = await resolveKnowledgeBaseKey(
           transaction,
@@ -612,10 +680,53 @@ export class KnowledgeAdminService {
             name: request.name,
             description: request.description ?? null,
             status: request.status,
+            spaceType: space.type,
+            spaceTargetId: space.targetId,
+            spaceTargetName: space.targetName,
+            ...(request.retrievalConfig === undefined
+              ? {}
+              : knowledgeRetrievalConfigData(request.retrievalConfig)),
+            ...(request.chunkingConfig === undefined
+              ? {}
+              : knowledgeChunkingConfigData(request.chunkingConfig)),
             createdById: principal.userId,
           },
           select: { id: true, key: true },
         });
+        let activeEmbeddingIndexVersionId: string | null = null;
+        if (
+          capabilities.embedding.status === 'READY' &&
+          isEmbeddingProvider(capabilities.embedding.provider) &&
+          capabilities.embedding.model !== null &&
+          capabilities.embedding.dimensions !== null
+        ) {
+          const activeIndex = await transaction.knowledgeEmbeddingIndexVersion.create({
+            data: {
+              tenantId: principal.tenantId,
+              knowledgeBaseId: knowledgeBase.id,
+              version: 1,
+              status: 'ACTIVE',
+              provider: capabilities.embedding.provider,
+              model: capabilities.embedding.model,
+              dimensions: capabilities.embedding.dimensions,
+              distance: 'COSINE',
+              normalization: 'L2',
+              collectionName: embeddingCollectionName(
+                knowledgeBase.id,
+                1,
+                capabilities.embedding.dimensions,
+              ),
+              createdById: principal.userId,
+              activatedAt: new Date(),
+            },
+            select: { id: true },
+          });
+          activeEmbeddingIndexVersionId = activeIndex.id;
+          await transaction.knowledgeBase.update({
+            where: { id: knowledgeBase.id },
+            data: { activeEmbeddingIndexVersionId },
+          });
+        }
         const ontologyId = randomUUID();
         const ontologyVersionId = randomUUID();
         const bootstrapSchemaHash = createHash('sha256')
@@ -694,6 +805,15 @@ export class KnowledgeAdminService {
             })),
           });
         }
+        if (memberUserIds.length > 0) {
+          await transaction.knowledgeBaseMember.createMany({
+            data: memberUserIds.map((userId) => ({
+              tenantId: principal.tenantId,
+              knowledgeBaseId: knowledgeBase.id,
+              userId,
+            })),
+          });
+        }
         await recordAdminAudit(
           transaction,
           principal,
@@ -702,10 +822,17 @@ export class KnowledgeAdminService {
           knowledgeBase.id,
           {
             key: knowledgeBase.key,
+            space: {
+              type: space.type,
+              targetId: space.targetId,
+              targetName: space.targetName,
+            },
             orgUnitScopes: scopes,
+            memberUserIds,
             draftOntologyId: ontologyId,
             draftOntologyVersionId: ontologyVersionId,
             ontologyStatus: 'DRAFT',
+            activeEmbeddingIndexVersionId,
           },
         );
         return mapKnowledgeBase(
@@ -720,58 +847,225 @@ export class KnowledgeAdminService {
     }
   }
 
-  async update(id: string, request: UpdateKnowledgeBaseRequest): Promise<KnowledgeBase> {
+  async listEmbeddingIndexVersions(
+    knowledgeBaseId: string,
+  ): Promise<KnowledgeEmbeddingIndexVersionListResponse> {
     const principal = this.access.requireKnowledgeWrite();
-    const currentStatus = await this.prisma.withTenant(principal.tenantId, (transaction) =>
-      transaction.knowledgeBase.findFirst({
-        where: { id, tenantId: principal.tenantId },
-        select: { status: true },
-      }),
-    );
-    if (currentStatus === null) throw knowledgeBaseNotFound();
-    if (request.status === 'ACTIVE' && currentStatus.status !== 'ACTIVE') {
-      const readiness = await this.readiness(id);
-      if (!readiness.activationAllowed) {
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      const items = await transaction.knowledgeEmbeddingIndexVersion.findMany({
+        where: { tenantId: principal.tenantId, knowledgeBaseId },
+        orderBy: [{ version: 'desc' }, { id: 'desc' }],
+      });
+      return { items: items.map(mapKnowledgeEmbeddingIndexVersion) };
+    });
+  }
+
+  async createEmbeddingIndexVersion(
+    knowledgeBaseId: string,
+    request: CreateKnowledgeEmbeddingIndexVersionRequest,
+  ): Promise<KnowledgeEmbeddingIndexVersion> {
+    const principal = this.access.requireKnowledgeWrite();
+    const capabilities = await this.safeKnowledgeCapabilities(principal.tenantId);
+    if (
+      capabilities.embedding.status !== 'READY' ||
+      !isEmbeddingProvider(capabilities.embedding.provider) ||
+      capabilities.embedding.model === null ||
+      capabilities.embedding.dimensions === null
+    ) {
+      throw new ConflictException('The configured AI Runtime embedding provider is not ready.');
+    }
+    if (
+      capabilities.embedding.provider !== request.provider ||
+      capabilities.embedding.model !== request.model ||
+      capabilities.embedding.dimensions !== request.dimensions
+    ) {
+      throw new ConflictException(
+        'The requested embedding profile does not match the profile currently served by AI Runtime.',
+      );
+    }
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await lockKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      const knowledgeBase = await transaction.knowledgeBase.findFirst({
+        where: { tenantId: principal.tenantId, id: knowledgeBaseId },
+        include: {
+          activeEmbeddingIndexVersion: true,
+          pendingEmbeddingIndexVersion: true,
+        },
+      });
+      if (knowledgeBase === null) throw knowledgeBaseNotFound();
+      if (knowledgeBase.pendingEmbeddingIndexVersion !== null) {
         throw new ConflictException(
-          `Knowledge base enterprise readiness checks failed: ${readiness.activationBlockers.join(', ')}.`,
+          'Finish or activate the existing embedding index rebuild before creating another version.',
         );
       }
-      // Relationship expansion is an optional retrieval enhancement. A governed semantic
-      // index may be activated while its graph is still being curated; graph readiness
-      // remains visible to administrators as an independent quality signal.
-    }
+      const active = knowledgeBase.activeEmbeddingIndexVersion;
+      if (
+        active !== null &&
+        active.provider === request.provider &&
+        active.model === request.model &&
+        active.dimensions === request.dimensions &&
+        active.distance === request.distance &&
+        active.normalization === request.normalization
+      ) {
+        throw new ConflictException('This embedding profile is already active.');
+      }
+      const aggregate = await transaction.knowledgeEmbeddingIndexVersion.aggregate({
+        where: { tenantId: principal.tenantId, knowledgeBaseId },
+        _max: { version: true },
+      });
+      const version = (aggregate._max.version ?? 0) + 1;
+      const created = await transaction.knowledgeEmbeddingIndexVersion.create({
+        data: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          version,
+          status: 'BUILDING',
+          provider: request.provider,
+          model: request.model,
+          dimensions: request.dimensions,
+          distance: request.distance,
+          normalization: request.normalization,
+          collectionName: embeddingCollectionName(knowledgeBaseId, version, request.dimensions),
+          createdById: principal.userId,
+        },
+      });
+      await transaction.knowledgeBase.update({
+        where: { id: knowledgeBaseId },
+        data: {
+          pendingEmbeddingIndexVersionId: created.id,
+          version: { increment: 1 },
+        },
+      });
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.knowledge-base.embedding-index-version.created',
+        'knowledge_embedding_index_version',
+        created.id,
+        {
+          knowledgeBaseId,
+          version,
+          provider: request.provider,
+          model: request.model,
+          dimensions: request.dimensions,
+          collectionName: created.collectionName,
+          rebuildRequired: true,
+        },
+      );
+      return mapKnowledgeEmbeddingIndexVersion(created);
+    });
+  }
+
+  async activateEmbeddingIndexVersion(
+    knowledgeBaseId: string,
+    embeddingIndexVersionId: string,
+  ): Promise<KnowledgeBase> {
+    const principal = this.access.requireKnowledgeWrite();
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await lockKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      const knowledgeBase = await transaction.knowledgeBase.findFirst({
+        where: { tenantId: principal.tenantId, id: knowledgeBaseId },
+        select: {
+          activeEmbeddingIndexVersionId: true,
+          pendingEmbeddingIndexVersionId: true,
+        },
+      });
+      if (knowledgeBase === null) throw knowledgeBaseNotFound();
+      if (knowledgeBase.pendingEmbeddingIndexVersionId !== embeddingIndexVersionId) {
+        throw new ConflictException('Only the current pending embedding index can be activated.');
+      }
+      const target = await transaction.knowledgeEmbeddingIndexVersion.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          id: embeddingIndexVersionId,
+          status: 'BUILDING',
+        },
+      });
+      if (target === null) throw new ConflictException('The embedding index is not buildable.');
+      const [coverage] = await transaction.$queryRaw<
+        Array<{ readonly chunk_count: number; readonly embedded_count: number }>
+      >(Prisma.sql`
+        SELECT
+          count(chunk."id")::int AS chunk_count,
+          count(embedding."id")::int AS embedded_count
+        FROM public."knowledge_documents" document
+        JOIN public."knowledge_chunks" chunk
+          ON chunk."tenant_id" = document."tenant_id"
+         AND chunk."knowledge_base_id" = document."knowledge_base_id"
+         AND chunk."document_id" = document."id"
+         AND chunk."document_version_id" = document."current_version_id"
+        LEFT JOIN public."knowledge_chunk_embeddings" embedding
+          ON embedding."tenant_id" = chunk."tenant_id"
+         AND embedding."chunk_id" = chunk."id"
+         AND embedding."embedding_index_version_id" = ${embeddingIndexVersionId}::uuid
+         AND embedding."content_hash" = chunk."content_hash"
+        WHERE document."tenant_id" = ${principal.tenantId}::uuid
+          AND document."knowledge_base_id" = ${knowledgeBaseId}::uuid
+          AND document."status" = 'READY'
+      `);
+      if (coverage === undefined || coverage.embedded_count !== coverage.chunk_count) {
+        throw new ConflictException(
+          `Embedding rebuild is incomplete (${coverage?.embedded_count ?? 0}/${coverage?.chunk_count ?? 0} current chunks).`,
+        );
+      }
+      const activatedAt = new Date();
+      if (
+        knowledgeBase.activeEmbeddingIndexVersionId !== null &&
+        knowledgeBase.activeEmbeddingIndexVersionId !== target.id
+      ) {
+        await transaction.knowledgeEmbeddingIndexVersion.update({
+          where: { id: knowledgeBase.activeEmbeddingIndexVersionId },
+          data: { status: 'RETIRED', retiredAt: activatedAt },
+        });
+      }
+      await transaction.knowledgeEmbeddingIndexVersion.update({
+        where: { id: target.id },
+        data: { status: 'ACTIVE', activatedAt, retiredAt: null, failureCode: null },
+      });
+      await transaction.knowledgeBase.update({
+        where: { id: knowledgeBaseId },
+        data: {
+          activeEmbeddingIndexVersionId: target.id,
+          pendingEmbeddingIndexVersionId: null,
+          version: { increment: 1 },
+        },
+      });
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.knowledge-base.embedding-index-version.activated',
+        'knowledge_embedding_index_version',
+        target.id,
+        {
+          knowledgeBaseId,
+          version: target.version,
+          model: target.model,
+          dimensions: target.dimensions,
+          chunkCount: coverage.chunk_count,
+          previousIndexVersionId: knowledgeBase.activeEmbeddingIndexVersionId,
+        },
+      );
+      return mapKnowledgeBase(
+        await this.findKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId),
+      );
+    });
+  }
+
+  async update(id: string, request: UpdateKnowledgeBaseRequest): Promise<KnowledgeBase> {
+    const principal = this.access.requireKnowledgeWrite();
     return this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const current = await transaction.knowledgeBase.findFirst({
         where: { id, tenantId: principal.tenantId },
       });
       if (current === null) throw knowledgeBaseNotFound();
-      if (request.status === 'ACTIVE' && current.status !== 'ACTIVE') {
-        const publishableDocument = await transaction.knowledgeDocument.findFirst({
-          where: {
-            tenantId: principal.tenantId,
-            knowledgeBaseId: id,
-            status: 'READY',
-            currentVersionId: { not: null },
-            currentVersion: {
-              is: {
-                status: 'READY',
-                chunks: { some: {} },
-              },
-            },
-          },
-          select: { id: true },
-        });
-        if (publishableDocument === null) {
-          throw new ConflictException(
-            'A knowledge base requires at least one ready, indexed current document before activation.',
-          );
-        }
-      }
-
       const requestedScopes =
         request.orgUnitScopes !== undefined || request.orgUnitIds !== undefined
           ? normalizeKnowledgeScopes(request.orgUnitScopes, request.orgUnitIds ?? [])
           : null;
+      const requestedMemberUserIds =
+        request.memberUserIds === undefined ? null : uniqueIds(request.memberUserIds);
       if (requestedScopes !== null) {
         await this.requireOrgUnits(
           transaction,
@@ -779,6 +1073,22 @@ export class KnowledgeAdminService {
           requestedScopes.map((scope) => scope.orgUnitId),
         );
       }
+      if (requestedMemberUserIds !== null) {
+        await this.requireKnowledgeAccessMembers(
+          transaction,
+          principal.tenantId,
+          requestedMemberUserIds,
+        );
+      }
+      const requestedSpace =
+        request.space === undefined
+          ? null
+          : await resolveKnowledgeSpace(
+              transaction,
+              principal.tenantId,
+              principal.userId,
+              request.space,
+            );
       const result = await transaction.knowledgeBase.updateMany({
         where: {
           id,
@@ -790,6 +1100,19 @@ export class KnowledgeAdminService {
           ...(request.name === undefined ? {} : { name: request.name }),
           ...(request.description === undefined ? {} : { description: request.description }),
           ...(request.status === undefined ? {} : { status: request.status }),
+          ...(requestedSpace === null
+            ? {}
+            : {
+                spaceType: requestedSpace.type,
+                spaceTargetId: requestedSpace.targetId,
+                spaceTargetName: requestedSpace.targetName,
+              }),
+          ...(request.retrievalConfig === undefined
+            ? {}
+            : knowledgeRetrievalConfigData(request.retrievalConfig)),
+          ...(request.chunkingConfig === undefined
+            ? {}
+            : knowledgeChunkingConfigData(request.chunkingConfig)),
         },
       });
       if (result.count !== 1) throw optimisticConflict('knowledge base');
@@ -809,6 +1132,20 @@ export class KnowledgeAdminService {
           });
         }
       }
+      if (requestedMemberUserIds !== null) {
+        await transaction.knowledgeBaseMember.deleteMany({
+          where: { tenantId: principal.tenantId, knowledgeBaseId: id },
+        });
+        if (requestedMemberUserIds.length > 0) {
+          await transaction.knowledgeBaseMember.createMany({
+            data: requestedMemberUserIds.map((userId) => ({
+              tenantId: principal.tenantId,
+              knowledgeBaseId: id,
+              userId,
+            })),
+          });
+        }
+      }
 
       const updated = await this.findKnowledgeBase(transaction, principal.tenantId, id);
       await recordAdminAudit(
@@ -817,7 +1154,25 @@ export class KnowledgeAdminService {
         'admin.knowledge-base.updated',
         'knowledge_base',
         id,
-        { previousVersion: current.version, version: updated.version },
+        {
+          previousVersion: current.version,
+          version: updated.version,
+          previousSpace: {
+            type: current.spaceType,
+            targetId: current.spaceTargetId,
+            targetName: current.spaceTargetName,
+          },
+          space: {
+            type: requestedSpace?.type ?? current.spaceType,
+            targetId: requestedSpace?.targetId ?? current.spaceTargetId,
+            targetName: requestedSpace?.targetName ?? current.spaceTargetName,
+          },
+          retrievalConfigChanged: request.retrievalConfig !== undefined,
+          chunkingConfigChanged: request.chunkingConfig !== undefined,
+          accessScopeChanged: requestedScopes !== null || requestedMemberUserIds !== null,
+          ...(requestedScopes === null ? {} : { orgUnitScopes: requestedScopes }),
+          ...(requestedMemberUserIds === null ? {} : { memberUserIds: requestedMemberUserIds }),
+        },
       );
       return mapKnowledgeBase(updated);
     });
@@ -836,7 +1191,7 @@ export class KnowledgeAdminService {
     if (request.status === 'READY' && content.trim().length === 0) {
       throw new BadRequestException('An indexed text document must contain searchable text.');
     }
-    const documentId = await this.ingestion.createTextVersion({
+    const documentId = await this.knowledge.createTextVersion({
       knowledgeBaseId,
       title: request.title,
       sourceType: request.sourceType,
@@ -854,19 +1209,128 @@ export class KnowledgeAdminService {
       readonly bytes: Buffer;
       readonly mimeType: string;
       readonly fileName: string;
+      readonly folderId?: string | null;
       readonly changeSummary?: string;
       readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
   ): Promise<KnowledgeDocument> {
-    const documentId = await this.ingestion.upload({ knowledgeBaseId, ...input });
+    const duplicate = await this.inspectUpload(knowledgeBaseId, {
+      fileName: input.fileName,
+      size: input.bytes.byteLength,
+      sha256: createHash('sha256').update(input.bytes).digest('hex'),
+      folderId: input.folderId ?? null,
+    });
+    if (duplicate.decision === 'EXACT_DUPLICATE' && duplicate.matchingDocument !== null) {
+      return this.getDocument(knowledgeBaseId, duplicate.matchingDocument.id);
+    }
+    const documentId = await this.knowledge.upload({ knowledgeBaseId, ...input });
     return this.getDocument(knowledgeBaseId, documentId);
+  }
+
+  async inspectUpload(
+    knowledgeBaseId: string,
+    request: InspectKnowledgeUploadRequest,
+  ): Promise<KnowledgeUploadInspection> {
+    const principal = this.access.requireKnowledgeWrite();
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      if (request.documentId !== undefined) {
+        const intendedDocument = await transaction.knowledgeDocument.findFirst({
+          where: {
+            tenantId: principal.tenantId,
+            knowledgeBaseId,
+            id: request.documentId,
+            status: { not: 'ARCHIVED' },
+          },
+          select: { id: true },
+        });
+        if (intendedDocument === null) throw knowledgeDocumentNotFound();
+      }
+      if (request.folderId !== undefined && request.folderId !== null) {
+        const folder = await transaction.knowledgeFolder.findFirst({
+          where: { tenantId: principal.tenantId, knowledgeBaseId, id: request.folderId },
+          select: { id: true },
+        });
+        if (folder === null) throw new BadRequestException('The knowledge folder was not found.');
+      }
+      const exact = await transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          sourceType: 'FILE',
+          status: 'READY',
+          objectSha256: request.sha256,
+          ...(request.documentId === undefined ? {} : { documentId: request.documentId }),
+          document: {
+            status: { not: 'ARCHIVED' },
+            ...(request.documentId === undefined && request.folderId !== undefined
+              ? { folderId: request.folderId }
+              : {}),
+          },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: {
+          versionNumber: true,
+          document: {
+            select: {
+              id: true,
+              title: true,
+              fileName: true,
+              documentVersion: true,
+              updatedAt: true,
+            },
+          },
+        },
+      });
+      if (exact !== null) {
+        return {
+          decision: 'EXACT_DUPLICATE',
+          matchingDocument: uploadMatch(exact.document, exact.versionNumber),
+        };
+      }
+      const sameName = await transaction.knowledgeDocumentVersion.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          sourceType: 'FILE',
+          fileName: { equals: request.fileName, mode: 'insensitive' },
+          ...(request.documentId === undefined ? {} : { documentId: request.documentId }),
+          document: {
+            status: { not: 'ARCHIVED' },
+            ...(request.documentId === undefined && request.folderId !== undefined
+              ? { folderId: request.folderId }
+              : {}),
+          },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        select: {
+          versionNumber: true,
+          document: {
+            select: {
+              id: true,
+              title: true,
+              fileName: true,
+              documentVersion: true,
+              updatedAt: true,
+            },
+          },
+        },
+      });
+      if (sameName !== null) {
+        return {
+          decision: 'NEW_VERSION_CANDIDATE',
+          matchingDocument: uploadMatch(sameName.document, sameName.versionNumber),
+        };
+      }
+      return { decision: 'NEW_DOCUMENT', matchingDocument: null };
+    });
   }
 
   async importWebDocument(
     knowledgeBaseId: string,
     request: ImportKnowledgeWebDocumentRequest,
   ): Promise<KnowledgeDocument> {
-    const documentId = await this.ingestion.importWeb({
+    const documentId = await this.knowledge.importWeb({
       knowledgeBaseId,
       sourceUri: request.url,
       ...(request.title === undefined ? {} : { title: request.title }),
@@ -905,7 +1369,16 @@ export class KnowledgeAdminService {
     if (current.status === 'ARCHIVED') {
       throw new ConflictException('An archived document cannot receive a new version.');
     }
-    const uploadedDocumentId = await this.ingestion.uploadFileVersion({
+    const duplicate = await this.inspectUpload(knowledgeBaseId, {
+      fileName: input.fileName,
+      size: input.bytes.byteLength,
+      sha256: createHash('sha256').update(input.bytes).digest('hex'),
+      documentId,
+    });
+    if (duplicate.decision === 'EXACT_DUPLICATE') {
+      return this.getDocument(knowledgeBaseId, documentId);
+    }
+    const uploadedDocumentId = await this.knowledge.uploadFileVersion({
       knowledgeBaseId,
       documentId,
       title: current.title,
@@ -954,7 +1427,7 @@ export class KnowledgeAdminService {
     if (publish && content.trim().length === 0) {
       throw new BadRequestException('An indexed text document must contain searchable text.');
     }
-    await this.ingestion.createTextVersion({
+    await this.knowledge.createTextVersion({
       knowledgeBaseId,
       documentId,
       title: request.title ?? current.title,
@@ -985,7 +1458,7 @@ export class KnowledgeAdminService {
       });
       if (version === null) throw new NotFoundException('The document version was not found.');
     });
-    const retriedDocumentId = await this.ingestion.retry(documentVersionId);
+    const retriedDocumentId = await this.knowledge.retry(documentVersionId);
     if (retriedDocumentId !== documentId) throw knowledgeDocumentNotFound();
     return this.getDocument(knowledgeBaseId, documentId);
   }
@@ -1092,6 +1565,10 @@ export class KnowledgeAdminService {
         reviewRevision: request.expectedReviewRevision + 1,
         reviewedAt: reviewedAt.toISOString(),
       };
+      const publicEvent = defineKnowledgePublicEvent({
+        eventType: 'knowledge.document-version.parse-reviewed.v1',
+        payload: eventPayload,
+      });
       await Promise.all([
         recordAdminAudit(
           transaction,
@@ -1106,8 +1583,8 @@ export class KnowledgeAdminService {
             tenantId: principal.tenantId,
             aggregateType: 'knowledge_document_version',
             aggregateId: documentVersionId,
-            eventType: 'knowledge.document-version.parse-reviewed.v1',
-            payload: eventPayload,
+            eventType: publicEvent.eventType,
+            payload: publicEvent.payload,
           },
         }),
       ]);
@@ -1147,13 +1624,13 @@ export class KnowledgeAdminService {
       if (version.governanceRevision !== request.expectedRevision) {
         throw optimisticConflict('knowledge governance policy');
       }
+      const policy = { ...request.policy, ownerUserId: principal.userId };
       await this.requireKnowledgeGovernanceReferences(
         transaction,
         principal.tenantId,
         documentId,
-        request.policy,
+        policy,
       );
-      const policy = request.policy;
       const updated = await transaction.knowledgeDocumentVersion.updateMany({
         where: {
           tenantId: principal.tenantId,
@@ -1197,10 +1674,14 @@ export class KnowledgeAdminService {
         revision: changed.governanceRevision,
         previousPolicyHash: version.governanceHash.trim(),
         policyHash: changed.governanceHash.trim(),
-        reviewStatus: changed.governanceReviewStatus,
+        reviewStatus: knowledgeGovernanceReviewStatusSchema.parse(changed.governanceReviewStatus),
         classification: policy.classification,
         scopeMode: policy.scopeMode,
       };
+      const publicEvent = defineKnowledgePublicEvent({
+        eventType: 'knowledge.document-version.governance-updated.v1',
+        payload: event,
+      });
       await Promise.all([
         recordAdminAudit(
           transaction,
@@ -1215,13 +1696,153 @@ export class KnowledgeAdminService {
             tenantId: principal.tenantId,
             aggregateType: 'knowledge_document_version',
             aggregateId: documentVersionId,
-            eventType: 'knowledge.document-version.governance-updated.v1',
-            payload: event,
+            eventType: publicEvent.eventType,
+            payload: publicEvent.payload,
           },
         }),
       ]);
     });
     return this.getDocumentVersion(knowledgeBaseId, documentId, documentVersionId);
+  }
+
+  async updateDocumentAccess(
+    knowledgeBaseId: string,
+    documentId: string,
+    request: UpdateKnowledgeDocumentAccessRequest,
+  ): Promise<KnowledgeDocument> {
+    const principal = this.access.requireKnowledgeWrite();
+    await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await lockKnowledgeDocument(transaction, principal.tenantId, documentId);
+      const document = await transaction.knowledgeDocument.findFirst({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          id: documentId,
+          status: { not: 'ARCHIVED' },
+        },
+        select: {
+          documentVersion: true,
+          currentVersionId: true,
+          currentVersion: {
+            select: {
+              id: true,
+              versionNumber: true,
+              governanceRevision: true,
+              governanceHash: true,
+              classification: true,
+              projectScopeIds: true,
+              taskScopeIds: true,
+              roleTemplateScopeIds: true,
+              dataLabels: true,
+            },
+          },
+        },
+      });
+      if (document === null) throw knowledgeDocumentNotFound();
+      if (document.currentVersionId === null || document.currentVersion === null) {
+        throw new ConflictException('The document has no current searchable version.');
+      }
+      if (document.currentVersion.versionNumber !== document.documentVersion) {
+        throw new ConflictException(
+          'Finish or remove the newer document version before changing document access.',
+        );
+      }
+      if (document.currentVersion.governanceRevision !== request.expectedGovernanceRevision) {
+        throw optimisticConflict('knowledge document access');
+      }
+
+      const orgUnitIds = request.mode === 'RESTRICTED' ? uniqueIds(request.orgUnitIds) : [];
+      const memberUserIds = request.mode === 'RESTRICTED' ? uniqueIds(request.memberUserIds) : [];
+      if (orgUnitIds.length > 0) {
+        const count = await transaction.orgUnit.count({
+          where: { tenantId: principal.tenantId, id: { in: orgUnitIds }, status: 'ACTIVE' },
+        });
+        if (count !== orgUnitIds.length) {
+          throw new BadRequestException('One or more document access departments are unavailable.');
+        }
+      }
+      await this.requireKnowledgeAccessMembers(transaction, principal.tenantId, memberUserIds);
+
+      const retainedLabels = document.currentVersion.dataLabels.filter(
+        (label) => !isDocumentMemberAccessLabel(label),
+      );
+      const dataLabels = sortedUniqueIds([
+        ...retainedLabels,
+        ...memberUserIds.map(documentMemberAccessLabel),
+      ]);
+      const scopeMode =
+        orgUnitIds.length > 0 ||
+        memberUserIds.length > 0 ||
+        document.currentVersion.projectScopeIds.length > 0 ||
+        document.currentVersion.taskScopeIds.length > 0 ||
+        document.currentVersion.roleTemplateScopeIds.length > 0 ||
+        retainedLabels.length > 0 ||
+        document.currentVersion.classification === 'SENSITIVE' ||
+        document.currentVersion.classification === 'CONFIDENTIAL'
+          ? 'RESTRICTED'
+          : 'TENANT';
+      const updated = await transaction.knowledgeDocumentVersion.updateMany({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          documentId,
+          id: document.currentVersion.id,
+          governanceRevision: request.expectedGovernanceRevision,
+        },
+        data: {
+          scopeMode,
+          organizationScopeIds: orgUnitIds,
+          dataLabels,
+          governanceRevision: { increment: 1 },
+        },
+      });
+      if (updated.count !== 1) throw optimisticConflict('knowledge document access');
+      const changed = await transaction.knowledgeDocumentVersion.findFirstOrThrow({
+        where: { tenantId: principal.tenantId, id: document.currentVersion.id },
+        select: {
+          governanceRevision: true,
+          governanceHash: true,
+          governanceReviewStatus: true,
+        },
+      });
+      const event = {
+        knowledgeBaseId,
+        documentId,
+        documentVersionId: document.currentVersion.id,
+        previousRevision: request.expectedGovernanceRevision,
+        revision: changed.governanceRevision,
+        previousPolicyHash: document.currentVersion.governanceHash.trim(),
+        policyHash: changed.governanceHash.trim(),
+        reviewStatus: knowledgeGovernanceReviewStatusSchema.parse(changed.governanceReviewStatus),
+        classification: document.currentVersion.classification as
+          'PUBLIC' | 'INTERNAL' | 'SENSITIVE' | 'CONFIDENTIAL',
+        scopeMode: scopeMode as 'TENANT' | 'RESTRICTED',
+      };
+      const publicEvent = defineKnowledgePublicEvent({
+        eventType: 'knowledge.document-version.governance-updated.v1',
+        payload: event,
+      });
+      await Promise.all([
+        recordAdminAudit(
+          transaction,
+          principal,
+          'admin.knowledge-document.access-updated',
+          'knowledge_document',
+          documentId,
+          { ...event, orgUnitIds, memberUserIds },
+        ),
+        transaction.outboxEvent.create({
+          data: {
+            tenantId: principal.tenantId,
+            aggregateType: 'knowledge_document_version',
+            aggregateId: document.currentVersion.id,
+            eventType: publicEvent.eventType,
+            payload: publicEvent.payload,
+          },
+        }),
+      ]);
+    });
+    return this.getDocument(knowledgeBaseId, documentId);
   }
 
   async reviewDocumentVersionGovernance(
@@ -1297,6 +1918,10 @@ export class KnowledgeAdminService {
         policyHash: version.governanceHash.trim(),
         reviewedAt: reviewedAt.toISOString(),
       };
+      const publicEvent = defineKnowledgePublicEvent({
+        eventType: 'knowledge.document-version.governance-reviewed.v1',
+        payload: event,
+      });
       await Promise.all([
         recordAdminAudit(
           transaction,
@@ -1311,8 +1936,8 @@ export class KnowledgeAdminService {
             tenantId: principal.tenantId,
             aggregateType: 'knowledge_document_version',
             aggregateId: documentVersionId,
-            eventType: 'knowledge.document-version.governance-reviewed.v1',
-            payload: event,
+            eventType: publicEvent.eventType,
+            payload: publicEvent.payload,
           },
         }),
       ]);
@@ -1324,28 +1949,9 @@ export class KnowledgeAdminService {
     knowledgeBaseId: string,
     documentId: string,
     documentVersionId: string,
-    request: PublishKnowledgeDocumentVersionRequest,
+    _request: PublishKnowledgeDocumentVersionRequest,
   ): Promise<KnowledgeDocument> {
     const principal = this.access.requireKnowledgeWrite();
-    const candidate = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
-      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
-      const version = await transaction.knowledgeDocumentVersion.findFirst({
-        where: {
-          id: documentVersionId,
-          tenantId: principal.tenantId,
-          knowledgeBaseId,
-          documentId,
-        },
-        select: { id: true, versionNumber: true, status: true, publishedAt: true },
-      });
-      if (version === null) throw new NotFoundException('The document version was not found.');
-      if (version.status !== 'READY') {
-        throw new ConflictException(
-          'The document version must finish parsing and indexing before evaluation publication.',
-        );
-      }
-      return version;
-    });
     await this.prisma.withTenant(principal.tenantId, async (transaction) => {
       await lockKnowledgeDocument(transaction, principal.tenantId, documentId);
       await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
@@ -1364,26 +1970,8 @@ export class KnowledgeAdminService {
           'Only a fully indexed READY document version can be published.',
         );
       }
-      if (version.governanceReviewStatus !== 'APPROVED') {
-        throw new ConflictException(
-          'An independent governance approval is required before knowledge publication.',
-        );
-      }
       if (version.publishedAt !== null) {
-        if (version.evaluationRunId !== request.evaluationRunId) {
-          throw new ConflictException(
-            'The document version was already published under a different Evaluation Run.',
-          );
-        }
         return;
-      }
-      if (
-        (version.sourceType === 'FILE' || version.sourceType === 'WEB') &&
-        version.parseReviewStatus !== 'APPROVED'
-      ) {
-        throw new ConflictException(
-          'File and web document versions require an independent approved parse review before publication.',
-        );
       }
       const [databaseClock] = await transaction.$queryRaw<Array<{ databaseNow: Date }>>`
         SELECT CURRENT_TIMESTAMP AS "databaseNow"
@@ -1392,14 +1980,6 @@ export class KnowledgeAdminService {
         throw new Error('The database clock query returned no rows.');
       }
       const publishedAt = databaseClock.databaseNow;
-      if (
-        version.effectiveFrom.getTime() > publishedAt.getTime() ||
-        (version.expiresAt !== null && version.expiresAt.getTime() <= publishedAt.getTime())
-      ) {
-        throw new ConflictException(
-          'The governed knowledge policy is not effective at the publication time.',
-        );
-      }
       const document = await transaction.knowledgeDocument.findFirst({
         where: { id: documentId, tenantId: principal.tenantId, knowledgeBaseId },
         select: {
@@ -1416,15 +1996,8 @@ export class KnowledgeAdminService {
           'The READY version is not newer than the current published version.',
         );
       }
-      // All ingestion and index rebuild paths use the same document advisory
-      // lock. Re-evaluate the exact snapshot while holding it so no chunk,
-      // embedding, or relationship mutation can race the publication CAS.
-      const readiness = await this.evaluations.requireReferencedRunReady({
-        evaluationRunId: request.evaluationRunId,
-        subjectType: 'KNOWLEDGE_VERSION',
-        subjectId: documentVersionId,
-        subjectVersion: candidate.versionNumber,
-      });
+      // Graph projection is an optional retrieval enhancement. Activate a candidate
+      // when one exists, but never block ordinary document publication on graph governance.
       const graphProjection = await activateKnowledgeGraphProjection(transaction, {
         tenantId: principal.tenantId,
         knowledgeBaseId,
@@ -1437,15 +2010,12 @@ export class KnowledgeAdminService {
           tenantId: principal.tenantId,
           status: 'READY',
           publishedAt: null,
-          ...((version.sourceType === 'FILE' || version.sourceType === 'WEB') && {
-            parseReviewStatus: 'APPROVED' as const,
-          }),
         },
         data: {
           publishedAt,
-          evaluationRunId: request.evaluationRunId,
-          evaluationDatasetVersionId: readiness.datasetVersionId,
-          evaluationSnapshotHash: readiness.currentSnapshotHash,
+          evaluationRunId: null,
+          evaluationDatasetVersionId: null,
+          evaluationSnapshotHash: null,
         },
       });
       if (promoted.count !== 1) {
@@ -1475,31 +2045,37 @@ export class KnowledgeAdminService {
         {
           documentId,
           version: version.versionNumber,
-          evaluationRunId: request.evaluationRunId,
-          evaluationDatasetVersionId: readiness.datasetVersionId,
-          evaluationSnapshotHash: readiness.currentSnapshotHash,
-          graphProjectionId: graphProjection.projectionId,
-          graphHash: graphProjection.graphHash,
+          graphProjectionId: graphProjection?.projectionId ?? null,
+          graphHash: graphProjection?.graphHash ?? null,
         },
       );
+      const publicEvent = defineKnowledgePublicEvent({
+        eventType: 'knowledge.document-version.published.v1',
+        payload: {
+          knowledgeBaseId,
+          documentId,
+          documentVersionId: version.id,
+          version: version.versionNumber,
+          graphProjectionId: graphProjection?.projectionId ?? null,
+          graphHash: graphProjection?.graphHash ?? null,
+          publishedAt: publishedAt.toISOString(),
+        },
+      });
       await transaction.outboxEvent.create({
         data: {
           tenantId: principal.tenantId,
           aggregateType: 'knowledge_document_version',
           aggregateId: version.id,
-          eventType: 'knowledge.document-version.published.v1',
-          payload: {
-            knowledgeBaseId,
-            documentId,
-            documentVersionId: version.id,
-            version: version.versionNumber,
-            evaluationRunId: request.evaluationRunId,
-            graphProjectionId: graphProjection.projectionId,
-            graphHash: graphProjection.graphHash,
-            publishedAt: publishedAt.toISOString(),
-          },
+          eventType: publicEvent.eventType,
+          payload: publicEvent.payload,
         },
       });
+    });
+    await this.knowledge.syncSearchDocumentVersion({
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+      active: true,
     });
     return this.getDocument(knowledgeBaseId, documentId);
   }
@@ -1571,6 +2147,10 @@ export class KnowledgeAdminService {
           objectKey: target.objectKey,
           objectSize: target.objectSize,
           objectSha256: target.objectSha256,
+          structuredObjectKey: target.structuredObjectKey,
+          structuredObjectSize: target.structuredObjectSize,
+          structuredObjectSha256: target.structuredObjectSha256,
+          structuredFormat: target.structuredFormat,
           sourceUri: target.sourceUri,
           checksum: target.checksum,
           contentText: target.contentText,
@@ -1599,19 +2179,72 @@ export class KnowledgeAdminService {
           publishedAt: null,
         },
       });
-      await transaction.knowledgeChunk.createMany({
-        data: target.chunks.map((chunk) => ({
+      const rollbackParents = new Map<
+        string,
+        {
+          id: string;
+          parentIndex: number;
+          headingPath: string[];
+          content: string;
+          tokenCount: number;
+          contentHash: string;
+          metadata: Prisma.InputJsonObject;
+        }
+      >();
+      for (const chunk of target.chunks) {
+        const key = JSON.stringify(chunk.headingPath);
+        const current = rollbackParents.get(key);
+        if (current === undefined) {
+          rollbackParents.set(key, {
+            id: randomUUID(),
+            parentIndex: rollbackParents.size,
+            headingPath: chunk.headingPath,
+            content: chunk.content,
+            tokenCount: chunk.tokenCount,
+            contentHash: chunk.contentHash,
+            metadata: chunk.metadata as Prisma.InputJsonObject,
+          });
+        } else {
+          current.content = `${current.content}\n\n${chunk.content}`;
+          current.tokenCount += chunk.tokenCount;
+          current.contentHash = createHash('sha256').update(current.content).digest('hex');
+        }
+      }
+      await transaction.knowledgeParentChunk.createMany({
+        data: [...rollbackParents.values()].map((parent) => ({
+          ...parent,
           tenantId: principal.tenantId,
           knowledgeBaseId,
           documentId,
           documentVersionId: rollbackVersion.id,
-          chunkIndex: chunk.chunkIndex,
-          headingPath: chunk.headingPath,
-          content: chunk.content,
-          tokenCount: chunk.tokenCount,
-          contentHash: chunk.contentHash,
-          metadata: chunk.metadata as Prisma.InputJsonObject,
         })),
+      });
+      const rollbackChunkIds = target.chunks.map(() => randomUUID());
+      await transaction.knowledgeChunk.createMany({
+        data: target.chunks.map((chunk, index) => {
+          const parent = rollbackParents.get(JSON.stringify(chunk.headingPath));
+          const id = rollbackChunkIds[index];
+          if (parent === undefined || id === undefined) {
+            throw new Error('KNOWLEDGE_ROLLBACK_LINEAGE_INVALID');
+          }
+          return {
+            id,
+            tenantId: principal.tenantId,
+            knowledgeBaseId,
+            documentId,
+            documentVersionId: rollbackVersion.id,
+            parentChunkId: parent.id,
+            previousChunkId: index === 0 ? null : (rollbackChunkIds[index - 1] ?? null),
+            nextChunkId:
+              index + 1 >= rollbackChunkIds.length ? null : (rollbackChunkIds[index + 1] ?? null),
+            chunkIndex: chunk.chunkIndex,
+            headingPath: chunk.headingPath,
+            content: chunk.content,
+            tokenCount: chunk.tokenCount,
+            contentHash: chunk.contentHash,
+            metadata: chunk.metadata as Prisma.InputJsonObject,
+          };
+        }),
       });
       const restoredChunks = await transaction.knowledgeChunk.findMany({
         where: {
@@ -1648,13 +2281,14 @@ export class KnowledgeAdminService {
       // copied without another provider call. Chunk lineage remains version-specific.
       await transaction.$executeRaw`
         INSERT INTO public."knowledge_chunk_embeddings" (
-          "id", "tenant_id", "chunk_id", "embedding_model",
+          "id", "tenant_id", "chunk_id", "embedding_index_version_id", "embedding_model",
           "embedding_dimension", "content_hash", "embedding"
         )
         SELECT
           gen_random_uuid(),
           source_embedding."tenant_id",
           restored_chunk."id",
+          source_embedding."embedding_index_version_id",
           source_embedding."embedding_model",
           source_embedding."embedding_dimension",
           restored_chunk."content_hash",
@@ -1670,7 +2304,7 @@ export class KnowledgeAdminService {
          AND restored_chunk."content_hash" = source_chunk."content_hash"
         WHERE source_chunk."tenant_id" = ${principal.tenantId}::uuid
           AND source_chunk."document_version_id" = ${target.id}::uuid
-        ON CONFLICT ("tenant_id", "chunk_id", "embedding_model") DO NOTHING
+        ON CONFLICT ("tenant_id", "chunk_id", "embedding_index_version_id") DO NOTHING
       `;
 
       await recordAdminAudit(
@@ -1748,7 +2382,7 @@ export class KnowledgeAdminService {
     });
 
     const startedAt = Date.now();
-    const result = await this.retrieval.search({
+    const result = await this.knowledge.search({
       tenantId: principal.tenantId,
       userId: simulatedUserId,
       knowledgeBaseIds: [knowledgeBaseId],
@@ -1759,6 +2393,54 @@ export class KnowledgeAdminService {
       query: request.query,
       limit: request.limit,
     });
+    const sourceLocations =
+      result.items.length === 0
+        ? new Map<
+            string,
+            {
+              readonly metadata: Prisma.JsonValue;
+              readonly mimeType: string | null;
+              readonly fileName: string | null;
+              readonly sourceUri: string | null;
+              readonly sourceDownloadAvailable: boolean;
+              readonly structuredPreviewAvailable: boolean;
+            }
+          >()
+        : await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+            const chunks = await transaction.knowledgeChunk.findMany({
+              where: {
+                tenantId: principal.tenantId,
+                knowledgeBaseId,
+                id: { in: result.items.map((item) => item.chunkId) },
+              },
+              select: {
+                id: true,
+                metadata: true,
+                documentVersion: {
+                  select: {
+                    mimeType: true,
+                    fileName: true,
+                    sourceUri: true,
+                    objectKey: true,
+                    structuredObjectKey: true,
+                  },
+                },
+              },
+            });
+            return new Map(
+              chunks.map((chunk) => [
+                chunk.id,
+                {
+                  metadata: chunk.metadata,
+                  mimeType: chunk.documentVersion.mimeType,
+                  fileName: chunk.documentVersion.fileName,
+                  sourceUri: chunk.documentVersion.sourceUri,
+                  sourceDownloadAvailable: chunk.documentVersion.objectKey !== null,
+                  structuredPreviewAvailable: chunk.documentVersion.structuredObjectKey !== null,
+                },
+              ]),
+            );
+          });
     return {
       query: request.query,
       simulatedUserId,
@@ -1779,59 +2461,91 @@ export class KnowledgeAdminService {
         code: diagnostic.code,
         candidateCount: diagnostic.candidateCount,
       })),
+      ...(result.queryRoute === undefined
+        ? {}
+        : {
+            queryRoute: {
+              ...result.queryRoute,
+              fallback: [...result.queryRoute.fallback],
+            },
+          }),
+      ...(result.structuredQuerySql === undefined
+        ? {}
+        : { structuredQuerySql: result.structuredQuerySql }),
       noAnswer: result.items.length === 0,
       elapsedMs: Date.now() - startedAt,
-      items: result.items.map((item) => ({
-        chunkId: item.chunkId,
-        knowledgeBaseId: item.knowledgeBaseId,
-        knowledgeBaseName: item.knowledgeBaseName,
-        documentId: item.documentId,
-        documentVersionId: item.documentVersionId,
-        documentVersion: item.documentVersion,
-        title: item.title,
-        headingPath: [...item.headingPath],
-        excerpt: excerpt(item.content),
-        keywordScore: item.keywordScore,
-        fuzzyScore: item.fuzzyScore,
-        semanticScore: item.semanticScore,
-        fusionScore: item.fusionScore,
-        rerankerScore: item.rerankerScore,
-        relationshipScore: item.relationshipScore,
-        relationshipEvidence: item.relationshipEvidence.map((evidence) => ({
-          relationId: evidence.relationId,
-          relationType: evidence.relationType,
-          sourceChunkId: evidence.sourceChunkId,
-          sourceEntityName: evidence.sourceEntityName,
-          targetEntityName: evidence.targetEntityName,
-          direction: evidence.direction,
-          hopDistance: evidence.hopDistance,
-          confidence: evidence.confidence,
-          contribution: evidence.contribution,
-          path: evidence.path.map((edge) => ({
-            relationId: edge.relationId,
-            predicate: edge.predicate,
-            direction: edge.direction,
-            sourceEntityId: edge.sourceEntityId,
-            sourceEntityName: edge.sourceEntityName,
-            targetEntityId: edge.targetEntityId,
-            targetEntityName: edge.targetEntityName,
+      items: result.items.map((item) => {
+        const source = sourceLocations.get(item.chunkId);
+        const pages = readChunkPages(source?.metadata ?? null);
+        return {
+          chunkId: item.chunkId,
+          knowledgeBaseId: item.knowledgeBaseId,
+          knowledgeBaseName: item.knowledgeBaseName,
+          documentId: item.documentId,
+          documentVersionId: item.documentVersionId,
+          documentVersion: item.documentVersion,
+          title: item.title,
+          headingPath: [...item.headingPath],
+          pageStart: item.pageStart ?? pages.pageStart,
+          pageEnd: item.pageEnd ?? pages.pageEnd,
+          sheetName: item.sheetName ?? readChunkSheetName(source?.metadata ?? null),
+          sourceMimeType: source?.mimeType ?? null,
+          sourceFileName: source?.fileName ?? null,
+          sourceUri: source?.sourceUri ?? null,
+          sourceDownloadAvailable: source?.sourceDownloadAvailable ?? false,
+          structuredPreviewAvailable: source?.structuredPreviewAvailable ?? false,
+          excerpt: excerpt(item.content),
+          keywordScore: item.keywordScore,
+          fuzzyScore: item.fuzzyScore,
+          semanticScore: item.semanticScore,
+          fusionScore: item.fusionScore,
+          rerankerScore: item.rerankerScore,
+          relationshipScore: item.relationshipScore,
+          relationshipEvidence: item.relationshipEvidence.map((evidence) => ({
+            relationId: evidence.relationId,
+            relationType: evidence.relationType,
+            sourceChunkId: evidence.sourceChunkId,
+            sourceEntityName: evidence.sourceEntityName,
+            targetEntityName: evidence.targetEntityName,
+            direction: evidence.direction,
+            hopDistance: evidence.hopDistance,
+            confidence: evidence.confidence,
+            contribution: evidence.contribution,
+            path: evidence.path.map((edge) => ({
+              relationId: edge.relationId,
+              predicate: edge.predicate,
+              direction: edge.direction,
+              sourceEntityId: edge.sourceEntityId,
+              sourceEntityName: edge.sourceEntityName,
+              targetEntityId: edge.targetEntityId,
+              targetEntityName: edge.targetEntityName,
+            })),
           })),
-        })),
-        finalScore: item.finalScore,
-      })),
+          finalScore: item.finalScore,
+        };
+      }),
     };
   }
 
-  rebuildDocumentVersionEmbeddings(
+  async rebuildDocumentVersionEmbeddings(
     knowledgeBaseId: string,
     documentId: string,
     documentVersionId: string,
   ): Promise<KnowledgeEmbeddingRebuildResponse> {
-    return this.ingestion.rebuildEmbeddings({
+    const rebuilt = await this.knowledge.rebuildEmbeddings({
       knowledgeBaseId,
       documentId,
       documentVersionId,
     });
+    const document = await this.getDocument(knowledgeBaseId, documentId);
+    await this.knowledge.syncSearchDocumentVersion({
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+      embeddingIndexVersionId: rebuilt.embeddingIndexVersionId,
+      active: document.status !== 'ARCHIVED' && document.currentVersionId === documentVersionId,
+    });
+    return rebuilt;
   }
 
   rebuildDocumentVersionGraph(
@@ -1839,7 +2553,7 @@ export class KnowledgeAdminService {
     documentId: string,
     documentVersionId: string,
   ): Promise<KnowledgeGraphRebuildResponse> {
-    return this.ingestion.rebuildKnowledgeGraph({
+    return this.knowledge.rebuildKnowledgeGraph({
       knowledgeBaseId,
       documentId,
       documentVersionId,
@@ -1853,18 +2567,25 @@ export class KnowledgeAdminService {
   ): Promise<KnowledgeDocument> {
     const principal = this.access.requireKnowledgeWrite();
     assertPositiveVersion(expectedVersion);
-    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+    const archived = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const current = await transaction.knowledgeDocument.findFirst({
         where: {
           id: documentId,
           tenantId: principal.tenantId,
           knowledgeBaseId,
         },
+        include: knowledgeDocumentInclude,
       });
       if (current === null) throw knowledgeDocumentNotFound();
-      if (current.status === 'ARCHIVED') {
-        throw new ConflictException('The knowledge document is already archived.');
-      }
+      if (current.status === 'ARCHIVED') return mapKnowledgeDocument(current);
+
+      await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
+        SELECT knowledge_base."id"
+          FROM "knowledge_bases" AS knowledge_base
+         WHERE knowledge_base."tenant_id" = ${principal.tenantId}::uuid
+           AND knowledge_base."id" = ${knowledgeBaseId}::uuid
+         FOR UPDATE
+      `);
 
       const result = await transaction.knowledgeDocument.updateMany({
         where: {
@@ -1893,8 +2614,40 @@ export class KnowledgeAdminService {
         documentId,
         { version: archived.documentVersion },
       );
+      const remainingDocumentCount = await transaction.knowledgeDocument.count({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          status: { not: 'ARCHIVED' },
+        },
+      });
+      if (remainingDocumentCount === 0) {
+        const knowledgeBaseResult = await transaction.knowledgeBase.updateMany({
+          where: {
+            id: knowledgeBaseId,
+            tenantId: principal.tenantId,
+            status: { not: 'ARCHIVED' },
+          },
+          data: {
+            status: 'ARCHIVED',
+            version: { increment: 1 },
+          },
+        });
+        if (knowledgeBaseResult.count === 1) {
+          await recordAdminAudit(
+            transaction,
+            principal,
+            'admin.knowledge-base.archived-empty',
+            'knowledge_base',
+            knowledgeBaseId,
+            { reason: 'last-active-document-deleted' },
+          );
+        }
+      }
       return mapKnowledgeDocument(archived);
     });
+    await this.knowledge.archiveSearchDocument({ documentId });
+    return archived;
   }
 
   async getDocument(knowledgeBaseId: string, documentId: string): Promise<KnowledgeDocument> {
@@ -1960,6 +2713,26 @@ export class KnowledgeAdminService {
     });
   }
 
+  getStructuredDocumentPreview(
+    knowledgeBaseId: string,
+    documentId: string,
+    documentVersionId: string,
+  ): Promise<KnowledgeStructuredDocumentPreview> {
+    return this.knowledge.readStructuredDocumentPreview({
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+    });
+  }
+
+  getDocumentVersionSource(knowledgeBaseId: string, documentId: string, documentVersionId: string) {
+    return this.knowledge.readSourceDocument({
+      knowledgeBaseId,
+      documentId,
+      documentVersionId,
+    });
+  }
+
   async listDocumentVersionChunks(
     knowledgeBaseId: string,
     documentId: string,
@@ -2011,12 +2784,18 @@ export class KnowledgeAdminService {
           take: limit,
           select: {
             id: true,
+            parentChunkId: true,
+            previousChunkId: true,
+            nextChunkId: true,
             chunkIndex: true,
             headingPath: true,
             content: true,
             tokenCount: true,
             contentHash: true,
             metadata: true,
+            parentChunk: {
+              select: { headingPath: true, content: true },
+            },
             embeddings: {
               orderBy: [{ embeddingModel: 'asc' }, { id: 'asc' }],
               select: { embeddingModel: true },
@@ -2036,13 +2815,19 @@ export class KnowledgeAdminService {
           const pages = readChunkPages(chunk.metadata);
           return {
             id: chunk.id,
+            parentChunkId: chunk.parentChunkId,
+            previousChunkId: chunk.previousChunkId,
+            nextChunkId: chunk.nextChunkId,
             chunkIndex: chunk.chunkIndex,
             headingPath: chunk.headingPath,
+            parentHeadingPath: chunk.parentChunk.headingPath,
+            parentExcerpt: excerpt(chunk.parentChunk.content),
             content: chunk.content,
             tokenCount: chunk.tokenCount,
             contentHash: chunk.contentHash,
             pageStart: pages.pageStart,
             pageEnd: pages.pageEnd,
+            sheetName: readChunkSheetName(chunk.metadata),
             embeddingModels: [
               ...new Set(chunk.embeddings.map((embedding) => embedding.embeddingModel)),
             ],
@@ -2101,6 +2886,33 @@ export class KnowledgeAdminService {
     });
     if (count !== ids.length) {
       throw new NotFoundException('One or more organization units were not found.');
+    }
+  }
+
+  private async requireKnowledgeAccessMembers(
+    transaction: Prisma.TransactionClient,
+    tenantId: string,
+    requestedIds: readonly string[],
+  ): Promise<void> {
+    const ids = uniqueIds(requestedIds);
+    if (ids.length === 0) return;
+    const count = await transaction.user.count({
+      where: {
+        tenantId,
+        id: { in: ids },
+        status: 'ACTIVE',
+        employments: {
+          some: {
+            status: 'ACTIVE',
+            orgUnit: { status: 'ACTIVE' },
+          },
+        },
+      },
+    });
+    if (count !== ids.length) {
+      throw new BadRequestException(
+        'One or more knowledge access members are inactive or have no active employment.',
+      );
     }
   }
 
@@ -2232,11 +3044,14 @@ const knowledgeDocumentVersions = {
 
 const knowledgeDocumentInclude = {
   versions: knowledgeDocumentVersions,
+  folder: { select: { path: true } },
 } satisfies Prisma.KnowledgeDocumentInclude;
 
 const knowledgeDocumentSummarySelect = {
   id: true,
   knowledgeBaseId: true,
+  folderId: true,
+  folder: { select: { path: true } },
   title: true,
   sourceType: true,
   mimeType: true,
@@ -2250,13 +3065,40 @@ const knowledgeDocumentSummarySelect = {
 } satisfies Prisma.KnowledgeDocumentSelect;
 
 const knowledgeBaseInclude = {
+  activeEmbeddingIndexVersion: true,
+  pendingEmbeddingIndexVersion: true,
   orgUnits: { orderBy: { createdAt: 'asc' as const } },
+  members: { orderBy: { createdAt: 'asc' as const } },
   documents: {
     orderBy: [{ updatedAt: 'desc' as const }, { id: 'asc' as const }],
     select: knowledgeDocumentSummarySelect,
   },
+  folders: {
+    orderBy: [{ path: 'asc' as const }, { id: 'asc' as const }],
+    include: { _count: { select: { documents: true, children: true } } },
+  },
   _count: { select: { documents: true } },
 } satisfies Prisma.KnowledgeBaseInclude;
+
+function knowledgeRetrievalConfigData(config: KnowledgeRetrievalConfig) {
+  return {
+    retrievalMode: config.mode,
+    retrievalTopK: config.topK,
+    retrievalScoreThreshold: config.scoreThreshold,
+    retrievalSemanticWeight: config.semanticWeight,
+    retrievalKeywordWeight: config.keywordWeight,
+    retrievalRerankEnabled: config.rerankEnabled,
+    relationshipRetrievalEnabled: config.relationshipRetrievalEnabled,
+    maxChunksPerDocument: config.maxChunksPerDocument,
+  };
+}
+
+function knowledgeChunkingConfigData(config: KnowledgeChunkingConfig) {
+  return {
+    chunkTargetTokens: config.targetTokens,
+    chunkOverlapTokens: config.overlapTokens,
+  };
+}
 
 function mapKnowledgeBase(knowledgeBase: KnowledgeBaseRecord): KnowledgeBase {
   return {
@@ -2265,16 +3107,86 @@ function mapKnowledgeBase(knowledgeBase: KnowledgeBaseRecord): KnowledgeBase {
     name: knowledgeBase.name,
     description: knowledgeBase.description,
     status: knowledgeBase.status,
+    space: {
+      type: knowledgeBase.spaceType,
+      targetId: knowledgeBase.spaceTargetId,
+      targetName: knowledgeBase.spaceTargetName,
+    },
     version: knowledgeBase.version,
+    retrievalConfig: {
+      mode:
+        knowledgeBase.retrievalMode === 'VECTOR' || knowledgeBase.retrievalMode === 'FULL_TEXT'
+          ? knowledgeBase.retrievalMode
+          : 'HYBRID',
+      topK: knowledgeBase.retrievalTopK ?? 8,
+      scoreThreshold: Number(knowledgeBase.retrievalScoreThreshold ?? 0.08),
+      semanticWeight: Number(knowledgeBase.retrievalSemanticWeight ?? 0.7),
+      keywordWeight: Number(knowledgeBase.retrievalKeywordWeight ?? 0.3),
+      rerankEnabled: knowledgeBase.retrievalRerankEnabled ?? true,
+      relationshipRetrievalEnabled: knowledgeBase.relationshipRetrievalEnabled ?? true,
+      maxChunksPerDocument: knowledgeBase.maxChunksPerDocument ?? 3,
+    },
+    chunkingConfig: {
+      targetTokens: knowledgeBase.chunkTargetTokens ?? 500,
+      overlapTokens: knowledgeBase.chunkOverlapTokens ?? 80,
+    },
+    activeEmbeddingIndexVersion:
+      knowledgeBase.activeEmbeddingIndexVersion == null
+        ? null
+        : mapKnowledgeEmbeddingIndexVersion(knowledgeBase.activeEmbeddingIndexVersion),
+    pendingEmbeddingIndexVersion:
+      knowledgeBase.pendingEmbeddingIndexVersion == null
+        ? null
+        : mapKnowledgeEmbeddingIndexVersion(knowledgeBase.pendingEmbeddingIndexVersion),
     orgUnitIds: knowledgeBase.orgUnits.map((scope) => scope.orgUnitId),
     orgUnitScopes: knowledgeBase.orgUnits.map((scope) => ({
       orgUnitId: scope.orgUnitId,
       includeChildren: scope.includeChildren,
     })),
+    memberUserIds: knowledgeBase.members.map((scope) => scope.userId),
     documentCount: knowledgeBase._count.documents,
+    folders: (knowledgeBase.folders ?? []).map(mapKnowledgeFolder),
     documents: knowledgeBase.documents.map(mapKnowledgeDocumentSummary),
     updatedAt: knowledgeBase.updatedAt.toISOString(),
   };
+}
+
+function mapKnowledgeEmbeddingIndexVersion(
+  index: Prisma.KnowledgeEmbeddingIndexVersionGetPayload<object>,
+): KnowledgeEmbeddingIndexVersion {
+  if (index.distance !== 'COSINE') throw new Error('KNOWLEDGE_INDEX_DISTANCE_UNSUPPORTED');
+  if (index.normalization !== 'L2' && index.normalization !== 'NONE') {
+    throw new Error('KNOWLEDGE_INDEX_NORMALIZATION_UNSUPPORTED');
+  }
+  return {
+    id: index.id,
+    version: index.version,
+    status: index.status,
+    provider: index.provider,
+    model: index.model,
+    dimensions: index.dimensions,
+    distance: 'COSINE',
+    normalization: index.normalization,
+    collectionName: index.collectionName,
+    createdAt: index.createdAt.toISOString(),
+    activatedAt: index.activatedAt?.toISOString() ?? null,
+    retiredAt: index.retiredAt?.toISOString() ?? null,
+    failureCode: index.failureCode,
+  };
+}
+
+function embeddingCollectionName(
+  knowledgeBaseId: string,
+  version: number,
+  dimensions: number,
+): string {
+  return `knowledge_${knowledgeBaseId.replaceAll('-', '').slice(0, 16)}_v${version}_d${dimensions}`;
+}
+
+function isEmbeddingProvider(
+  provider: KnowledgeCapabilityReadiness['provider'],
+): provider is 'openai_compatible' | 'local_fastembed' {
+  return provider === 'openai_compatible' || provider === 'local_fastembed';
 }
 
 function mapKnowledgeDocumentSummary(
@@ -2283,6 +3195,8 @@ function mapKnowledgeDocumentSummary(
   return {
     id: document.id,
     knowledgeBaseId: document.knowledgeBaseId,
+    folderId: document.folderId,
+    folderPath: document.folder?.path ?? null,
     title: document.title,
     sourceType: document.sourceType,
     mimeType: document.mimeType,
@@ -2294,6 +3208,50 @@ function mapKnowledgeDocumentSummary(
     versions: document.versions.map(mapKnowledgeDocumentVersion),
     updatedAt: document.updatedAt.toISOString(),
   };
+}
+
+function mapKnowledgeFolder(folder: {
+  id: string;
+  knowledgeBaseId: string;
+  parentId: string | null;
+  name: string;
+  path: string;
+  createdAt: Date;
+  updatedAt: Date;
+  _count: { documents: number; children: number };
+}) {
+  return {
+    id: folder.id,
+    knowledgeBaseId: folder.knowledgeBaseId,
+    parentId: folder.parentId,
+    name: folder.name,
+    path: folder.path,
+    directDocumentCount: folder._count.documents,
+    directChildCount: folder._count.children,
+    createdAt: folder.createdAt.toISOString(),
+    updatedAt: folder.updatedAt.toISOString(),
+  };
+}
+
+function normalizeKnowledgeFolderPath(value: string): string {
+  const normalized = value.replaceAll('\\', '/').replace(/^\/+|\/+$/gu, '');
+  const segments = normalized.split('/');
+  if (
+    normalized.length < 1 ||
+    normalized.length > 2_000 ||
+    segments.length > 20 ||
+    segments.some(
+      (segment) =>
+        segment.length < 1 ||
+        segment.length > 200 ||
+        segment === '.' ||
+        segment === '..' ||
+        /[\u0000-\u001f\u007f]/u.test(segment),
+    )
+  ) {
+    throw new BadRequestException('The knowledge folder path is invalid.');
+  }
+  return segments.join('/');
 }
 
 function mapKnowledgeDocument(document: KnowledgeDocumentRecord): KnowledgeDocument {
@@ -2334,6 +3292,16 @@ function mapKnowledgeDocumentVersion(version: KnowledgeDocumentVersionRecord) {
       !Array.isArray(version.parseDiagnostics)
         ? version.parseDiagnostics
         : {},
+    structuredArtifact:
+      version.structuredFormat === null ||
+      version.structuredObjectSize === null ||
+      version.structuredObjectSha256 === null
+        ? null
+        : {
+            format: version.structuredFormat,
+            size: version.structuredObjectSize,
+            sha256: version.structuredObjectSha256,
+          },
     governance: {
       ownerUserId: version.governanceOwnerUserId ?? version.createdById,
       classification: version.classification as
@@ -2578,6 +3546,16 @@ function sortedUniqueIds(ids: readonly string[]): string[] {
   return [...new Set(ids)].sort();
 }
 
+const DOCUMENT_MEMBER_ACCESS_LABEL_PREFIX = 'USER:';
+
+function documentMemberAccessLabel(userId: string): string {
+  return `${DOCUMENT_MEMBER_ACCESS_LABEL_PREFIX}${userId}`;
+}
+
+function isDocumentMemberAccessLabel(label: string): boolean {
+  return label.startsWith(DOCUMENT_MEMBER_ACCESS_LABEL_PREFIX);
+}
+
 function normalizeKnowledgeScopes(
   scopes:
     ReadonlyArray<{ readonly orgUnitId: string; readonly includeChildren: boolean }> | undefined,
@@ -2607,6 +3585,16 @@ async function lockKnowledgeDocument(
   `;
 }
 
+async function lockKnowledgeBase(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  knowledgeBaseId: string,
+): Promise<void> {
+  await transaction.$queryRaw`
+    SELECT pg_advisory_xact_lock(hashtextextended(${`${tenantId}:knowledge-base:${knowledgeBaseId}`}, 0))::text
+  `;
+}
+
 async function lockKnowledgeBaseKeyspace(
   transaction: Prisma.TransactionClient,
   tenantId: string,
@@ -2616,6 +3604,79 @@ async function lockKnowledgeBaseKeyspace(
       hashtextextended(${`${tenantId}:knowledge-base:keyspace`}, 0)
     )::text
   `;
+}
+
+interface ResolvedKnowledgeSpace {
+  readonly type: 'COMPANY' | 'DEPARTMENT' | 'PROJECT' | 'MEMBER';
+  readonly targetId: string;
+  readonly targetName: string;
+}
+
+async function resolveKnowledgeSpace(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  actorUserId: string,
+  selection: KnowledgeSpaceSelection,
+): Promise<ResolvedKnowledgeSpace> {
+  if (selection.type === 'COMPANY') {
+    const tenant = await transaction.tenant.findFirst({
+      where: { id: tenantId },
+      select: { id: true, name: true },
+    });
+    if (tenant === null) throw new NotFoundException('The company knowledge space was not found.');
+    return { type: 'COMPANY', targetId: tenant.id, targetName: tenant.name };
+  }
+
+  if (selection.type === 'DEPARTMENT') {
+    const orgUnit = await transaction.orgUnit.findFirst({
+      where: { tenantId, id: selection.targetId, status: 'ACTIVE' },
+      select: { id: true, name: true },
+    });
+    if (orgUnit === null) {
+      throw new BadRequestException(
+        'The department knowledge space must reference an active department.',
+      );
+    }
+    return { type: 'DEPARTMENT', targetId: orgUnit.id, targetName: orgUnit.name };
+  }
+
+  if (selection.type === 'MEMBER') {
+    const member = await transaction.user.findFirst({
+      where: { tenantId, id: actorUserId, status: 'ACTIVE' },
+      select: { id: true, displayName: true },
+    });
+    if (member === null) {
+      throw new BadRequestException('The member knowledge space must reference an active member.');
+    }
+    return { type: 'MEMBER', targetId: member.id, targetName: member.displayName };
+  }
+
+  if (selection.targetId !== undefined) {
+    const existingProjectSpace = await transaction.knowledgeBase.findFirst({
+      where: {
+        tenantId,
+        spaceType: 'PROJECT',
+        spaceTargetId: selection.targetId,
+      },
+      select: { spaceTargetId: true, spaceTargetName: true },
+    });
+    if (existingProjectSpace === null) {
+      throw new BadRequestException(
+        'The project knowledge space was not found. Create a new project space first.',
+      );
+    }
+    return {
+      type: 'PROJECT',
+      targetId: existingProjectSpace.spaceTargetId,
+      targetName: existingProjectSpace.spaceTargetName,
+    };
+  }
+
+  return {
+    type: 'PROJECT',
+    targetId: randomUUID(),
+    targetName: selection.targetName.trim(),
+  };
 }
 
 async function resolveKnowledgeBaseKey(
@@ -2670,6 +3731,26 @@ function knowledgeDocumentNotFound(): NotFoundException {
   return new NotFoundException('The knowledge document was not found.');
 }
 
+function uploadMatch(
+  document: {
+    readonly id: string;
+    readonly title: string;
+    readonly fileName: string | null;
+    readonly documentVersion: number;
+    readonly updatedAt: Date;
+  },
+  matchedVersion: number,
+): NonNullable<KnowledgeUploadInspection['matchingDocument']> {
+  return {
+    id: document.id,
+    title: document.title,
+    fileName: document.fileName,
+    currentVersion: document.documentVersion,
+    matchedVersion,
+    updatedAt: document.updatedAt.toISOString(),
+  };
+}
+
 function isUniqueConflict(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
 }
@@ -2699,6 +3780,12 @@ function readChunkPages(metadata: Prisma.JsonValue): {
   const pageStart = positiveInteger(metadata.pageStart) ?? positiveInteger(metadata.page);
   const pageEnd = positiveInteger(metadata.pageEnd) ?? pageStart;
   return { pageStart, pageEnd };
+}
+
+function readChunkSheetName(metadata: Prisma.JsonValue): string | null {
+  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return null;
+  const value = metadata.sheetName;
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim().slice(0, 200) : null;
 }
 
 function positiveInteger(value: unknown): number | null {

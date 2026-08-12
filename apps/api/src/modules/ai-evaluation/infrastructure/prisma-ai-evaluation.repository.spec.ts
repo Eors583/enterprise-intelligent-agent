@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { PrismaAiEvaluationRepository } from './prisma-ai-evaluation.repository.js';
 import type { AdminPrismaService } from '../../../database/admin-prisma.service.js';
+import { KnowledgeBoundaryReadService } from '../../knowledge-gateway/knowledge-boundary-read.service.js';
 
 const TENANT_ID = '10000000-0000-4000-8000-000000000001';
 const USER_ID = '10000000-0000-4000-8000-000000000002';
@@ -17,7 +18,10 @@ describe('PrismaAiEvaluationRepository list filters', () => {
           operation(transaction),
       ),
     };
-    const repository = new PrismaAiEvaluationRepository(prisma as unknown as AdminPrismaService);
+    const repository = new PrismaAiEvaluationRepository(
+      prisma as unknown as AdminPrismaService,
+      new KnowledgeBoundaryReadService(prisma as unknown as AdminPrismaService),
+    );
 
     await repository.listRuns(
       {
@@ -103,7 +107,10 @@ describe('PrismaAiEvaluationRepository list filters', () => {
           operation(transaction),
       ),
     };
-    const repository = new PrismaAiEvaluationRepository(prisma as unknown as AdminPrismaService);
+    const repository = new PrismaAiEvaluationRepository(
+      prisma as unknown as AdminPrismaService,
+      new KnowledgeBoundaryReadService(prisma as unknown as AdminPrismaService),
+    );
     const principal = {
       tenantId: TENANT_ID,
       userId: USER_ID,
@@ -193,7 +200,10 @@ describe('PrismaAiEvaluationRepository list filters', () => {
           operation(transaction),
       ),
     };
-    const repository = new PrismaAiEvaluationRepository(prisma as unknown as AdminPrismaService);
+    const repository = new PrismaAiEvaluationRepository(
+      prisma as unknown as AdminPrismaService,
+      new KnowledgeBoundaryReadService(prisma as unknown as AdminPrismaService),
+    );
 
     await expect(
       repository.listBadCases(

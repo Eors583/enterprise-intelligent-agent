@@ -43,6 +43,7 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
   private readonly workerId = `agent-run:${process.pid}:${randomUUID()}`;
   private readonly cancellationWorkerId = `${this.workerId}:cancel`;
   private readonly activeControllers = new Set<AbortController>();
+  private readonly activeRunTasks = new Set<Promise<void>>();
   private stopped = true;
   private timer: NodeJS.Timeout | undefined;
   private cancellationTimer: NodeJS.Timeout | undefined;
@@ -88,7 +89,11 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
     for (const controller of this.activeControllers) {
       controller.abort(new Error('Agent Run worker is shutting down.'));
     }
-    await Promise.all([this.activeTick, this.activeCancellationTick]);
+    await Promise.allSettled([
+      ...this.activeRunTasks,
+      ...(this.activeTick === undefined ? [] : [this.activeTick]),
+      ...(this.activeCancellationTick === undefined ? [] : [this.activeCancellationTick]),
+    ]);
   }
 
   /** Runs one bounded claim batch; exposed for deterministic operational tests. */
@@ -107,6 +112,20 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
         );
       }
     }
+    return events.length;
+  }
+
+  /** Claims only unused long-lived slots; exposed for deterministic scheduler tests. */
+  async runAvailableOnce(): Promise<number> {
+    if (!this.enabled) return 0;
+    const availableSlots = this.concurrency - this.activeRunTasks.size;
+    if (availableSlots <= 0) return 0;
+    const events = await this.queue.claim({
+      workerId: this.workerId,
+      batchSize: availableSlots,
+      claimTtlMs: this.claimTtlMs,
+    });
+    for (const event of events) this.startRunTask(event);
     return events.length;
   }
 
@@ -157,7 +176,7 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
 
   private async tick(): Promise<void> {
     try {
-      await this.runOnce();
+      await this.runAvailableOnce();
     } catch (error) {
       this.logger.error(`Agent Run polling failed (${errorKind(error)}).`);
     } finally {
@@ -173,6 +192,18 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
     } finally {
       this.scheduleCancellation(this.pollIntervalMs);
     }
+  }
+
+  private startRunTask(event: ClaimedAgentRunEvent): void {
+    const task = this.processEvent(event);
+    this.activeRunTasks.add(task);
+    void task.then(
+      () => this.activeRunTasks.delete(task),
+      (error) => {
+        this.activeRunTasks.delete(task);
+        this.logger.error(`Unable to persist an Agent Run transition (${errorKind(error)}).`);
+      },
+    );
   }
 
   private async processEvent(event: ClaimedAgentRunEvent): Promise<void> {
@@ -672,28 +703,28 @@ export function validateGroundedOutput(
   const citations: AgentRunKnowledgeSource[] = [];
   const citationNumberByChunkId = new Map<string, number>();
   const blocks = splitGroundingBlocks(contentWithoutModelCitationNumbers);
-  if (blocks.length === 0) return noGroundedAnswer();
+  if (blocks.length === 0) return groundedFailure(run, sources);
   const normalizedBlocks: string[] = [];
 
   for (const block of blocks) {
     const units = extractGroundedClaimUnits(block);
-    if (units === undefined) return noGroundedAnswer();
+    if (units === undefined) return groundedFailure(run, sources);
     const normalizedUnits: string[] = [];
 
     for (const unit of units) {
       const markerMatches = [...unit.markerSuffix.matchAll(RAW_SOURCE_PATTERN_GLOBAL)];
-      if (markerMatches.length === 0) return noGroundedAnswer();
+      if (markerMatches.length === 0) return groundedFailure(run, sources);
       const visibleMarkers: string[] = [];
       for (const marker of markerMatches) {
         const rawChunkId = marker[1];
-        if (rawChunkId === undefined) return noGroundedAnswer();
+        if (rawChunkId === undefined) return groundedFailure(run, sources);
         const chunkId = rawChunkId.toLowerCase();
         const source = sourceByChunkId.get(chunkId);
-        if (source === undefined) return noGroundedAnswer();
+        if (source === undefined) return groundedFailure(run, sources);
 
         let citationNumber = citationNumberByChunkId.get(chunkId);
         if (citationNumber === undefined) {
-          if (citations.length >= MAX_VISIBLE_CITATIONS) return noGroundedAnswer();
+          if (citations.length >= MAX_VISIBLE_CITATIONS) return groundedFailure(run, sources);
           citations.push(source);
           citationNumber = citations.length;
           citationNumberByChunkId.set(chunkId, citationNumber);
@@ -706,6 +737,28 @@ export function validateGroundedOutput(
   }
 
   return { content: normalizedBlocks.join('\n\n'), citations };
+}
+
+function groundedFailure(
+  run: PreparedAgentRun,
+  sources: readonly AgentRunKnowledgeSource[],
+): { readonly content: string; readonly citations: readonly AgentRunKnowledgeSource[] } {
+  if (run.knowledgeEvidenceFallbackEnabled !== true || sources.length === 0) {
+    return noGroundedAnswer();
+  }
+  const citations = sources
+    .filter((source) => source.excerpt.trim().length > 0)
+    .slice(0, Math.min(3, MAX_VISIBLE_CITATIONS));
+  if (citations.length === 0) return noGroundedAnswer();
+  const evidence = citations.map(
+    (source, index) => `${index + 1}. ${source.excerpt.trim()} [来源${index + 1}]`,
+  );
+  return {
+    content:
+      '模型暂未生成可完整核验的归纳回答。以下是本次权限范围内检索到的相关原文，可先据此判断：\n\n' +
+      evidence.join('\n\n'),
+    citations,
+  };
 }
 
 const KNOWLEDGE_GROUNDING_NO_ANSWER =

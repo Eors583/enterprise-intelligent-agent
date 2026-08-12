@@ -116,7 +116,19 @@ Migration 依次建立基础 schema、复合租户外键、RLS/最小权限、�
 
 ## 启动
 
-激活 Python 虚拟环境后，一次启动 API、AI Runtime、管理后台和桌面端：
+本地完整开发环境推荐使用一键启动。该命令会读取 `.env`，选择普通 PostgreSQL 或 pgvector 开发数据库，启动 Redis、MinIO、Qdrant、Docling、Apache Tika、ClamAV 并等待就绪，再启动 API、AI Runtime、管理后台和桌面端：
+
+```powershell
+pnpm dev:all
+```
+
+只启动并检查基础设施、不启动应用进程：
+
+```powershell
+pnpm dev:all:infra
+```
+
+如果 Docker 基础设施已经运行，激活 Python 虚拟环境后也可以只启动应用进程：
 
 ```powershell
 pnpm dev

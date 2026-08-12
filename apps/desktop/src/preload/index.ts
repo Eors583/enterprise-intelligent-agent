@@ -17,6 +17,7 @@ import {
   type DesktopImRealtimeStartRequest,
   type DesktopImRealtimeUpdate,
   type DesktopOidcLoginRequest,
+  type DesktopOpenKnowledgeSourceRequest,
   type DesktopRuntimeInfo,
 } from '../shared/desktop-api';
 import { createSubscriptionId } from './subscription-id';
@@ -42,6 +43,8 @@ const desktopBridge: DesktopBridge = Object.freeze({
   logout: (sessionId?: string) => ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.logout, sessionId),
   apiRequest: (request: DesktopApiRequest) =>
     ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.apiRequest, request),
+  openKnowledgeSource: (request: DesktopOpenKnowledgeSourceRequest) =>
+    ipcRenderer.invoke(DESKTOP_IPC_CHANNELS.openKnowledgeSource, request),
   subscribeAgentRunStream: (
     request: DesktopAgentRunStreamRequest,
     listener: (update: DesktopAgentRunStreamUpdate) => void,

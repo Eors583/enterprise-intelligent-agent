@@ -17,12 +17,14 @@ import type {
   KnowledgeEntityMerge,
   KnowledgeGraphConflict,
   KnowledgeGraphCorrection,
+  KnowledgeGraphCorrectionBatchResult,
   KnowledgeGraphGovernanceOverview,
   KnowledgeOntology,
   KnowledgeOntologyEntityTypeInput,
   KnowledgeOntologyPredicateInput,
   KnowledgeOntologyVersion,
   TransitionKnowledgeGraphCorrectionRequest,
+  TransitionKnowledgeGraphCorrectionBatchRequest,
   TransitionKnowledgeOntologyVersionRequest,
 } from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
@@ -160,6 +162,27 @@ interface AliasRow {
   readonly correction_id: string | null;
   readonly created_at: Date;
   readonly retired_at: Date | null;
+}
+
+interface SuggestedEntityTypeRow {
+  readonly entity_type: string;
+  readonly entity_count: number;
+}
+
+interface SuggestedPredicateRow {
+  readonly normalized_predicate: string;
+  readonly subject_type: string;
+  readonly object_type: string;
+  readonly relation_count: number;
+}
+
+interface RelationReconciliationRow {
+  readonly relation_id: string;
+  readonly predicate_definition_id: string;
+  readonly relation_created_at: Date;
+  readonly normalized_predicate: string;
+  readonly subject_type: string;
+  readonly object_type: string;
 }
 
 @Injectable()
@@ -436,6 +459,17 @@ export class KnowledgeGraphGovernanceService {
         if (changed !== 1) {
           throw new ConflictException('Ontology Version changed. Refresh and try again.');
         }
+        const reconciliation =
+          request.action === 'PUBLISH'
+            ? await reconcilePublishedOntology(
+                transaction,
+                principal,
+                knowledgeBaseId,
+                versionId,
+                request.comment,
+                now,
+              )
+            : { queuedCorrectionCount: 0, resolvedSchemaGapCount: 0 };
         await recordMutation(transaction, principal, {
           knowledgeBaseId,
           commandType: `ONTOLOGY_VERSION_${request.action}`,
@@ -445,7 +479,11 @@ export class KnowledgeGraphGovernanceService {
           resourceId: versionId,
           resultRevision: request.expectedRevision + 1,
           action: `knowledge.graph.ontology_version.${request.action.toLowerCase()}`,
-          metadata: { comment: request.comment, expectedRevision: request.expectedRevision },
+          metadata: {
+            comment: request.comment,
+            expectedRevision: request.expectedRevision,
+            ...reconciliation,
+          },
         });
         return requireVersionFromOverview(
           await loadOverview(transaction, principal.tenantId, knowledgeBaseId),
@@ -659,6 +697,350 @@ export class KnowledgeGraphGovernanceService {
       throw mapWriteError(error, 'Knowledge Graph Correction transition');
     }
   }
+
+  async transitionRelationCorrectionBatch(
+    knowledgeBaseId: string,
+    request: TransitionKnowledgeGraphCorrectionBatchRequest,
+  ): Promise<KnowledgeGraphCorrectionBatchResult> {
+    const principal = this.access.requireKnowledgeWrite();
+    const identity = requestIdentity(request);
+    try {
+      return await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        const replay = await beginCommand(
+          transaction,
+          principal.tenantId,
+          request.idempotencyKey,
+          identity,
+        );
+        const allRows = await transaction.$queryRaw<CorrectionRow[]>(Prisma.sql`
+          SELECT *
+          FROM public.knowledge_graph_corrections
+          WHERE tenant_id = ${principal.tenantId}::uuid
+            AND knowledge_base_id = ${knowledgeBaseId}::uuid
+            AND action = 'UPSERT_RELATION_VALIDITY'
+            AND patch->>'ontologyVersionId' = ${request.ontologyVersionId}
+          ORDER BY created_at, id
+          FOR UPDATE
+        `);
+        if (replay !== null) {
+          requireReplayType(replay, 'knowledge_graph_correction_batch');
+          return batchResult(request, allRows.length, 0, true);
+        }
+        const targetStatus = request.action === 'APPROVE' ? 'IN_REVIEW' : 'APPROVED';
+        const candidates = allRows.filter(
+          (row) =>
+            row.status === targetStatus &&
+            (request.action !== 'APPROVE' || row.proposed_by_user_id !== principal.userId),
+        );
+        const now = new Date();
+        for (const correction of candidates) {
+          if (request.action === 'APPROVE') {
+            const changed = await transaction.$executeRaw(Prisma.sql`
+              UPDATE public.knowledge_graph_corrections
+              SET status = 'APPROVED', revision = revision + 1,
+                  reviewed_by_user_id = ${principal.userId}::uuid,
+                  review_comment = ${request.comment}, reviewed_at = ${now}
+              WHERE tenant_id = ${principal.tenantId}::uuid
+                AND knowledge_base_id = ${knowledgeBaseId}::uuid
+                AND id = ${correction.id}::uuid
+                AND revision = ${correction.revision}
+                AND status = 'IN_REVIEW'
+            `);
+            if (changed !== 1) {
+              throw new ConflictException('Graph Correction batch changed. Refresh and try again.');
+            }
+          } else {
+            const changed = await transaction.$executeRaw(Prisma.sql`
+              UPDATE public.knowledge_graph_corrections
+              SET status = 'APPLIED', revision = revision + 1, applied_at = ${now}
+              WHERE tenant_id = ${principal.tenantId}::uuid
+                AND knowledge_base_id = ${knowledgeBaseId}::uuid
+                AND id = ${correction.id}::uuid
+                AND revision = ${correction.revision}
+                AND status = 'APPROVED'
+            `);
+            if (changed !== 1) {
+              throw new ConflictException('Graph Correction batch changed. Refresh and try again.');
+            }
+            await applyCorrection(
+              transaction,
+              principal,
+              knowledgeBaseId,
+              { ...correction, status: 'APPLIED', revision: correction.revision + 1 },
+              request.comment,
+              now,
+            );
+          }
+        }
+        await recordMutation(transaction, principal, {
+          knowledgeBaseId,
+          commandType: `GRAPH_RELATION_CORRECTION_BATCH_${request.action}`,
+          idempotencyKey: request.idempotencyKey,
+          requestHash: identity,
+          resourceType: 'knowledge_graph_correction_batch',
+          resourceId: request.ontologyVersionId,
+          resultRevision: 1,
+          action: `knowledge.graph.relation_correction_batch.${request.action.toLowerCase()}`,
+          metadata: {
+            ontologyVersionId: request.ontologyVersionId,
+            comment: request.comment,
+            matchedCount: allRows.length,
+            transitionedCount: candidates.length,
+            skippedCount: allRows.length - candidates.length,
+            correctionIds: candidates.map((item) => item.id),
+          },
+        });
+        return batchResult(request, allRows.length, candidates.length, false);
+      });
+    } catch (error) {
+      throw mapWriteError(error, 'Knowledge Graph Relation Correction batch');
+    }
+  }
+}
+
+async function reconcilePublishedOntology(
+  transaction: Prisma.TransactionClient,
+  principal: AdminPrincipal,
+  knowledgeBaseId: string,
+  ontologyVersionId: string,
+  publishComment: string,
+  now: Date,
+): Promise<{ queuedCorrectionCount: number; resolvedSchemaGapCount: number }> {
+  const versionRows = await transaction.$queryRaw<Array<{ created_by_user_id: string }>>(
+    Prisma.sql`
+      SELECT created_by_user_id
+      FROM public.knowledge_ontology_versions
+      WHERE tenant_id = ${principal.tenantId}::uuid
+        AND knowledge_base_id = ${knowledgeBaseId}::uuid
+        AND id = ${ontologyVersionId}::uuid
+        AND status = 'PUBLISHED'
+    `,
+  );
+  const versionMakerUserId = versionRows[0]?.created_by_user_id;
+  if (versionMakerUserId === undefined) {
+    throw new NotFoundException('Published Ontology Version was not found for reconciliation.');
+  }
+  const relationRows = await transaction.$queryRaw<RelationReconciliationRow[]>(Prisma.sql`
+    SELECT
+      relation.id::text AS relation_id,
+      predicate.id::text AS predicate_definition_id,
+      relation.created_at AS relation_created_at,
+      relation.normalized_predicate,
+      subject.entity_type AS subject_type,
+      object.entity_type AS object_type
+    FROM public.knowledge_relations relation
+    JOIN public.knowledge_entities subject
+      ON subject.tenant_id = relation.tenant_id
+     AND subject.knowledge_base_id = relation.knowledge_base_id
+     AND subject.id = relation.subject_entity_id
+    JOIN public.knowledge_entities object
+      ON object.tenant_id = relation.tenant_id
+     AND object.knowledge_base_id = relation.knowledge_base_id
+     AND object.id = relation.object_entity_id
+    JOIN public.knowledge_ontology_predicates predicate
+      ON predicate.tenant_id = relation.tenant_id
+     AND predicate.knowledge_base_id = relation.knowledge_base_id
+     AND predicate.ontology_version_id = ${ontologyVersionId}::uuid
+     AND predicate.predicate = relation.normalized_predicate
+     AND predicate.domain_type_key = ${normalizedOntologyTypeSql('subject.entity_type')}
+     AND predicate.range_type_key = ${normalizedOntologyTypeSql('object.entity_type')}
+    LEFT JOIN public.knowledge_relation_governance governance
+      ON governance.tenant_id = relation.tenant_id
+     AND governance.knowledge_base_id = relation.knowledge_base_id
+     AND governance.relation_id = relation.id
+    WHERE relation.tenant_id = ${principal.tenantId}::uuid
+      AND relation.knowledge_base_id = ${knowledgeBaseId}::uuid
+      AND relation.status = 'ACTIVE'
+      AND governance.id IS NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM public.knowledge_graph_corrections correction
+        WHERE correction.tenant_id = relation.tenant_id
+          AND correction.knowledge_base_id = relation.knowledge_base_id
+          AND correction.action = 'UPSERT_RELATION_VALIDITY'
+          AND correction.patch->>'relationId' = relation.id::text
+          AND correction.patch->>'ontologyVersionId' = ${ontologyVersionId}
+          AND correction.status IN ('DRAFT', 'IN_REVIEW', 'APPROVED', 'APPLIED')
+      )
+    ORDER BY relation.created_at, relation.id
+  `);
+  let queuedCorrectionCount = 0;
+  for (const relation of relationRows) {
+    const patch = {
+      relationId: relation.relation_id,
+      ontologyVersionId,
+      predicateDefinitionId: relation.predicate_definition_id,
+      validFrom: relation.relation_created_at.toISOString(),
+      validTo: null,
+    };
+    const evidence = [
+      {
+        source: 'ONTOLOGY_PUBLICATION_RECONCILIATION',
+        ontologyVersionId,
+        relationId: relation.relation_id,
+        predicate: relation.normalized_predicate,
+        subjectEntityType: relation.subject_type,
+        objectEntityType: relation.object_type,
+        publishComment,
+      },
+    ];
+    const idempotencyKey = `kg-ontology-reconcile:${ontologyVersionId}:${relation.relation_id}`;
+    const requestHash = stableHash({ action: 'UPSERT_RELATION_VALIDITY', patch, evidence });
+    const correctionId = randomUUID();
+    const inserted = await transaction.$executeRaw(Prisma.sql`
+      INSERT INTO public.knowledge_graph_corrections(
+        id, tenant_id, knowledge_base_id, action, patch, evidence,
+        evidence_hash, status, proposed_by_user_id, idempotency_key, request_hash
+      ) VALUES (
+        ${correctionId}::uuid, ${principal.tenantId}::uuid, ${knowledgeBaseId}::uuid,
+        'UPSERT_RELATION_VALIDITY', ${JSON.stringify(patch)}::jsonb,
+        ${JSON.stringify(evidence)}::jsonb, ${stableHash(evidence)}, 'IN_REVIEW',
+        ${principal.userId}::uuid, ${idempotencyKey}, ${requestHash}
+      )
+      ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+    `);
+    if (inserted !== 1) continue;
+    queuedCorrectionCount += 1;
+    await recordMutation(transaction, principal, {
+      knowledgeBaseId,
+      commandType: 'ONTOLOGY_RELATION_RECONCILIATION_PROPOSE',
+      idempotencyKey,
+      requestHash,
+      resourceType: 'knowledge_graph_correction',
+      resourceId: correctionId,
+      resultRevision: 1,
+      action: 'knowledge.graph.relation_correction.auto_submitted',
+      metadata: {
+        ontologyVersionId,
+        relationId: relation.relation_id,
+        predicateDefinitionId: relation.predicate_definition_id,
+        status: 'IN_REVIEW',
+      },
+    });
+  }
+
+  const schemaGapRows = await transaction.$queryRaw<
+    Array<{
+      id: string;
+      schema_predicate: string;
+      schema_subject_type: string;
+      schema_object_type: string;
+    }>
+  >(Prisma.sql`
+    SELECT conflict.id::text, conflict.schema_predicate,
+      conflict.schema_subject_type, conflict.schema_object_type
+    FROM public.knowledge_graph_conflicts conflict
+    WHERE conflict.tenant_id = ${principal.tenantId}::uuid
+      AND conflict.knowledge_base_id = ${knowledgeBaseId}::uuid
+      AND conflict.conflict_type = 'ONTOLOGY.SCHEMA.GAP'
+      AND conflict.status IN ('OPEN', 'IN_REVIEW')
+      AND EXISTS (
+        SELECT 1
+        FROM public.knowledge_ontology_predicates predicate
+        WHERE predicate.tenant_id = conflict.tenant_id
+          AND predicate.knowledge_base_id = conflict.knowledge_base_id
+          AND predicate.ontology_version_id = ${ontologyVersionId}::uuid
+          AND predicate.predicate = conflict.schema_predicate
+          AND predicate.domain_type_key = ${normalizedOntologyTypeSql(
+            'conflict.schema_subject_type',
+          )}
+          AND predicate.range_type_key = ${normalizedOntologyTypeSql('conflict.schema_object_type')}
+      )
+    ORDER BY conflict.created_at, conflict.id
+    FOR UPDATE
+  `);
+  let resolvedSchemaGapCount = 0;
+  for (const conflict of schemaGapRows) {
+    const resolution = `Published ontology ${ontologyVersionId} now defines ${conflict.schema_subject_type} -[${conflict.schema_predicate}]-> ${conflict.schema_object_type}.`;
+    const patch = { conflictId: conflict.id, resolution };
+    const evidence = [
+      {
+        source: 'INDEPENDENT_ONTOLOGY_PUBLICATION',
+        ontologyVersionId,
+        publishComment,
+        schemaPredicate: conflict.schema_predicate,
+        schemaSubjectType: conflict.schema_subject_type,
+        schemaObjectType: conflict.schema_object_type,
+      },
+    ];
+    const idempotencyKey = `kg-schema-gap-resolve:${ontologyVersionId}:${conflict.id}`;
+    const requestHash = stableHash({ action: 'RESOLVE_CONFLICT', patch, evidence });
+    const correctionId = randomUUID();
+    const inserted = await transaction.$executeRaw(Prisma.sql`
+      INSERT INTO public.knowledge_graph_corrections(
+        id, tenant_id, knowledge_base_id, action, patch, evidence,
+        evidence_hash, status, proposed_by_user_id, reviewed_by_user_id,
+        review_comment, reviewed_at, applied_at, idempotency_key, request_hash
+      ) VALUES (
+        ${correctionId}::uuid, ${principal.tenantId}::uuid, ${knowledgeBaseId}::uuid,
+        'RESOLVE_CONFLICT', ${JSON.stringify(patch)}::jsonb,
+        ${JSON.stringify(evidence)}::jsonb, ${stableHash(evidence)}, 'APPLIED',
+        ${versionMakerUserId}::uuid, ${principal.userId}::uuid,
+        ${publishComment}, ${now}, ${now}, ${idempotencyKey}, ${requestHash}
+      )
+      ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+    `);
+    if (inserted !== 1) continue;
+    const resolved = await transaction.$executeRaw(Prisma.sql`
+      UPDATE public.knowledge_graph_conflicts
+      SET status = 'RESOLVED', revision = revision + 1,
+          reviewed_by_user_id = ${principal.userId}::uuid,
+          resolution_correction_id = ${correctionId}::uuid,
+          review_comment = ${`${publishComment}: ${resolution}`},
+          resolved_at = ${now}, updated_at = ${now}
+      WHERE tenant_id = ${principal.tenantId}::uuid
+        AND knowledge_base_id = ${knowledgeBaseId}::uuid
+        AND id = ${conflict.id}::uuid
+        AND status IN ('OPEN', 'IN_REVIEW')
+    `);
+    if (resolved !== 1) {
+      throw new ConflictException('Schema-gap conflict changed during ontology publication.');
+    }
+    resolvedSchemaGapCount += 1;
+    await recordMutation(transaction, principal, {
+      knowledgeBaseId,
+      commandType: 'ONTOLOGY_SCHEMA_GAP_AUTO_RESOLVE',
+      idempotencyKey,
+      requestHash,
+      resourceType: 'knowledge_graph_correction',
+      resourceId: correctionId,
+      resultRevision: 1,
+      action: 'knowledge.graph.schema_gap.resolved_by_ontology',
+      metadata: {
+        ontologyVersionId,
+        conflictId: conflict.id,
+        schemaPredicate: conflict.schema_predicate,
+        schemaSubjectType: conflict.schema_subject_type,
+        schemaObjectType: conflict.schema_object_type,
+      },
+    });
+  }
+  return { queuedCorrectionCount, resolvedSchemaGapCount };
+}
+
+function normalizedOntologyTypeSql(columnReference: string): Prisma.Sql {
+  const reference = Prisma.raw(columnReference);
+  return Prisma.sql`CASE
+    WHEN regexp_replace(upper(${reference}), '[^A-Z0-9]+', '_', 'g') = ''
+      THEN 'TYPE_' || substr(md5(${reference}), 1, 8)
+    ELSE left(regexp_replace(upper(${reference}), '[^A-Z0-9]+', '_', 'g'), 120)
+  END`;
+}
+
+function batchResult(
+  request: TransitionKnowledgeGraphCorrectionBatchRequest,
+  matchedCount: number,
+  transitionedCount: number,
+  replayed: boolean,
+): KnowledgeGraphCorrectionBatchResult {
+  return {
+    ontologyVersionId: request.ontologyVersionId,
+    action: request.action,
+    matchedCount,
+    transitionedCount,
+    skippedCount: matchedCount - transitionedCount,
+    replayed,
+  };
 }
 
 async function insertOntologyDefinitions(
@@ -992,6 +1374,8 @@ async function loadOverview(
     corrections,
     merges,
     aliases,
+    suggestedEntityTypes,
+    suggestedPredicates,
     counts,
   ] = await Promise.all([
     transaction.$queryRaw<OntologyRow[]>(Prisma.sql`
@@ -1046,12 +1430,47 @@ async function loadOverview(
       ORDER BY created_at DESC, id
       LIMIT 500
     `),
+    transaction.$queryRaw<SuggestedEntityTypeRow[]>(Prisma.sql`
+      SELECT entity_type, count(*)::int AS entity_count
+      FROM public.knowledge_entities
+      WHERE tenant_id = ${tenantId}::uuid
+        AND knowledge_base_id = ${knowledgeBaseId}::uuid
+        AND status = 'ACTIVE'
+      GROUP BY entity_type
+      ORDER BY entity_count DESC, entity_type
+      LIMIT 200
+    `),
+    transaction.$queryRaw<SuggestedPredicateRow[]>(Prisma.sql`
+      SELECT relation.normalized_predicate,
+        subject.entity_type AS subject_type,
+        object.entity_type AS object_type,
+        count(*)::int AS relation_count
+      FROM public.knowledge_relations relation
+      JOIN public.knowledge_entities subject
+        ON subject.tenant_id = relation.tenant_id
+       AND subject.knowledge_base_id = relation.knowledge_base_id
+       AND subject.id = relation.subject_entity_id
+      JOIN public.knowledge_entities object
+        ON object.tenant_id = relation.tenant_id
+       AND object.knowledge_base_id = relation.knowledge_base_id
+       AND object.id = relation.object_entity_id
+      WHERE relation.tenant_id = ${tenantId}::uuid
+        AND relation.knowledge_base_id = ${knowledgeBaseId}::uuid
+        AND relation.status = 'ACTIVE'
+      GROUP BY relation.normalized_predicate, subject.entity_type, object.entity_type
+      ORDER BY relation_count DESC, relation.normalized_predicate,
+        subject.entity_type, object.entity_type
+      LIMIT 500
+    `),
     transaction.$queryRaw<
       Array<{
         eligible_relation_count: number;
         excluded_conflict_count: number;
         merged_entity_count: number;
         published_ontology_version_count: number;
+        ungoverned_relation_count: number;
+        pending_review_relation_count: number;
+        approved_relation_count: number;
       }>
     >(Prisma.sql`
       SELECT
@@ -1080,7 +1499,33 @@ async function loadOverview(
           WHERE tenant_id = ${tenantId}::uuid
             AND knowledge_base_id = ${knowledgeBaseId}::uuid
             AND status = 'PUBLISHED'
-        ) AS published_ontology_version_count
+        ) AS published_ontology_version_count,
+        (
+          SELECT count(*)::int
+          FROM public.knowledge_relations relation
+          LEFT JOIN public.knowledge_relation_governance governance
+            ON governance.tenant_id = relation.tenant_id
+           AND governance.knowledge_base_id = relation.knowledge_base_id
+           AND governance.relation_id = relation.id
+          WHERE relation.tenant_id = ${tenantId}::uuid
+            AND relation.knowledge_base_id = ${knowledgeBaseId}::uuid
+            AND relation.status = 'ACTIVE'
+            AND governance.id IS NULL
+        ) AS ungoverned_relation_count,
+        (
+          SELECT count(*)::int FROM public.knowledge_graph_corrections
+          WHERE tenant_id = ${tenantId}::uuid
+            AND knowledge_base_id = ${knowledgeBaseId}::uuid
+            AND action = 'UPSERT_RELATION_VALIDITY'
+            AND status = 'IN_REVIEW'
+        ) AS pending_review_relation_count,
+        (
+          SELECT count(*)::int FROM public.knowledge_graph_corrections
+          WHERE tenant_id = ${tenantId}::uuid
+            AND knowledge_base_id = ${knowledgeBaseId}::uuid
+            AND action = 'UPSERT_RELATION_VALIDITY'
+            AND status = 'APPROVED'
+        ) AS approved_relation_count
     `),
   ]);
   const mappedVersions = new Map<string, KnowledgeOntologyVersion>();
@@ -1136,9 +1581,43 @@ async function loadOverview(
     excluded_conflict_count: 0,
     merged_entity_count: 0,
     published_ontology_version_count: 0,
+    ungoverned_relation_count: 0,
+    pending_review_relation_count: 0,
+    approved_relation_count: 0,
   };
   return {
     knowledgeBaseId,
+    suggestedOntology: {
+      entityTypes: suggestedEntityTypes.map((row) => ({
+        key: normalizeOntologyTypeKey(row.entity_type),
+        name: ontologyEntityTypeName(row.entity_type),
+        description: `由当前知识图谱中的 ${row.entity_count} 个“${row.entity_type}”实体归纳。`,
+        attributesSchema: {},
+      })),
+      predicates: suggestedPredicates.map((row) => {
+        const domainTypeKey = normalizeOntologyTypeKey(row.subject_type);
+        const rangeTypeKey = normalizeOntologyTypeKey(row.object_type);
+        return {
+          key: uniquePredicateDefinitionKey(row.normalized_predicate, domainTypeKey, rangeTypeKey),
+          predicate: normalizeOntologyCode(row.normalized_predicate, 'PREDICATE'),
+          label: ontologyPredicateName(row.normalized_predicate),
+          domainTypeKey,
+          rangeTypeKey,
+          inversePredicateKey: null,
+          symmetric: false,
+          functional: false,
+          allowSelfLoop: domainTypeKey === rangeTypeKey,
+          temporal: true,
+          attributesSchema: { observedRelationCount: row.relation_count },
+        };
+      }),
+      sourceEntityCount: suggestedEntityTypes.reduce((total, row) => total + row.entity_count, 0),
+      sourceRelationCount: suggestedPredicates.reduce(
+        (total, row) => total + row.relation_count,
+        0,
+      ),
+      ungovernedRelationCount: count.ungoverned_relation_count,
+    },
     ontologies: ontologies.map((row) => ({
       id: row.id,
       knowledgeBaseId: row.knowledge_base_id,
@@ -1165,6 +1644,9 @@ async function loadOverview(
       excludedConflictCount: count.excluded_conflict_count,
       mergedEntityCount: count.merged_entity_count,
       publishedOntologyVersionCount: count.published_ontology_version_count,
+      ungovernedRelationCount: count.ungoverned_relation_count,
+      pendingReviewRelationCount: count.pending_review_relation_count,
+      approvedRelationCount: count.approved_relation_count,
     },
   };
 }
@@ -1352,6 +1834,60 @@ function requireUuidField(record: Record<string, unknown>, key: string): string 
 
 function normalizeAlias(value: string): string {
   return value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('zh-CN');
+}
+
+function normalizeOntologyTypeKey(value: string): string {
+  return normalizeOntologyCode(value, 'TYPE');
+}
+
+function normalizeOntologyCode(value: string, fallbackPrefix: string): string {
+  const normalized = value
+    .normalize('NFKC')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/gu, '_')
+    .replace(/^_+|_+$/gu, '');
+  if (normalized !== '') return normalized.slice(0, 120);
+  return `${fallbackPrefix}_${createHash('md5').update(value).digest('hex').slice(0, 8).toUpperCase()}`;
+}
+
+function uniquePredicateDefinitionKey(
+  predicate: string,
+  domainTypeKey: string,
+  rangeTypeKey: string,
+): string {
+  const base = `${normalizeOntologyCode(predicate, 'PREDICATE')}_${domainTypeKey}_${rangeTypeKey}`;
+  if (base.length <= 120) return base;
+  return `${base.slice(0, 111)}_${stableHash(base).slice(0, 8).toUpperCase()}`;
+}
+
+function ontologyEntityTypeName(value: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    CONCEPT: '概念',
+    DOCUMENT: '文档',
+    IDENTIFIER: '标识符',
+    ORGANIZATION: '组织',
+    PERSON: '人员',
+    SECTION: '章节',
+    SYSTEM: '系统',
+    TOPIC: '主题',
+    VALUE: '属性值',
+  };
+  return labels[value.toUpperCase()] ?? value;
+}
+
+function ontologyPredicateName(value: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    BELONGS_TO: '属于',
+    CONTAINS_SECTION: '包含章节',
+    DEPENDS_ON: '依赖',
+    DESCRIBES: '描述',
+    HAS_ATTRIBUTE: '具有属性',
+    IDENTIFIED_BY: '由标识符识别',
+    OWNED_BY: '负责人',
+    PARENT_OF: '父级章节',
+    REFERENCES: '引用',
+  };
+  return labels[value.toUpperCase()] ?? value;
 }
 
 function iso(value: Date | null): string | null {

@@ -45,7 +45,9 @@ describe('AgentAdminService governed version changes', () => {
         role: 'OWNER',
       }),
     } as unknown as AdminAccessService;
-    const service = new AgentAdminService(prisma, access);
+    const service = new AgentAdminService(prisma, access, {
+      validateKnowledgeBaseSelection: vi.fn().mockResolvedValue(undefined),
+    } as never);
 
     await expect(
       service.update(AGENT_ID, {
@@ -123,7 +125,9 @@ describe('AgentAdminService governed version changes', () => {
         role: 'OWNER',
       }),
     } as unknown as AdminAccessService;
-    const service = new AgentAdminService(prisma, access);
+    const service = new AgentAdminService(prisma, access, {
+      validateKnowledgeBaseSelection: vi.fn().mockResolvedValue(undefined),
+    } as never);
 
     await expect(
       service.update(AGENT_ID, {

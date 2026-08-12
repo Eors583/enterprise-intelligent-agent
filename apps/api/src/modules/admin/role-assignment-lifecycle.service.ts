@@ -199,7 +199,6 @@ export class RoleAssignmentLifecycleService
             roleVersion: {
               is: {
                 status: { in: ['PUBLISHED', 'RETIRED'] },
-                reviewStatus: 'APPROVED',
                 template: { is: { mission: { not: '' } } },
               },
             },

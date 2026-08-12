@@ -96,9 +96,13 @@ def test_embedding_provider_rejects_unsafe_urls(
         RuntimeSettings.from_env(values)
 
 
-def test_embedding_dimension_is_fixed_and_provider_configuration_is_complete() -> None:
-    with pytest.raises(RuntimeConfigurationError, match="must be 1536"):
-        RuntimeSettings.from_env({"AI_RUNTIME_EMBEDDING_DIMENSIONS": "768"})
+def test_embedding_dimension_is_configurable_and_provider_configuration_is_complete() -> None:
+    assert (
+        RuntimeSettings.from_env({"AI_RUNTIME_EMBEDDING_DIMENSIONS": "768"}).embedding_dimensions
+        == 768
+    )
+    with pytest.raises(RuntimeConfigurationError, match="between 1 and 16000"):
+        RuntimeSettings.from_env({"AI_RUNTIME_EMBEDDING_DIMENSIONS": "16001"})
     with pytest.raises(RuntimeConfigurationError, match="AI_RUNTIME_EMBEDDING_API_KEY"):
         RuntimeSettings.from_env(
             {

@@ -19,7 +19,10 @@ import { ExperienceKnowledgeProjectionPort } from '../../experience-knowledge-pr
 import { AdminPrismaService } from '../../../../database/admin-prisma.service.js';
 import type { AdminPrincipal } from '../../../admin/admin-access.service.js';
 import { recordAdminAudit } from '../../../admin/admin-audit.js';
-import { KnowledgeIngestionProcessor } from '../../../knowledge-ingestion/application/knowledge-ingestion.service.js';
+import {
+  KnowledgeGateway,
+  type KnowledgeDocumentMaterialization,
+} from '../../../knowledge-gateway/knowledge-gateway.port.js';
 import { runtimeHash } from '../../../process-orchestration/infrastructure/prisma/runtime-prisma.support.js';
 
 const PREPARATION_LEASE_MS = 5 * 60_000;
@@ -28,8 +31,7 @@ const PREPARATION_LEASE_MS = 5 * 60_000;
 export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowledgeProjectionPort {
   constructor(
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
-    @Inject(KnowledgeIngestionProcessor)
-    private readonly ingestion: KnowledgeIngestionProcessor,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
   ) {
     super();
   }
@@ -59,20 +61,14 @@ export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowle
       title: documentTitle,
       publicationHash,
     });
+    await this.knowledge.requireActiveKnowledgeBase({
+      tenantId: input.principal.tenantId,
+      userId: input.principal.userId,
+      knowledgeBaseId: input.request.knowledgeBaseId,
+    });
     let ownsLease = false;
     const reserved = await this.prisma.withTenant(input.principal.tenantId, async (transaction) => {
       await transaction.$queryRaw`SELECT set_config('app.user_id', ${input.principal.userId}, true)`;
-      const knowledgeBase = await transaction.knowledgeBase.findFirst({
-        where: {
-          tenantId: input.principal.tenantId,
-          id: input.request.knowledgeBaseId,
-          status: 'ACTIVE',
-        },
-        select: { id: true },
-      });
-      if (knowledgeBase === null) {
-        throw new NotFoundException('The target active Knowledge Base was not found.');
-      }
       const leaseExpiresAt = new Date(input.now.getTime() + PREPARATION_LEASE_MS);
       const inserted = await transaction.$queryRaw<Array<{ readonly id: string }>>(Prisma.sql`
         INSERT INTO public."experience_knowledge_projections" (
@@ -194,7 +190,11 @@ export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowle
     leaseToken: string,
   ): Promise<void> {
     const marker = projectionMarker(projection.id);
-    const recovered = await this.findMaterializedVersion(input.principal.tenantId, marker);
+    const recovered = await this.findMaterializedVersion(
+      input.principal.tenantId,
+      input.principal.userId,
+      marker,
+    );
     const identity = recovered ?? (await this.createKnowledgeVersion(input, content, marker));
     await this.prisma.withTenant(input.principal.tenantId, async (transaction) => {
       await transaction.$queryRaw`SELECT set_config('app.user_id', ${input.principal.userId}, true)`;
@@ -246,31 +246,35 @@ export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowle
       role: input.principal.tenantRole,
       authenticationSource: input.principal.authenticationSource,
     };
-    const documentId = await this.ingestion.createTextVersion(principal, {
-      knowledgeBaseId: input.request.knowledgeBaseId,
-      title: projectionDocumentTitle(input),
-      sourceType: 'MARKDOWN',
-      content,
-      publish: true,
-      changeSummary: marker,
-      governance: {
-        ownerUserId: input.candidate.contributorUserId,
-        classification: knowledgeClassification(input.candidate.sensitivity),
-        scopeMode: 'RESTRICTED',
-        organizationScopeIds: sortedUnique(input.request.targetOrgUnitIds),
-        projectScopeIds: [],
-        taskScopeIds: [],
-        roleTemplateScopeIds: sortedUnique(input.request.targetRoleTemplateIds),
-        dataLabels: sortedUnique(input.candidate.permissionLabels),
-        effectiveFrom: input.now.toISOString(),
-        expiresAt: input.candidate.expiresAt,
-        retentionUntil: input.candidate.expiresAt,
-        retentionAction: 'ARCHIVE',
-        supersedesVersionId: null,
+    const documentId = await this.knowledge.createTextVersionAs({
+      principal,
+      document: {
+        knowledgeBaseId: input.request.knowledgeBaseId,
+        title: projectionDocumentTitle(input),
+        sourceType: 'MARKDOWN',
+        content,
+        publish: true,
+        changeSummary: marker,
+        governance: {
+          ownerUserId: input.candidate.contributorUserId,
+          classification: knowledgeClassification(input.candidate.sensitivity),
+          scopeMode: 'RESTRICTED',
+          organizationScopeIds: sortedUnique(input.request.targetOrgUnitIds),
+          projectScopeIds: [],
+          taskScopeIds: [],
+          roleTemplateScopeIds: sortedUnique(input.request.targetRoleTemplateIds),
+          dataLabels: sortedUnique(input.candidate.permissionLabels),
+          effectiveFrom: input.now.toISOString(),
+          expiresAt: input.candidate.expiresAt,
+          retentionUntil: input.candidate.expiresAt,
+          retentionAction: 'ARCHIVE',
+          supersedesVersionId: null,
+        },
       },
     });
     const identity = await this.findMaterializedVersion(
       input.principal.tenantId,
+      input.principal.userId,
       marker,
       documentId,
     );
@@ -282,26 +286,15 @@ export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowle
 
   private findMaterializedVersion(
     tenantId: string,
+    userId: string,
     marker: string,
     documentId?: string,
   ): Promise<MaterializedIdentity | null> {
-    return this.prisma.withTenant(tenantId, async (transaction) => {
-      const version = await transaction.knowledgeDocumentVersion.findFirst({
-        where: {
-          tenantId,
-          changeSummary: marker,
-          ...(documentId === undefined ? {} : { documentId }),
-        },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-        select: { id: true, documentId: true, versionNumber: true },
-      });
-      return version === null
-        ? null
-        : {
-            documentId: version.documentId,
-            documentVersionId: version.id,
-            documentVersion: version.versionNumber,
-          };
+    return this.knowledge.findDocumentVersionByChangeSummary({
+      tenantId,
+      userId,
+      changeSummary: marker,
+      ...(documentId === undefined ? {} : { documentId }),
     });
   }
 
@@ -319,13 +312,30 @@ export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowle
     userId: string | null,
     experienceId: string,
   ): Promise<ExperienceKnowledgeProjection | null> {
+    const baseRow = await this.prisma.withTenant(tenantId, async (transaction) => {
+      if (userId !== null) {
+        await transaction.$queryRaw`SELECT set_config('app.user_id', ${userId}, true)`;
+      }
+      return findProjectionRow(transaction, tenantId, experienceId);
+    });
+    if (baseRow === null) return null;
+    const materialization =
+      baseRow.document_version_id === null
+        ? null
+        : await this.knowledge.readDocumentMaterialization({
+            tenantId,
+            userId: userId ?? baseRow.created_by_user_id,
+            documentVersionId: baseRow.document_version_id,
+          });
+    const row = withMaterialization(baseRow, materialization);
+    const next = effectiveProjectionState(row);
+    if (next.status === row.status && next.errorCode === row.error_code) {
+      return mapProjection(row);
+    }
     return this.prisma.withTenant(tenantId, async (transaction) => {
       if (userId !== null) {
         await transaction.$queryRaw`SELECT set_config('app.user_id', ${userId}, true)`;
       }
-      const row = await findProjectionRow(transaction, tenantId, experienceId);
-      if (row === null) return null;
-      const next = effectiveProjectionState(row);
       if (next.status !== row.status || next.errorCode !== row.error_code) {
         const updated = await transaction.$executeRaw(Prisma.sql`
           UPDATE public."experience_knowledge_projections"
@@ -341,7 +351,9 @@ export class PrismaExperienceKnowledgeProjectionAdapter extends ExperienceKnowle
           await recordProjectionReconciliationEvent(transaction, row, next);
         }
         const refreshed = await findProjectionRow(transaction, tenantId, experienceId);
-        return refreshed === null ? null : mapProjection(refreshed);
+        return refreshed === null
+          ? null
+          : mapProjection(withMaterialization(refreshed, materialization));
       }
       return mapProjection(row);
     });
@@ -477,53 +489,43 @@ async function findProjectionRow(
     SELECT
       projection.*,
       candidate."status"::text AS candidate_status,
-      document."status"::text AS document_status,
-      document."current_version_id" AS document_current_version_id,
-      version."status"::text AS version_status,
-      version."governance_review_status",
-      version."published_at",
-      latest_job."status"::text AS ingestion_status,
-      latest_job."error_code" AS ingestion_error_code,
-      coalesce(chunk_stats.chunk_count, 0)::int AS chunk_count,
-      coalesce(chunk_stats.embedding_count, 0)::int AS embedding_count
+      NULL::text AS document_status,
+      NULL::uuid AS document_current_version_id,
+      NULL::text AS version_status,
+      NULL::text AS governance_review_status,
+      NULL::timestamptz AS published_at,
+      NULL::text AS ingestion_status,
+      NULL::text AS ingestion_error_code,
+      0::int AS chunk_count,
+      0::int AS embedding_count
     FROM public."experience_knowledge_projections" projection
     JOIN public."experience_candidates" candidate
       ON candidate."tenant_id" = projection."tenant_id"
      AND candidate."id" = projection."experience_id"
-    LEFT JOIN public."knowledge_documents" document
-      ON document."tenant_id" = projection."tenant_id"
-     AND document."id" = projection."document_id"
-    LEFT JOIN public."knowledge_document_versions" version
-      ON version."tenant_id" = projection."tenant_id"
-     AND version."id" = projection."document_version_id"
-    LEFT JOIN LATERAL (
-      SELECT job."status", job."error_code"
-      FROM public."knowledge_ingestion_jobs" job
-      WHERE job."tenant_id" = projection."tenant_id"
-        AND job."document_version_id" = projection."document_version_id"
-      ORDER BY job."created_at" DESC, job."id" DESC
-      LIMIT 1
-    ) latest_job ON true
-    LEFT JOIN LATERAL (
-      SELECT
-        count(*)::int AS chunk_count,
-        count(*) FILTER (
-          WHERE EXISTS (
-            SELECT 1
-            FROM public."knowledge_chunk_embeddings" embedding
-            WHERE embedding."tenant_id" = chunk."tenant_id"
-              AND embedding."chunk_id" = chunk."id"
-          )
-        )::int AS embedding_count
-      FROM public."knowledge_chunks" chunk
-      WHERE chunk."tenant_id" = projection."tenant_id"
-        AND chunk."document_version_id" = projection."document_version_id"
-    ) chunk_stats ON true
     WHERE projection."tenant_id" = ${tenantId}::uuid
       AND projection."experience_id" = ${experienceId}::uuid
     LIMIT 1
   `);
   return rows[0] ?? null;
+}
+
+function withMaterialization(
+  row: ProjectionRow,
+  materialization: KnowledgeDocumentMaterialization | null,
+): ProjectionRow {
+  if (materialization === null) return row;
+  return {
+    ...row,
+    document_status: materialization.documentStatus,
+    document_current_version_id: materialization.documentCurrentVersionId,
+    version_status: materialization.versionStatus,
+    governance_review_status: materialization.governanceReviewStatus,
+    published_at: materialization.publishedAt,
+    ingestion_status: materialization.ingestionStatus,
+    ingestion_error_code: materialization.ingestionErrorCode,
+    chunk_count: materialization.chunkCount,
+    embedding_count: materialization.embeddingCount,
+  };
 }
 
 function mapProjection(row: ProjectionRow): ExperienceKnowledgeProjection {

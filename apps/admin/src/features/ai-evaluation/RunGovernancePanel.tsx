@@ -148,7 +148,7 @@ export function RunGovernancePanel({
       });
       setVerifyRunId('');
       reload();
-      onNotice('Run 已完成独立验证；发布门禁仍会复核对象快照、数据集和全部阈值。');
+      onNotice('Run 已完成独立验证；结果可作为质量参考，不会阻塞知识或智能体发布。');
     } catch (caught) {
       onError(messageFromError(caught));
     } finally {
@@ -370,7 +370,7 @@ export function RunGovernancePanel({
                             disabled={busyId !== null}
                             onClick={() => void checkReadiness(run)}
                           >
-                            检查发布门禁
+                            查看质量检查
                           </button>
                         ) : null}
                       </div>
@@ -452,7 +452,7 @@ export function RunGovernancePanel({
       {readiness ? (
         <article className={`card evaluation-readiness ${readiness.ready ? 'ready' : 'blocked'}`}>
           <header>
-            <h3>{readiness.ready ? '发布门禁已满足' : '发布门禁阻断'}</h3>
+            <h3>{readiness.ready ? '质量检查通过' : '质量检查未通过'}</h3>
             <strong>{readiness.ready ? 'READY' : 'BLOCKED'}</strong>
           </header>
           <p>

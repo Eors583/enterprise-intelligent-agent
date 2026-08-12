@@ -27,10 +27,10 @@ describe('RoleBlueprintDetail', () => {
     expect(html).toContain('双人审批要求版本作者不能审核自己的版本');
     expect(html).toContain('等待另一位管理员审核');
     expect(html).not.toContain('审批 / 退回');
-    expect(html).not.toContain('>发布<');
+    expect(html).toContain('>发布<');
   });
 
-  it('shows publish only for an approved version and rollback only for a historical version', () => {
+  it('shows publish for testing versions and rollback only for a historical version', () => {
     const approved = roleVersion({
       id: '00000000-0000-7000-8000-000000000011',
       version: 3,

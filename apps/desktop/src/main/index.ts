@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { mkdir, unlink, writeFile } from 'node:fs/promises';
 import { app, BrowserWindow, ipcMain, session, shell, type IpcMainInvokeEvent } from 'electron';
 import {
   DESKTOP_IPC_CHANNELS,
@@ -12,6 +13,7 @@ import {
   type DesktopImRealtimeStartRequest,
   type DesktopImRealtimeUpdate,
   type DesktopOidcLoginRequest,
+  type DesktopOpenKnowledgeSourceRequest,
   type DesktopRuntimeInfo,
 } from '../shared/desktop-api';
 import { AccountStore } from './account-store';
@@ -111,6 +113,23 @@ function registerIpcHandlers(): void {
     assertTrustedIpcSender(event);
     if (!request || typeof request !== 'object') throw new Error('Invalid desktop API request.');
     return requireAuthManager().apiRequest(request as DesktopApiRequest);
+  });
+  ipcMain.handle(DESKTOP_IPC_CHANNELS.openKnowledgeSource, async (event, request: unknown) => {
+    assertTrustedIpcSender(event);
+    if (!request || typeof request !== 'object') {
+      throw new Error('Invalid knowledge source request.');
+    }
+    const sourceRequest = request as DesktopOpenKnowledgeSourceRequest;
+    const source = await requireAuthManager().downloadKnowledgeSource(sourceRequest);
+    const directory = join(app.getPath('temp'), 'enterprise-agent-knowledge-source');
+    await mkdir(directory, { recursive: true });
+    const fileName = safeKnowledgeSourceFileName(sourceRequest.fileName, source.mimeType);
+    const target = join(directory, `${sourceRequest.documentVersionId}-${fileName}`);
+    await writeFile(target, source.bytes, { mode: 0o600 });
+    const openError = await shell.openPath(target);
+    if (openError) throw new Error(`Could not open knowledge source: ${openError}`);
+    const cleanup = setTimeout(() => void unlink(target).catch(() => undefined), 5 * 60_000);
+    cleanup.unref();
   });
   ipcMain.handle(DESKTOP_IPC_CHANNELS.startAgentRunStream, async (event, request: unknown) => {
     assertTrustedIpcSender(event);
@@ -217,6 +236,22 @@ function registerIpcHandlers(): void {
       imRealtimeStreams.delete(subscriptionId);
     }
   });
+}
+
+function safeKnowledgeSourceFileName(fileName: string, mimeType: string): string {
+  const normalized = fileName.replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '_').trim();
+  const base = (normalized || 'knowledge-source').slice(0, 220);
+  if (/\.[a-z0-9]{1,10}$/iu.test(base)) return base;
+  const extension = new Map<string, string>([
+    ['application/pdf', '.pdf'],
+    ['application/vnd.openxmlformats-officedocument.wordprocessingml.document', '.docx'],
+    ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', '.xlsx'],
+    ['application/vnd.openxmlformats-officedocument.presentationml.presentation', '.pptx'],
+    ['text/html', '.html'],
+    ['text/markdown', '.md'],
+    ['text/plain', '.txt'],
+  ]).get(mimeType.split(';', 1)[0]?.trim().toLowerCase() ?? '');
+  return `${base}${extension ?? '.bin'}`;
 }
 
 async function runOidcLogin(request: DesktopOidcLoginRequest): Promise<DesktopAuthState> {

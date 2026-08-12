@@ -2,6 +2,8 @@ import type {
   AdminMember,
   AdminOrganizationResponse,
   AdminOrgUnit,
+  EmploymentType,
+  InviteMemberRequest,
   IssueMemberInvitationResponse,
   MemberInvitation,
   TenantRole,
@@ -10,7 +12,6 @@ import type {
 import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
-  createMember,
   getOrganization,
   inviteMember,
   issueDirectoryMemberInvitation,
@@ -18,7 +19,7 @@ import {
   resendMemberInvitation,
   resetMemberPassword,
   updateMember,
-} from '@/api/admin-api';
+} from '@/api/member-api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
 import {
@@ -32,6 +33,8 @@ import {
   Spinner,
   StatusPill,
 } from '@/components/ui';
+
+import './members.css';
 
 function unitName(units: ReadonlyArray<AdminOrgUnit>, id: string | undefined): string {
   if (!id) return '未分配部门';
@@ -91,7 +94,6 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
   const [reloadKey, setReloadKey] = useState(0);
   const [query, setQuery] = useState('');
   const [status, setStatus] = useState('ALL');
-  const [createOpen, setCreateOpen] = useState(false);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [invitations, setInvitations] = useState<ReadonlyArray<MemberInvitation>>([]);
   const [editing, setEditing] = useState<AdminMember | null>(null);
@@ -148,19 +150,8 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
             onClick={() => setInviteOpen(true)}
             disabled={!data?.orgUnits.some((unit) => unit.status === 'ACTIVE')}
           >
-            <Icon name="plus" size={17} /> 邀请成员
+            <Icon name="plus" size={17} /> 添加成员
           </button>
-          <details className="page-action-advanced">
-            <summary>高级</summary>
-            <button
-              className="button secondary"
-              type="button"
-              onClick={() => setCreateOpen(true)}
-              disabled={!data?.orgUnits.some((unit) => unit.status === 'ACTIVE')}
-            >
-              使用初始密码建号
-            </button>
-          </details>
         </div>
       </header>
       {notice ? (
@@ -278,20 +269,10 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
         </div>
       ) : null}
 
-      {createOpen && data ? (
-        <CreateMemberModal
-          units={data.orgUnits}
-          onClose={() => setCreateOpen(false)}
-          onCreated={() => {
-            setCreateOpen(false);
-            setNotice('成员账号已通过兼容方式创建，请通过安全渠道发送初始密码。');
-            reload();
-          }}
-        />
-      ) : null}
       {inviteOpen && data ? (
         <InviteMemberModal
           units={data.orgUnits}
+          members={data.members}
           onClose={() => setInviteOpen(false)}
           onIssued={() => reload()}
         />
@@ -317,20 +298,19 @@ export function MembersPage({ currentUserId }: { currentUserId: string }): React
 
 function InviteMemberModal({
   units,
+  members,
   onClose,
   onIssued,
 }: {
   units: ReadonlyArray<AdminOrgUnit>;
+  members: ReadonlyArray<AdminMember>;
   onClose: () => void;
   onIssued: () => void;
 }): ReactNode {
   const activeUnits = units.filter((unit) => unit.status === 'ACTIVE');
-  const [displayName, setDisplayName] = useState('');
-  const [email, setEmail] = useState('');
-  const [role, setRole] = useState<TenantRole>('MEMBER');
-  const [orgUnitId, setOrgUnitId] = useState(activeUnits[0]?.id ?? '');
-  const [title, setTitle] = useState('');
-  const [employeeNumber, setEmployeeNumber] = useState('');
+  const managerCandidates = members.filter(
+    (member) => member.status === 'ACTIVE' && member.employment?.status === 'ACTIVE',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [issued, setIssued] = useState<IssueMemberInvitationResponse | null>(null);
@@ -340,14 +320,9 @@ function InviteMemberModal({
     setSubmitting(true);
     setError(null);
     try {
-      const result = await inviteMember({
-        displayName,
-        email,
-        role,
-        orgUnitId,
-        ...(title.trim() ? { title } : {}),
-        ...(employeeNumber.trim() ? { employeeNumber } : {}),
-      });
+      const result = await inviteMember(
+        buildMemberInvitationRequest(new FormData(event.currentTarget as HTMLFormElement)),
+      );
       setIssued(result);
       onIssued();
     } catch (caught) {
@@ -359,8 +334,8 @@ function InviteMemberModal({
 
   return (
     <Modal
-      title="邀请企业成员"
-      description="成员通过一次性链接设置密码并激活账号；系统仅保存令牌摘要。"
+      title="添加成员"
+      description="填写成员的基础资料和工作关系。创建后，成员通过一次性邀请设置密码，并在用户端自行完善个人使用说明书。"
       onClose={onClose}
       size="wide"
     >
@@ -396,67 +371,160 @@ function InviteMemberModal({
           </div>
         </div>
       ) : (
-        <form className="form-stack" onSubmit={(event) => void submit(event)}>
-          <div className="form-grid two">
-            <label>
-              <span>成员姓名</span>
-              <input
-                autoFocus
-                value={displayName}
-                onChange={(event) => setDisplayName(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>登录邮箱</span>
-              <input
-                type="email"
-                value={email}
-                onChange={(event) => setEmail(event.target.value)}
-              />
-            </label>
-          </div>
-          <div className="form-grid two">
-            <label>
-              <span>所属部门</span>
-              <select value={orgUnitId} onChange={(event) => setOrgUnitId(event.target.value)}>
-                {activeUnits.map((unit) => (
-                  <option key={unit.id} value={unit.id}>
-                    {unit.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label>
-              <span>企业角色</span>
-              <select value={role} onChange={(event) => setRole(event.target.value as TenantRole)}>
-                {ROLES.map((item) => (
-                  <option key={item} value={item}>
-                    {roleLabel(item)}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div className="form-grid two">
-            <label>
-              <span>职位（可选）</span>
-              <input value={title} onChange={(event) => setTitle(event.target.value)} />
-            </label>
-            <label>
-              <span>工号（可选）</span>
-              <input
-                value={employeeNumber}
-                onChange={(event) => setEmployeeNumber(event.target.value)}
-              />
-            </label>
-          </div>
+        <form
+          className="form-stack member-onboarding-form"
+          onSubmit={(event) => void submit(event)}
+        >
+          <MemberFormSection
+            title="基础信息"
+            description="用于成员登录、通讯录展示和日常联系。姓名、部门、手机号和工作邮箱为必填项。"
+          >
+            <div className="form-grid two">
+              <label>
+                <span>姓名</span>
+                <input
+                  name="displayName"
+                  autoFocus
+                  required
+                  maxLength={120}
+                  placeholder="例如 张晨"
+                />
+              </label>
+              <label>
+                <span>部门</span>
+                <select name="orgUnitId" required defaultValue={activeUnits[0]?.id ?? ''}>
+                  {activeUnits.map((unit) => (
+                    <option key={unit.id} value={unit.id}>
+                      {unit.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="form-grid two">
+              <label>
+                <span>手机号码</span>
+                <span className="member-phone-field">
+                  <select name="phoneCountryCode" aria-label="手机号国家代码" defaultValue="+86">
+                    <option value="+86">+86</option>
+                    <option value="+852">+852</option>
+                    <option value="+853">+853</option>
+                    <option value="+886">+886</option>
+                    <option value="+65">+65</option>
+                    <option value="+1">+1</option>
+                    <option value="+44">+44</option>
+                  </select>
+                  <input
+                    name="phoneNumber"
+                    inputMode="tel"
+                    required
+                    maxLength={30}
+                    placeholder="成员可使用该号码联系"
+                  />
+                </span>
+              </label>
+              <label>
+                <span>工作邮箱</span>
+                <input
+                  name="email"
+                  type="email"
+                  required
+                  maxLength={320}
+                  placeholder="name@company.com"
+                />
+              </label>
+            </div>
+            <div className="form-grid two">
+              <label>
+                <span>头像链接（可选）</span>
+                <input name="avatarUrl" type="url" maxLength={2048} placeholder="https://…" />
+              </label>
+              <label>
+                <span>工号（可选）</span>
+                <input name="employeeNumber" maxLength={255} />
+              </label>
+            </div>
+          </MemberFormSection>
+
+          <MemberFormSection
+            title="工作信息"
+            description="记录人员类型、入职信息和汇报关系，供组织权限与智能体工作上下文使用。"
+          >
+            <div className="form-grid two">
+              <label>
+                <span>人员类型</span>
+                <select name="employmentType" defaultValue="REGULAR" required>
+                  {EMPLOYMENT_TYPES.map((type) => (
+                    <option key={type} value={type}>
+                      {employmentTypeLabel(type)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>入职日期</span>
+                <input name="hireDate" type="date" defaultValue={todayDate()} />
+              </label>
+            </div>
+            <div className="form-grid two">
+              <label>
+                <span>工作国家或地区（可选）</span>
+                <input name="countryOrRegion" maxLength={120} placeholder="例如 中国" />
+              </label>
+              <label>
+                <span>工作城市（可选）</span>
+                <input name="city" maxLength={120} placeholder="例如 深圳" />
+              </label>
+            </div>
+            <div className="form-grid two">
+              <label>
+                <span>直属上级（可选）</span>
+                <select name="directManagerUserId" defaultValue="">
+                  <option value="">未设置</option>
+                  {managerCandidates.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.displayName} · {member.employment?.title ?? '未设置职位'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>虚线上级（可选）</span>
+                <select name="dottedLineManagerUserId" defaultValue="">
+                  <option value="">未设置</option>
+                  {managerCandidates.map((member) => (
+                    <option key={member.id} value={member.id}>
+                      {member.displayName} · {member.employment?.title ?? '未设置职位'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <div className="form-grid two">
+              <label>
+                <span>职务（可选）</span>
+                <input name="title" maxLength={200} placeholder="例如 产品经理" />
+              </label>
+              <label>
+                <span>企业角色</span>
+                <select name="role" defaultValue="MEMBER">
+                  {ROLES.map((item) => (
+                    <option key={item} value={item}>
+                      {roleLabel(item)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          </MemberFormSection>
+
           <FieldError message={error} />
           <div className="modal-actions">
             <button className="button secondary" type="button" onClick={onClose}>
               取消
             </button>
-            <button className="button primary" type="submit" disabled={submitting || !orgUnitId}>
-              {submitting ? <Spinner label="正在创建邀请…" /> : '创建邀请'}
+            <button className="button primary" type="submit" disabled={submitting}>
+              {submitting ? <Spinner label="正在添加成员…" /> : '添加成员并发送邀请'}
             </button>
           </div>
         </form>
@@ -465,144 +533,76 @@ function InviteMemberModal({
   );
 }
 
-function CreateMemberModal({
-  units,
-  onClose,
-  onCreated,
+const EMPLOYMENT_TYPES: ReadonlyArray<EmploymentType> = [
+  'REGULAR',
+  'INTERN',
+  'OUTSOURCED',
+  'LABOR',
+  'CONSULTANT',
+];
+
+function employmentTypeLabel(type: EmploymentType): string {
+  return {
+    REGULAR: '正式',
+    INTERN: '实习',
+    OUTSOURCED: '外包',
+    LABOR: '劳务',
+    CONSULTANT: '顾问',
+  }[type];
+}
+
+function todayDate(): string {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 10);
+}
+
+function MemberFormSection({
+  title,
+  description,
+  children,
 }: {
-  units: ReadonlyArray<AdminOrgUnit>;
-  onClose: () => void;
-  onCreated: () => void;
+  title: string;
+  description: string;
+  children: ReactNode;
 }): ReactNode {
-  const activeUnits = units.filter((unit) => unit.status === 'ACTIVE');
-  const [displayName, setDisplayName] = useState('');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [role, setRole] = useState<TenantRole>('MEMBER');
-  const [orgUnitId, setOrgUnitId] = useState(activeUnits[0]?.id ?? '');
-  const [title, setTitle] = useState('');
-  const [employeeNumber, setEmployeeNumber] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const submit = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    try {
-      await createMember({
-        displayName,
-        email,
-        password,
-        role,
-        orgUnitId,
-        ...(title.trim() ? { title } : {}),
-        ...(employeeNumber.trim() ? { employeeNumber } : {}),
-      });
-      onCreated();
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   return (
-    <Modal
-      title="添加企业成员"
-      description="兼容旧系统的高级建号方式。常规成员请使用一次性邀请，避免管理员接触初始密码。"
-      onClose={onClose}
-      size="wide"
-    >
-      <form className="form-stack" onSubmit={(event) => void submit(event)}>
-        <div className="form-grid two">
-          <label>
-            <span>成员姓名</span>
-            <input
-              autoFocus
-              value={displayName}
-              onChange={(event) => setDisplayName(event.target.value)}
-              placeholder="例如 张晨"
-            />
-          </label>
-          <label>
-            <span>登录邮箱</span>
-            <input
-              type="email"
-              autoComplete="off"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@company.com"
-            />
-          </label>
-        </div>
-        <div className="form-grid two">
-          <label>
-            <span>所属部门</span>
-            <select value={orgUnitId} onChange={(event) => setOrgUnitId(event.target.value)}>
-              {activeUnits.map((unit) => (
-                <option key={unit.id} value={unit.id}>
-                  {unit.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>职位（可选）</span>
-            <input
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              placeholder="例如 产品经理"
-            />
-          </label>
-        </div>
-        <div className="form-grid two">
-          <label>
-            <span>企业角色</span>
-            <select value={role} onChange={(event) => setRole(event.target.value as TenantRole)}>
-              {ROLES.map((item) => (
-                <option key={item} value={item}>
-                  {roleLabel(item)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span>工号（可选）</span>
-            <input
-              value={employeeNumber}
-              onChange={(event) => setEmployeeNumber(event.target.value)}
-            />
-          </label>
-        </div>
-        <label>
-          <span>初始密码</span>
-          <span className="password-input">
-            <input
-              type={showPassword ? 'text' : 'password'}
-              autoComplete="new-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              placeholder="至少 10 位"
-            />
-            <button type="button" onClick={() => setShowPassword((value) => !value)}>
-              {showPassword ? '隐藏' : '显示'}
-            </button>
-          </span>
-        </label>
-        <FieldError message={error} />
-        <div className="modal-actions">
-          <button className="button secondary" type="button" onClick={onClose}>
-            取消
-          </button>
-          <button className="button primary" type="submit" disabled={submitting || !orgUnitId}>
-            {submitting ? <Spinner label="正在创建…" /> : '创建成员'}
-          </button>
-        </div>
-      </form>
-    </Modal>
+    <fieldset className="member-form-section">
+      <legend>{title}</legend>
+      <p>{description}</p>
+      <div className="member-form-section-content">{children}</div>
+    </fieldset>
   );
+}
+
+export function buildMemberInvitationRequest(form: FormData): InviteMemberRequest {
+  const phoneCountryCode = requiredFormValue(form, 'phoneCountryCode');
+  const phoneNumber = requiredFormValue(form, 'phoneNumber');
+  return {
+    displayName: requiredFormValue(form, 'displayName'),
+    email: requiredFormValue(form, 'email'),
+    role: requiredFormValue(form, 'role') as TenantRole,
+    orgUnitId: requiredFormValue(form, 'orgUnitId'),
+    phone: `${phoneCountryCode} ${phoneNumber}`,
+    employmentType: requiredFormValue(form, 'employmentType') as EmploymentType,
+    ...optionalFormField(form, 'avatarUrl'),
+    ...optionalFormField(form, 'title'),
+    ...optionalFormField(form, 'employeeNumber'),
+    ...optionalFormField(form, 'hireDate'),
+    ...optionalFormField(form, 'countryOrRegion'),
+    ...optionalFormField(form, 'city'),
+    ...optionalFormField(form, 'directManagerUserId'),
+    ...optionalFormField(form, 'dottedLineManagerUserId'),
+  };
+}
+
+function requiredFormValue(form: FormData, name: string): string {
+  return String(form.get(name) ?? '').trim();
+}
+
+function optionalFormField(form: FormData, name: string): Record<string, string> {
+  const value = requiredFormValue(form, name);
+  return value.length === 0 ? {} : { [name]: value };
 }
 
 function EditMemberModal({

@@ -33,6 +33,7 @@ import {
   type MySection,
 } from './MyWorkspace';
 import { NewConversationDialog } from './NewConversationDialog';
+import { PersonalManualWorkspace } from '../personal-manual/PersonalManualWorkspace';
 
 interface DirectoryWorkspaceProps {
   payload: BootstrapPayload;
@@ -191,10 +192,11 @@ export function DirectoryWorkspace({
 
   useEffect(() => {
     if (!isMessagesActive || !conversations.data) return;
+    if (contactOperation?.status === 'pending' || contactOperation?.status === 'error') return;
     if (!conversations.data.some((conversation) => conversation.id === selectedConversationId)) {
       setSelectedConversationId(conversations.data[0]?.id ?? null);
     }
-  }, [conversations.data, isMessagesActive, selectedConversationId]);
+  }, [contactOperation?.status, conversations.data, isMessagesActive, selectedConversationId]);
 
   useEffect(() => {
     if (!roleAssignments.data) return;
@@ -243,7 +245,21 @@ export function DirectoryWorkspace({
       return;
     }
 
+    const existing = findDirectConversation(conversations.data ?? [], operation.request);
+    if (existing !== null) {
+      setSelectedConversationId(existing.id);
+      setPreferredResponseTarget({ conversationId: existing.id, kind: operation.kind });
+      setActiveNavigationId('messages');
+      setContactOperation(null);
+      setNewConversationKind(null);
+      return;
+    }
+
     setContactOperation({ ...operation, status: 'pending', message: undefined });
+    setSelectedConversationId(null);
+    setPreferredResponseTarget(null);
+    setActiveNavigationId('messages');
+    setNewConversationKind(null);
     createConversation.mutate(operation.request, {
       onSuccess: (conversation) => {
         setSelectedConversationId(conversation.id);
@@ -267,7 +283,7 @@ export function DirectoryWorkspace({
       kind === 'agent' &&
       (member.agent === null ||
         !member.capabilities.canContactAgent ||
-        member.agent.operationalAvailability.status !== 'AVAILABLE')
+        member.agent.status !== 'online')
     ) {
       return;
     }
@@ -387,7 +403,7 @@ export function DirectoryWorkspace({
       </header>
 
       <div className="desktop-layout">
-        <div className="desktop-search-dock">
+        <div className={`desktop-search-dock${isMessagesActive ? ' messaging-hidden' : ''}`}>
           <label className="design-global-search">
             <span aria-hidden="true">⌕</span>
             <input
@@ -535,7 +551,21 @@ export function DirectoryWorkspace({
                 <EmptyWorkspace title="没有可显示的成员" description="组织中尚未返回成员数据。" />
               )
             ) : isMessagesActive ? (
-              conversations.isPending ? (
+              contactOperation !== null && selectedConversation === null ? (
+                <ConversationWorkspace
+                  conversation={null}
+                  currentUserId={payload.currentUser.id}
+                  pendingContact={{
+                    name:
+                      payload.members.find((member) => member.id === contactOperation.memberId)
+                        ?.name ?? '联系人',
+                    kind: contactOperation.kind,
+                    status: contactOperation.status,
+                    message: contactOperation.message,
+                    onRetry: () => runContactOperation(contactOperation),
+                  }}
+                />
+              ) : conversations.isPending ? (
                 <EmptyWorkspace
                   title="正在加载会话"
                   description="正在从企业服务读取可访问的会话…"
@@ -558,7 +588,9 @@ export function DirectoryWorkspace({
                 />
               )
             ) : isMyActive ? (
-              mySection === 'roles' ? (
+              mySection === 'manual' ? (
+                <PersonalManualWorkspace />
+              ) : mySection === 'roles' ? (
                 <RoleWorkspace
                   assignment={selectedRoleAssignment}
                   isLoading={roleAssignments.isPending}
@@ -589,6 +621,7 @@ export function DirectoryWorkspace({
                 <MyOverviewWorkspace
                   user={payload.currentUser}
                   assignments={roleAssignments.data ?? []}
+                  onOpenManual={() => setMySection('manual')}
                   onOpenRoles={() => setMySection('roles')}
                   onOpenAccountMenu={onOpenAccountMenu}
                   onChangePassword={onChangePassword}
@@ -785,8 +818,7 @@ function MemberWorkspace({
   const canContactAgent =
     member.capabilities.canContactAgent &&
     member.agent !== null &&
-    member.agent.status === 'online' &&
-    member.agent.operationalAvailability.status === 'AVAILABLE';
+    member.agent.status === 'online';
   const contactPending = contactOperation?.status === 'pending';
   const canOpenSharedConversation = canContactHuman || canContactAgent;
   const defaultContactKind: ContactKind = canContactHuman ? 'human' : 'agent';
@@ -1099,6 +1131,25 @@ function initials(value: string): string {
       .toLocaleUpperCase('zh-CN');
   }
   return [...normalized].slice(-2).join('').toLocaleUpperCase('zh-CN');
+}
+
+function findDirectConversation(
+  conversations: readonly Conversation[],
+  request: CreateConversationRequest,
+): Conversation | null {
+  if (request.type !== 'direct' || request.target.type === 'agent_pair') return null;
+  const participantType = request.target.type === 'human' ? 'user' : 'agent';
+  const participantId =
+    request.target.type === 'human' ? request.target.userId : request.target.agentId;
+  return (
+    conversations.find(
+      (conversation) =>
+        conversation.type === 'direct' &&
+        conversation.participants.some(
+          (participant) => participant.type === participantType && participant.id === participantId,
+        ),
+    ) ?? null
+  );
 }
 
 function agentStatusLabel(status: NonNullable<Member['agent']>['status']): string {

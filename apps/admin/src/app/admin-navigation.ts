@@ -1,4 +1,4 @@
-import { canAccessAdvancedSettings, type AuthAccount } from '@enterprise/contracts';
+import { canAccessAdvancedSettings, type AuthAccount } from '@enterprise/contracts/auth-session';
 
 import type { IconName } from '@/components/Icons';
 
@@ -89,11 +89,11 @@ export const ADMIN_SECONDARY_NAVIGATION: Readonly<
   'agent-center': [
     { id: 'agents', label: '智能体', description: '配置、知识绑定与运行状态' },
     { id: 'role-blueprints', label: '角色蓝图', description: '角色定义与版本' },
-    { id: 'ai-evaluation', label: '测试与发布', description: '评测集、Run 与发布门禁' },
+    { id: 'ai-evaluation', label: '质量评测', description: '可选评测集、Run 与质量检查' },
     { id: 'ai-model-routing', label: '模型服务', description: '智能体使用的模型与路由' },
   ],
   'knowledge-center': [
-    { id: 'knowledge', label: '知识库与文档', description: '导入、解析、检索与发布' },
+    { id: 'knowledge', label: '知识库与文档', description: '导入、自动处理与检索' },
     {
       id: 'experience-governance',
       label: '经验候选',

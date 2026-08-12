@@ -14,7 +14,7 @@ import {
   login,
   registerTenant,
   startOidcLogin,
-} from '@/api/admin-api';
+} from '@/api/auth-api';
 import { messageFromError } from '@/api/client';
 import { isSessionRoleAllowed, writeSession } from '@/auth/session';
 import { FieldError, Spinner } from '@/components/ui';

@@ -1,7 +1,6 @@
 import type { INestApplication } from '@nestjs/common';
 import { PrismaClient } from '@prisma/client';
 import {
-  aiEvaluationReadinessSchema,
   roleAssignmentCandidateListResponseSchema,
   roleAssignmentListResponseSchema,
   roleAssignmentSchema,
@@ -10,10 +9,6 @@ import request from 'supertest';
 
 import { RoleAssignmentLifecycleService } from '../src/modules/admin/role-assignment-lifecycle.service.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
-import {
-  seedPassingEvaluationRun,
-  seedPublishedEvaluationDataset,
-} from './ai-evaluation-test-fixture.js';
 import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
@@ -62,7 +57,7 @@ describe.runIf(enabled)('PostgreSQL role assignment integration', () => {
     await administrator.$disconnect();
   });
 
-  it('enforces maker-checker publication boundaries in PostgreSQL itself', async () => {
+  it('allows direct publication while preserving optional review-data consistency', async () => {
     const unreviewedPublishedId = '00000000-0000-7000-8000-00000000f316';
     const selfApprovedId = '00000000-0000-7000-8000-00000000f317';
     const selfReviewedId = '00000000-0000-7000-8000-00000000f318';
@@ -76,7 +71,11 @@ describe.runIf(enabled)('PostgreSQL role assignment integration', () => {
           publishedAt: now,
         },
       }),
-    ).rejects.toThrow();
+    ).resolves.toMatchObject({
+      id: unreviewedPublishedId,
+      status: 'PUBLISHED',
+      reviewStatus: 'NOT_SUBMITTED',
+    });
 
     await expect(
       administrator.agentVersion.create({
@@ -116,40 +115,10 @@ describe.runIf(enabled)('PostgreSQL role assignment integration', () => {
       administrator.agentVersion.count({
         where: { id: { in: [unreviewedPublishedId, selfApprovedId, selfReviewedId] } },
       }),
-    ).resolves.toBe(0);
-    const [boundaries] = await administrator.$queryRaw<
-      Array<{ constraints: string[]; triggers: string[] }>
-    >`
-      SELECT
-        ARRAY(
-          SELECT conname
-          FROM pg_constraint
-          WHERE conrelid = 'public.agent_versions'::regclass
-            AND conname IN (
-              'agent_versions_author_approver_separation_check',
-              'agent_versions_requester_reviewer_separation_check'
-            )
-          ORDER BY conname
-        )::text[] AS constraints,
-        ARRAY(
-          SELECT tgname
-          FROM pg_trigger
-          WHERE tgrelid = 'public.agent_versions'::regclass
-            AND NOT tgisinternal
-            AND tgname = 'agent_versions_structured_publish_review_check'
-          ORDER BY tgname
-        )::text[] AS triggers
-    `;
-    expect(boundaries).toEqual({
-      constraints: [
-        'agent_versions_author_approver_separation_check',
-        'agent_versions_requester_reviewer_separation_check',
-      ],
-      triggers: ['agent_versions_structured_publish_review_check'],
-    });
+    ).resolves.toBe(1);
   });
 
-  it('lists only governed published versions as assignment candidates', async () => {
+  it('lists published structured versions as assignment candidates', async () => {
     const candidates = roleAssignmentCandidateListResponseSchema.parse(
       (
         await request(app.getHttpServer())
@@ -348,8 +317,7 @@ describe.runIf(enabled)('PostgreSQL role assignment integration', () => {
         })
         .expect(409);
       expect(response.body).toMatchObject({
-        message:
-          'Only an independently approved published structured Role Blueprint version can be assigned.',
+        message: 'Only a published structured Role Blueprint version can be assigned.',
       });
     }
 
@@ -1046,60 +1014,10 @@ describe.runIf(enabled)('PostgreSQL role assignment integration', () => {
     actorId: string,
     expectedRevision: number,
   ) {
-    let evaluationRunId: string | undefined;
-    if (action === 'publish') {
-      const subject = await administrator.agentVersion.findUniqueOrThrow({
-        where: { id: versionId },
-        select: { version: true },
-      });
-      const fixtureName = `ROLE-${versionId}`;
-      const fixture = await seedPublishedEvaluationDataset({
-        prisma: administrator,
-        tenantId: tenantAId,
-        submitterUserId: adminAId,
-        reviewerUserId: reviewerAId,
-        subjectType: 'AGENT_VERSION',
-        subjectId: versionId,
-        subjectVersion: subject.version,
-        fixtureName,
-      });
-      const probe = aiEvaluationReadinessSchema.parse(
-        (
-          await request(app.getHttpServer())
-            .get('/api/v1/admin/ai-evaluations/readiness')
-            .set(identityHeaders(tenantAId, actorId))
-            .query({
-              subjectType: 'AGENT_VERSION',
-              subjectId: versionId,
-              subjectVersion: subject.version,
-              datasetVersionId: fixture.datasetVersionId,
-              currentSnapshotHash: '0'.repeat(64),
-            })
-            .expect(200)
-        ).body,
-      );
-      evaluationRunId = await seedPassingEvaluationRun({
-        prisma: administrator,
-        tenantId: tenantAId,
-        submitterUserId: adminAId,
-        reviewerUserId: reviewerAId,
-        subjectType: 'AGENT_VERSION',
-        subjectId: versionId,
-        subjectVersion: subject.version,
-        fixtureName,
-        datasetVersionId: fixture.datasetVersionId,
-        evidenceId: fixture.evidenceId,
-        caseIds: fixture.caseIds,
-        subjectSnapshotHash: probe.currentSnapshotHash,
-      });
-    }
     const response = await request(app.getHttpServer())
       .post(`/api/v1/admin/role-blueprints/${blueprintId}/versions/${versionId}/${action}`)
       .set(identityHeaders(tenantAId, actorId))
-      .send({
-        expectedRevision,
-        ...(evaluationRunId === undefined ? {} : { evaluationRunId }),
-      })
+      .send({ expectedRevision })
       .expect(201);
     return response.body as { id: string; revision: number };
   }

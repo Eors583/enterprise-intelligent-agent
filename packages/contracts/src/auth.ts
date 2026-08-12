@@ -4,18 +4,28 @@ import {
   identityDeviceRegistrationSchema,
   mfaLoginChallengeResponseSchema,
 } from './identity-governance.js';
+import {
+  authAccountSchema,
+  authSessionResponseSchema,
+  browserAuthSessionResponseSchema,
+} from './auth-session.js';
 
-export const tenantRoleSchema = z.enum(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN', 'MEMBER']);
-export const adminConsoleRoleSchema = z.enum(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN']);
-export const advancedSettingsRoleSchema = z.enum(['OWNER', 'ADMIN']);
-
-export function canAccessAdminConsole(role: TenantRole): boolean {
-  return adminConsoleRoleSchema.safeParse(role).success;
-}
-
-export function canAccessAdvancedSettings(role: TenantRole): boolean {
-  return advancedSettingsRoleSchema.safeParse(role).success;
-}
+export {
+  advancedSettingsRoleSchema,
+  adminConsoleRoleSchema,
+  authAccountSchema,
+  authSessionResponseSchema,
+  browserAuthSessionResponseSchema,
+  canAccessAdminConsole,
+  canAccessAdvancedSettings,
+  currentSessionResponseSchema,
+  tenantRoleSchema,
+  type AuthAccount,
+  type AuthSessionResponse,
+  type BrowserAuthSessionResponse,
+  type CurrentSessionResponse,
+  type TenantRole,
+} from './auth-session.js';
 
 export const registerTenantRequestSchema = z.object({
   tenantName: z.string().trim().min(2).max(200),
@@ -50,37 +60,6 @@ export const loginRequestSchema = z.object({
   sessionLabel: z.string().trim().min(1).max(120).optional(),
   device: identityDeviceRegistrationSchema.optional(),
 });
-
-export const authAccountSchema = z.object({
-  sessionId: z.uuid(),
-  tenantId: z.uuid(),
-  tenantSlug: z.string().min(1),
-  tenantName: z.string().min(1),
-  userId: z.uuid(),
-  email: z.email(),
-  displayName: z.string().min(1),
-  role: tenantRoleSchema,
-  passwordChangeRequired: z.boolean(),
-  accessExpiresAt: z.iso.datetime(),
-  refreshExpiresAt: z.iso.datetime(),
-});
-
-export const authSessionResponseSchema = z.object({
-  accessToken: z.string().min(32),
-  refreshToken: z.string().min(32),
-  account: authAccountSchema,
-});
-
-/**
- * Browser/BFF session responses deliberately contain no bearer credential.
- * Access and refresh tokens are transported only in HttpOnly same-site
- * cookies; browser JavaScript receives the account projection.
- */
-export const browserAuthSessionResponseSchema = z
-  .object({
-    account: authAccountSchema,
-  })
-  .strict();
 
 export const loginResultSchema = z.union([
   authSessionResponseSchema,
@@ -165,11 +144,6 @@ export const acceptMemberInvitationResponseSchema = z.object({
   revokedSessionCount: z.number().int().nonnegative(),
 });
 
-export const currentSessionResponseSchema = authAccountSchema.omit({ sessionId: true }).extend({
-  sessionId: z.uuid(),
-});
-
-export type TenantRole = z.infer<typeof tenantRoleSchema>;
 export type RegisterTenantRequest = z.infer<typeof registerTenantRequestSchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
 export type LoginResult = z.infer<typeof loginResultSchema>;
@@ -182,8 +156,4 @@ export type CompletePasswordResetRequest = z.infer<typeof completePasswordResetR
 export type CompletePasswordResetResponse = z.infer<typeof completePasswordResetResponseSchema>;
 export type AcceptMemberInvitationRequest = z.infer<typeof acceptMemberInvitationRequestSchema>;
 export type AcceptMemberInvitationResponse = z.infer<typeof acceptMemberInvitationResponseSchema>;
-export type AuthAccount = z.infer<typeof authAccountSchema>;
-export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
-export type BrowserAuthSessionResponse = z.infer<typeof browserAuthSessionResponseSchema>;
 export type BrowserLoginResult = z.infer<typeof browserLoginResultSchema>;
-export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;

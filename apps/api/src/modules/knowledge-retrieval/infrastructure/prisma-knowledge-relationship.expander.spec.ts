@@ -149,8 +149,9 @@ describe('PrismaKnowledgeRelationshipExpander', () => {
     expect(sql).toContain(`evidence_projection."status" = 'CANDIDATE'`);
     expect(sql).toContain(`seed_projection."status" = 'CANDIDATE'`);
     expect(sql).toContain(`target_projection."status" = 'CANDIDATE'`);
-    expect(sql).toContain('governed_relations AS');
-    expect(sql).toContain(`ontology_version."status" = 'PUBLISHED'`);
+    expect(sql).toContain('eligible_relations AS');
+    expect(sql).not.toContain('knowledge_relation_governance');
+    expect(sql).not.toContain(`ontology_version."status" = 'PUBLISHED'`);
     expect(sql).not.toContain('knowledge_graph_retrieval_relations');
     expect(sql).not.toContain(
       `seed_document."current_version_id" = seed_chunk."document_version_id"`,

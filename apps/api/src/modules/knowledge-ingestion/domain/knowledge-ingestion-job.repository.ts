@@ -3,6 +3,7 @@ export interface ClaimedKnowledgeIngestionJob {
   readonly tenantId: string;
   readonly documentVersionId: string;
   readonly attempts: number;
+  readonly failureAttempts: number;
   readonly leaseExpiresAt: Date;
   readonly createdAt: Date;
 }

@@ -21,6 +21,8 @@ export interface KnowledgeRelationshipEvidence {
   readonly direction: 'OUTBOUND' | 'INBOUND';
   readonly hopDistance: 1 | 2;
   readonly confidence: number;
+  /** Non-zero only when relationship expansion started from a direct query/entity match. */
+  readonly sourceSeedScore: number;
   readonly contribution: number;
   readonly path: readonly {
     readonly relationId: string;
@@ -96,6 +98,7 @@ export function rankKnowledgeRelationshipTargets(input: {
         direction: evidence.direction,
         hopDistance: evidence.hopDistance,
         confidence: clamp01(evidence.confidence),
+        sourceSeedScore: clamp01(evidence.sourceSeedScore),
         contribution,
         path: evidence.path,
       });

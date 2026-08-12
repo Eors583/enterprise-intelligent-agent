@@ -10,6 +10,17 @@ export default defineConfig({
       REPOSITORY_DRIVER: databaseTests ? 'prisma' : 'memory',
       IM_OUTBOX_ENABLED: 'false',
       ALLOW_DEV_IDENTITY_HEADERS: 'true',
+      // Tests must not inherit the developer machine's live knowledge adapters.
+      // Database integration tests exercise persistence explicitly; the separate
+      // knowledge smoke test owns MinIO, Docling, Qdrant and AI Runtime coverage.
+      KNOWLEDGE_PERSISTENT_WRITES_ENABLED: databaseTests ? 'true' : 'false',
+      KNOWLEDGE_INGESTION_WORKER_ENABLED: 'false',
+      KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: 'false',
+      KNOWLEDGE_RERANK_ENABLED: 'false',
+      KNOWLEDGE_SEARCH_INDEX_DRIVER: 'postgres',
+      KNOWLEDGE_OBJECT_STORE_DRIVER: 'local',
+      KNOWLEDGE_FILE_SCANNER_DRIVER: 'disabled',
+      KNOWLEDGE_DOCUMENT_PARSER_DRIVER: 'local',
     },
     globals: true,
     hookTimeout: 60_000,
