@@ -1,6 +1,10 @@
 import { ConflictException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import {
+  DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS,
+  DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+  employeeAgentCollaborationSettingsSchema,
   personalManualFaqSchema,
+  personalManualDisclosurePolicySchema,
   type PersonalManualContent,
   type PersonalManualSelfProfile,
   type UpdatePersonalManualRequest,
@@ -39,6 +43,10 @@ export class PersonalManualSelfService {
       const data = {
         ...manualTextFields(manual),
         faqs: manual.faqs as Prisma.InputJsonValue,
+        disclosurePolicy: request.disclosurePolicy as Prisma.InputJsonValue,
+        manualSharingEnabled: request.collaborationSettings.manualSharingEnabled,
+        availabilitySharingEnabled: request.collaborationSettings.availabilitySharingEnabled,
+        privateRiskRemindersEnabled: request.collaborationSettings.privateRiskRemindersEnabled,
       };
 
       if (existing === null) {
@@ -48,6 +56,7 @@ export class PersonalManualSelfService {
               tenantId: principal.tenantId,
               userId: principal.userId,
               ...data,
+              policyRevision: 1,
             },
           });
         } catch (error) {
@@ -63,7 +72,7 @@ export class PersonalManualSelfService {
             userId: principal.userId,
             updatedAt: existing.updatedAt,
           },
-          data,
+          data: { ...data, policyRevision: { increment: 1 } },
         });
         if (changed.count !== 1) {
           throw new ConflictException('个人使用说明书已发生变化，请刷新后重新保存。');
@@ -79,6 +88,8 @@ export class PersonalManualSelfService {
         {
           completedFieldCount: completedFieldCount(manual),
           faqCount: manual.faqs.length,
+          disclosureScopes: request.disclosurePolicy,
+          collaborationSettings: request.collaborationSettings,
         },
       );
       return this.readProfile(transaction, principal);
@@ -146,9 +157,24 @@ export class PersonalManualSelfService {
               clubs: user.memberProfile.clubs,
               faqs: readFaqs(user.memberProfile.faqs),
             },
+      disclosurePolicy: readDisclosurePolicy(user.memberProfile?.disclosurePolicy),
+      collaborationSettings:
+        user.memberProfile === null
+          ? DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS
+          : employeeAgentCollaborationSettingsSchema.parse({
+              manualSharingEnabled: user.memberProfile.manualSharingEnabled,
+              availabilitySharingEnabled: user.memberProfile.availabilitySharingEnabled,
+              privateRiskRemindersEnabled: user.memberProfile.privateRiskRemindersEnabled,
+            }),
+      policyRevision: user.memberProfile?.policyRevision ?? 1,
       updatedAt: user.memberProfile?.updatedAt.toISOString() ?? null,
     };
   }
+}
+
+function readDisclosurePolicy(value: Prisma.JsonValue | undefined) {
+  const parsed = personalManualDisclosurePolicySchema.safeParse(value);
+  return parsed.success ? parsed.data : DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY;
 }
 
 function normalizeManual(manual: PersonalManualContent): PersonalManualContent {

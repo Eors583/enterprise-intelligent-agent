@@ -29,6 +29,10 @@ export const REQUIRED_APPLICATION_SCHEMA_COLUMNS = [
   { tableName: 'knowledge_chunks', columnName: 'previous_chunk_id' },
   { tableName: 'knowledge_chunks', columnName: 'next_chunk_id' },
   { tableName: 'knowledge_ingestion_jobs', columnName: 'status' },
+  { tableName: 'knowledge_provider_connections', columnName: 'id' },
+  { tableName: 'knowledge_provider_user_bindings', columnName: 'external_staff_id' },
+  { tableName: 'knowledge_external_space_bindings', columnName: 'id' },
+  { tableName: 'knowledge_external_entry_bindings', columnName: 'id' },
   { tableName: 'knowledge_chunk_embeddings', columnName: 'embedding_model' },
   { tableName: 'knowledge_chunk_embeddings', columnName: 'embedding_index_version_id' },
   { tableName: 'agent_versions', columnName: 'knowledge_scope' },
@@ -307,18 +311,22 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   async withTenant<T>(
     tenantId: string,
     operation: (transaction: Prisma.TransactionClient) => Promise<T>,
+    options?: { readonly maxWait?: number; readonly timeout?: number },
   ): Promise<T> {
     if (!this.enabled) {
       throw new Error('Prisma repository access is disabled for the current adapter.');
     }
 
-    return this.$transaction(async (transaction) => {
-      // A superuser/migration login can bypass RLS. Every application query is
-      // deliberately demoted to the fixed NOLOGIN/NOBYPASSRLS role first.
-      await transaction.$executeRawUnsafe('SET LOCAL ROLE enterprise_agent_app');
-      await transaction.$queryRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
-      return operation(transaction);
-    });
+    return this.$transaction(
+      async (transaction) => {
+        // A superuser/migration login can bypass RLS. Every application query is
+        // deliberately demoted to the fixed NOLOGIN/NOBYPASSRLS role first.
+        await transaction.$executeRawUnsafe('SET LOCAL ROLE enterprise_agent_app');
+        await transaction.$queryRaw`SELECT set_config('app.tenant_id', ${tenantId}, true)`;
+        return operation(transaction);
+      },
+      { timeout: 30_000, ...options },
+    );
   }
 
   async ping(): Promise<void> {

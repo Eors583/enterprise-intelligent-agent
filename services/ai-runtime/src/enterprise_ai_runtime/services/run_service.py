@@ -10,6 +10,7 @@ from enterprise_ai_runtime.domain.errors import (
     InvalidRunTransitionError,
     ProviderTimeoutError,
     ProviderUnavailableError,
+    RunAlreadyExistsError,
     RunStreamReconciliationRequiredError,
     RuntimeExecutionError,
 )
@@ -73,7 +74,7 @@ class RunService:
         ) as span:
             now = utc_now()
             run = RunRecord(
-                run_id=uuid4(),
+                run_id=command.run_id or uuid4(),
                 tenant_id=command.tenant_id,
                 principal=command.principal,
                 agent_id=command.agent_id,
@@ -88,7 +89,14 @@ class RunService:
                 created_at=now,
                 updated_at=now,
             )
-            created = await self._store.create(run)
+            try:
+                created = await self._store.create(run)
+            except RunAlreadyExistsError:
+                if command.run_id is None:
+                    raise
+                created = await self._store.get(command.tenant_id, command.run_id)
+                if not _same_create_request(created, run):
+                    raise
             span.set_attribute("agent.run.id", str(created.run_id))
             mark_span_result(span, status=created.status.value)
             return created
@@ -518,6 +526,21 @@ class RunService:
             if current.status.is_terminal:
                 return current
             raise
+
+
+def _same_create_request(existing: RunRecord, requested: RunRecord) -> bool:
+    return (
+        existing.tenant_id == requested.tenant_id
+        and existing.principal == requested.principal
+        and existing.agent_id == requested.agent_id
+        and existing.agent_version == requested.agent_version
+        and existing.model_route == requested.model_route
+        and existing.safety_context == requested.safety_context
+        and existing.input == requested.input
+        and existing.budget == requested.budget
+        and existing.metadata == requested.metadata
+        and existing.request_id == requested.request_id
+    )
 
 
 def _budget_error(result: RunExecutionResult, budget: RunBudget) -> RunErrorInfo | None:

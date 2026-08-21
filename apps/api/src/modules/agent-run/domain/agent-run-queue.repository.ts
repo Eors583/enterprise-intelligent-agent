@@ -13,6 +13,12 @@ export abstract class AgentRunQueueRepository {
     readonly claimTtlMs: number;
   }): Promise<readonly ClaimedAgentRunEvent[]>;
 
+  abstract renewLease(input: {
+    readonly eventId: string;
+    readonly workerId: string;
+    readonly claimTtlMs: number;
+  }): Promise<boolean>;
+
   abstract markPublished(input: {
     readonly eventId: string;
     readonly workerId: string;

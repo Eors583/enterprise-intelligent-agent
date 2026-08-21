@@ -230,6 +230,30 @@ describe('conversation citation read contracts', () => {
     ).toMatchObject({ citations: [{ ...citation, verificationStatus: 'LINEAGE_VERIFIED' }] });
   });
 
+  it('接受经过协同策略核验的非知识库业务来源引用', () => {
+    const collaborationCitation = {
+      sourceId: '00000000-0000-7000-8000-000000000601',
+      sourceType: 'WORK_AVAILABILITY',
+      sourceVersion: 2,
+      title: '林晓的工作可用状态',
+      excerpt: '状态：专注中；预计响应：今天 17:00 前。',
+      updatedAt: '2026-08-13T01:00:00.000Z',
+      contentHash: 'a'.repeat(64),
+    } as const;
+
+    expect(
+      textMessageContentSchema.parse({
+        type: 'text',
+        text: '林晓正在专注处理工作，预计今天 17:00 前回复。[来源1]',
+        citations: [collaborationCitation],
+      }),
+    ).toMatchObject({
+      citations: [
+        { ...collaborationCitation, verificationStatus: 'COLLABORATION_POLICY_VERIFIED' },
+      ],
+    });
+  });
+
   it('兼容旧历史引用并显式标记为不可完整核验', () => {
     const legacyCitation = {
       documentId: citation.documentId,

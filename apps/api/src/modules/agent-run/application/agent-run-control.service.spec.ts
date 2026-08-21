@@ -90,6 +90,57 @@ describe('AgentRunControlService cancellation', () => {
       update?.data.finishedAt,
     ]);
   });
+
+  it('lets the participant end an unrecoverable UNKNOWN Run without claiming a remote stop', async () => {
+    const fixture = createFixture();
+    fixture.transaction.agentRun.findFirst.mockResolvedValue({
+      id: RUN_ID,
+      tenantId: TENANT_ID,
+      conversationId: CONVERSATION_ID,
+      status: 'UNKNOWN',
+      externalRunId: EXTERNAL_RUN_ID,
+      errorCode: 'AI_RUNTIME_INVALID_RESPONSE',
+      reservedTokens: 20_000,
+    });
+
+    await expect(fixture.service.abandonUnknown(CONVERSATION_ID, RUN_ID)).resolves.toEqual({
+      runId: RUN_ID,
+      status: 'failed_retryable',
+    });
+
+    expect(fixture.runtime.cancel).not.toHaveBeenCalled();
+    expect(fixture.transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: expect.objectContaining({
+        status: 'FAILED',
+        errorCode: 'AI_RUNTIME_RESULT_ABANDONED',
+        tokenEvidence: 'QUOTA_UPPER_BOUND',
+        quotaChargedTokens: 20_000,
+        quotaSettledAt: expect.any(Date),
+        reservedTokens: 0,
+      }),
+    });
+    expect(fixture.transaction.auditEvent.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'agent.run.abandon_unknown',
+        metadata: expect.objectContaining({
+          remoteOutcomeConfirmed: false,
+          quotaSettledConservatively: true,
+        }),
+      }),
+    });
+    const streamInsert = fixture.transaction.$executeRaw.mock.calls[0]?.[0] as
+      { values?: unknown[] } | undefined;
+    expect(streamInsert?.values).toEqual([
+      TENANT_ID,
+      RUN_ID,
+      10_001,
+      `${RUN_ID}:10001`,
+      'TERMINAL_RECONCILED',
+      'FAILED',
+      expect.any(Date),
+    ]);
+  });
 });
 
 describe('AgentRunControlService retry', () => {

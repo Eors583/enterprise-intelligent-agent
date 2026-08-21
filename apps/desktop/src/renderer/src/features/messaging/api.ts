@@ -75,6 +75,14 @@ export async function retryAgentRun(
   return runAction(conversationId, runId, 'retry', signal);
 }
 
+export async function abandonUnknownAgentRun(
+  conversationId: string,
+  runId: string,
+  signal?: AbortSignal,
+): Promise<AgentRunResponse> {
+  return runAction(conversationId, runId, 'abandon', signal);
+}
+
 export async function listAgentRunStreamEvents(
   conversationId: string,
   runId: string,
@@ -100,7 +108,7 @@ export async function listAgentRunStreamEvents(
 async function runAction(
   conversationId: string,
   runId: string,
-  action: 'cancel' | 'retry',
+  action: 'abandon' | 'cancel' | 'retry',
   signal?: AbortSignal,
 ): Promise<AgentRunResponse> {
   const validatedConversationId = resourceIdSchema.parse(conversationId);

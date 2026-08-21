@@ -126,15 +126,17 @@ describe('API vertical slice', () => {
       .expect(404);
   });
 
-  it('fails closed for an agent conversation when the test Runtime has no readiness evidence', async () => {
-    await request(app.getHttpServer())
+  it('opens an enabled agent conversation when the test Runtime has no readiness evidence', async () => {
+    const created = await request(app.getHttpServer())
       .post('/api/v1/conversations')
       .send({ type: 'direct', target: { type: 'agent', agentId } })
-      .expect(503);
+      .expect(201);
+    expect(conversationSchema.safeParse(created.body).success).toBe(true);
 
     const listed = await request(app.getHttpServer()).get('/api/v1/conversations').expect(200);
     expect(conversationListResponseSchema.safeParse(listed.body).success).toBe(true);
     expect(listed.body.items.map((item: { id: string }) => item.id)).toContain(humanConversationId);
+    expect(listed.body.items.map((item: { id: string }) => item.id)).toContain(created.body.id);
 
     const outsider = await request(app.getHttpServer())
       .get('/api/v1/conversations')

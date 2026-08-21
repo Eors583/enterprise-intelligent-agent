@@ -311,7 +311,7 @@ function readinessRecoveryGuidance(dashboard: AiModelRoutingDashboard): string {
     return '所有已发布候选均具备 24 小时内真实成功回执，无需执行恢复测试。';
   }
   if (reasons.has('NO_PUBLISHED_MODEL') || reasons.has('NO_PUBLISHED_ROUTE_POLICY')) {
-    return '先完成模型目录和任务路由的双人审核发布，再执行真实连通性测试。';
+    return '先发布模型目录和任务路由；企业所有者可直接发布，受委托管理员仍需另一名管理员复核。';
   }
   if (reasons.has('INVALID_PUBLISHED_ROUTE_POLICY')) {
     return '先修复已发布策略的候选数量、能力、驻留、分级或成本约束。';

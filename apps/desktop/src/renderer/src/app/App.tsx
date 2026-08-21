@@ -133,6 +133,7 @@ export function App(): React.JSX.Element {
   return (
     <>
       <DirectoryWorkspace
+        key={activeAccount.sessionId}
         payload={bootstrap.data}
         navigationRequest={workspaceNavigationRequest}
         onOpenAccountMenu={() => setAccountMenuRequest((value) => value + 1)}

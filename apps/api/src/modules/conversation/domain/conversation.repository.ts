@@ -76,12 +76,6 @@ export class MessageIdempotencyConflictError extends Error {
   }
 }
 
-export class ActiveAgentRunConflictError extends Error {
-  constructor() {
-    super('This conversation already has an active Agent Run.');
-  }
-}
-
 export class AgentUnavailableForRunError extends Error {
   constructor() {
     super('One or more conversation Agents are not currently executable.');

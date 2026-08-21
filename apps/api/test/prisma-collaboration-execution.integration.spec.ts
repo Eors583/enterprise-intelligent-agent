@@ -8,7 +8,7 @@ import {
   parseAgentRunMemoryContextSnapshot,
   PrismaAgentRunRepository,
 } from '../src/modules/agent-run/infrastructure/prisma/prisma-agent-run.repository.js';
-import { KnowledgeRetrievalGateway } from '../src/modules/knowledge-gateway/knowledge-gateway.port.js';
+import { EmployeeCollaborationContextPort } from '../src/modules/people-organization/employee-collaboration-context.port.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
 import { cleanupDisposableTenants } from './database-test-harness.js';
 
@@ -80,7 +80,7 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
   const administrator = new PrismaClient();
   let app: INestApplication;
   let runs: PrismaAgentRunRepository;
-  let retrieval: KnowledgeRetrievalGateway;
+  let employeeCollaboration: EmployeeCollaborationContextPort;
   let collaborationId: string;
   let memoryConversationId: string;
   let memoryRunId: string;
@@ -109,7 +109,7 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
       },
     });
     runs = app.get(PrismaAgentRunRepository);
-    retrieval = app.get(KnowledgeRetrievalGateway);
+    employeeCollaboration = app.get(EmployeeCollaborationContextPort);
   });
 
   afterAll(async () => {
@@ -529,13 +529,18 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
           WHERE "tenant_id" = ${tenantA}::uuid
             AND "id" = ${processInstanceId}::uuid
         `);
+        await transaction.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
         await transaction.task.update({
+          // This fixture needs a terminal Task beside an active Process
+          // Instance so it can exercise the Process transition guard itself.
+          // The ordinary Task transition guard is covered independently.
           where: { id: taskId },
           data: {
             status: 'CANCELLED',
             cancelledAt: new Date(),
           },
         });
+        await transaction.$executeRawUnsafe('SET LOCAL session_replication_role = origin');
         await transaction.$executeRaw(Prisma.sql`
           UPDATE public."process_instances"
           SET "status" = 'PAUSED'::public."ProcessInstanceStatus",
@@ -567,6 +572,7 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
           1,
           'terminal-task-process-cancellation',
         );
+        await transaction.$executeRawUnsafe('SET LOCAL session_replication_role = replica');
         await transaction.task.update({
           where: { id: taskId },
           data: {
@@ -574,6 +580,7 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
             cancelledAt: new Date(),
           },
         });
+        await transaction.$executeRawUnsafe('SET LOCAL session_replication_role = origin');
         await insertProcessCommand(transaction, processInstanceId, 'CANCEL', 1, 2);
         const rows = await transaction.$queryRaw<Array<{ status: string }>>(Prisma.sql`
           UPDATE public."process_instances"
@@ -1273,23 +1280,28 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
       data: { taskId },
     });
 
-    const originalSearch = retrieval.search.bind(retrieval);
-    const searchSpy = vi.spyOn(retrieval, 'search').mockImplementationOnce(async (searchInput) => {
-      const result = await originalSearch(searchInput);
-      const revokedAt = new Date();
-      await administrator.roleAssignment.update({
-        where: { id: requesterAssignment },
-        data: {
-          status: 'REVOKED',
-          revokedAt,
-          revokedById: requesterUser,
-          revokeReason: 'Revoked between retrieval and dispatch.',
-          version: { increment: 1 },
-          updatedAt: revokedAt,
-        },
+    const originalCollaborationResolve = employeeCollaboration.resolve.bind(employeeCollaboration);
+    let collaborationResolveCount = 0;
+    const collaborationResolutionSpy = vi
+      .spyOn(employeeCollaboration, 'resolve')
+      .mockImplementation(async (resolveInput) => {
+        const result = await originalCollaborationResolve(resolveInput);
+        collaborationResolveCount += 1;
+        if (collaborationResolveCount !== 2) return result;
+        const revokedAt = new Date();
+        await administrator.roleAssignment.update({
+          where: { id: requesterAssignment },
+          data: {
+            status: 'REVOKED',
+            revokedAt,
+            revokedById: requesterUser,
+            revokeReason: 'Revoked between retrieval and dispatch.',
+            version: { increment: 1 },
+            updatedAt: revokedAt,
+          },
+        });
+        return result;
       });
-      return result;
-    });
     try {
       await expect(runs.prepare(tenantA, queued.id)).resolves.toEqual({
         kind: 'terminal',
@@ -1297,9 +1309,9 @@ describe.runIf(enabled)('PostgreSQL structured Collaboration execution', () => {
         externalRunId: null,
         errorCode: 'MEMORY_ACCESS_CHANGED',
       });
-      expect(searchSpy).toHaveBeenCalledTimes(1);
+      expect(collaborationResolutionSpy).toHaveBeenCalledTimes(2);
     } finally {
-      searchSpy.mockRestore();
+      collaborationResolutionSpy.mockRestore();
     }
     await expect(
       administrator.agentRun.findUniqueOrThrow({ where: { id: queued.id } }),

@@ -73,7 +73,7 @@ uv run ruff check .
 | `MANUS_AGENT_PROFILE`                  | `manus-1.6-lite`       | `manus-1.6`、`manus-1.6-lite` 或 `manus-1.6-max`   |
 | `MANUS_PROJECT_ID`                     | 无                     | 可选的已批准 Manus Project ID                      |
 | `MANUS_POLL_INTERVAL_SECONDS`          | `2`                    | 状态轮询间隔，允许 1～60 秒                        |
-| `MANUS_MAX_WAIT_SECONDS`               | `120`                  | 不小于轮询间隔，最大 3600 秒                       |
+| `MANUS_MAX_WAIT_SECONDS`               | `300`                  | 兼容配置；仅约束轮询 HTTP，不限制创建或任务总时长  |
 
 安全规则：
 
@@ -206,9 +206,11 @@ curl -X POST http://localhost:8100/internal/v1/runs/<run_id>/execute \
 4. `GET /v2/task.listMessages` 轮询独立 `task_id`，每次强校验顶层任务身份、事件唯一性、
    时间顺序和终态答案，不与其他租户或会话共享上下文；
 5. `running` 继续轮询，`stopped` 读取最新 `assistant_message`，`waiting` 形成 `PROVIDER_INTERACTION_REQUIRED`，`error` 形成 `PROVIDER_TASK_FAILED`；
-6. 本地超时、取消或任务解析失败后，best-effort 调用 `POST /v2/task.stop`，避免远程任务继续运行和计费。
+6. 用户取消、Runtime 关闭或任务解析失败后，best-effort 调用 `POST /v2/task.stop`，避免远程任务继续运行和计费。
 
-实际最长等待为 `min(Run.budget.timeout_ms, MANUS_MAX_WAIT_SECONDS)`。HTTP 429 会进行有限次指数退避并加入抖动，耗尽后形成 `PROVIDER_RATE_LIMITED`。新建 Task 的事件流可能短暂不可见；读取端会对 404、`not_found` 与 `failed_precondition` 进行最多五次短退避。`task.listMessages` 的无效 JSON、缺失消息数组、不完整状态或答案事件也会在同一 Task 内进行有限次退避重读，任一结构完整的轮询会清零连续异常计数；耗尽后形成 `PROVIDER_INVALID_RESPONSE` 并 best-effort 停止远程任务。所有重读始终复用已经取得的 `task_id`，不会重复创建远程任务。阶段诊断只记录固定的读取阶段、次数与退避时间，不记录 Task ID、响应正文、请求头或密钥。轮询只请求非 verbose 的最近事件，不读取或返回 Manus 内部错误正文。Runtime readiness 使用不创建生成任务的 `GET /v2/task.list?limit=1` 验证真实凭据和响应契约，并缓存成功/失败结果，不能再由“配置了 Key”直接推断模型可用。
+`task.create` 不设置客户端总等待上限：供应商没有公开请求幂等键，若本地先超时就无法区分“未创建”和“已创建但响应丢失”，盲目重发可能产生重复付费任务；因此创建阶段等待明确响应或用户取消。Manus 返回 `task_id` 后也不设置任务总等待上限，系统持续轮询到明确的 `stopped`、`waiting`、`error` 或用户取消。轮询的单次 HTTP 超时、限流和临时不可用只触发同一 `task_id` 的退避重读，不作为最终超时返回。新建 Task 的事件流可能短暂不可见；读取端会对 404、`not_found` 与 `failed_precondition` 进行最多五次短退避。`task.listMessages` 的无效 JSON、缺失消息数组、不完整状态或答案事件也会在同一 Task 内进行有限次退避重读，任一结构完整的轮询会清零连续异常计数；耗尽后形成 `PROVIDER_INVALID_RESPONSE` 并 best-effort 停止远程任务。所有重读始终复用已经取得的 `task_id`，不会重复创建远程任务。阶段诊断只记录固定的读取阶段、次数与退避时间，不记录 Task ID、响应正文、请求头或密钥。轮询只请求非 verbose 的最近事件，不读取或返回 Manus 内部错误正文。Runtime readiness 使用不创建生成任务的 `GET /v2/task.list?limit=1` 验证真实凭据和响应契约，并缓存成功/失败结果，不能再由“配置了 Key”直接推断模型可用。
+
+`task.create` 的安全错误类别不再折叠成一个 `PROVIDER_REQUEST_REJECTED`：`invalid_argument`、`not_found`、`failed_precondition` 分别映射为 `MANUS_TASK_CREATE_INVALID_ARGUMENT`、`MANUS_TASK_CREATE_TARGET_NOT_FOUND`、`MANUS_TASK_CREATE_PRECONDITION_FAILED`；其他确定性拒绝为 `MANUS_TASK_CREATE_REJECTED`。供应商错误正文仍不记录、不持久化、不返回客户端。
 
 Manus v2 当前没有公开的请求幂等键。`task.create` 在响应丢失或超时后存在“远程已创建、本地未收到 task_id”的不确定窗口，调用方不得立即盲目新建 Run 重试，否则可能重复执行和扣费。生产编排需要持久化 dispatch 状态，并使用唯一 Run 标题和任务列表进行 reconciliation；标题只辅助对账，不构成供应商强幂等。
 

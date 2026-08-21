@@ -11,6 +11,7 @@ import {
 
 const DENSE_VECTOR_NAME = 'dense';
 const SPARSE_VECTOR_NAME = 'lexical';
+const RRF_K = 60;
 const UPSERT_BATCH_SIZE = 128;
 
 export interface QdrantKnowledgeSearchIndexOptions {
@@ -170,7 +171,7 @@ export class QdrantKnowledgeSearchIndex extends KnowledgeSearchIndex {
                 limit: candidateLimit,
               },
             ],
-            query: { rrf: { k: 60 } },
+            query: { rrf: { k: RRF_K } },
             filter,
             limit: input.limit,
             with_payload: false,
@@ -182,7 +183,17 @@ export class QdrantKnowledgeSearchIndex extends KnowledgeSearchIndex {
       body,
     );
     const points = readQueryPoints(response);
-    return points.map((point) => ({ chunkId: point.id, score: point.score }));
+    // Qdrant returns reciprocal-rank-fusion scores when both dense and sparse
+    // prefetches are present. Those scores are rank values (roughly 1 / (k+r)),
+    // not cosine similarities, so normalize them before applying the retrieval
+    // service's common semantic thresholds. With two prefetch branches, agreement
+    // at rank one maps to 1 and a rank-one hit from only one branch maps to 0.5;
+    // dense-only queries keep their native score.
+    const hybrid = input.vector !== undefined && sparse.indices.length > 0;
+    return points.map((point) => ({
+      chunkId: point.id,
+      score: hybrid ? normalizeRrfScore(point.score) : point.score,
+    }));
   }
 
   async status(profile?: KnowledgeSearchIndexProfile): Promise<KnowledgeSearchIndexStatus> {
@@ -328,6 +339,11 @@ export class QdrantKnowledgeSearchIndex extends KnowledgeSearchIndex {
       clearTimeout(timer);
     }
   }
+}
+
+function normalizeRrfScore(score: number): number {
+  if (!Number.isFinite(score) || score <= 0) return 0;
+  return Math.min(1, (score * (RRF_K + 1)) / 2);
 }
 
 function readDenseVectorDimensions(response: unknown): number | null {

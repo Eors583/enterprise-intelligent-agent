@@ -28,12 +28,15 @@ function score(value: number): string {
 export function KnowledgeRetrievalTestPanel({
   knowledgeBaseId,
   knowledgeBaseStatus,
+  storageProvider,
   documents,
 }: {
   knowledgeBaseId: string;
   knowledgeBaseStatus: KnowledgeBase['status'];
+  storageProvider: KnowledgeBase['storageProvider'];
   documents: KnowledgeBase['documents'];
 }): ReactNode {
+  const managedByLexiang = storageProvider === 'LEXIANG';
   const [query, setQuery] = useState('');
   const [userId, setUserId] = useState('');
   const [members, setMembers] = useState<readonly AdminMember[]>([]);
@@ -99,7 +102,11 @@ export function KnowledgeRetrievalTestPanel({
       <header className="card-header">
         <div>
           <h2>检索测试</h2>
-          <p>用真实权限验证已发布版本，或精确预览一个已审核候选版本。</p>
+          <p>
+            {managedByLexiang
+              ? '先按本系统权限校验访问范围，再调用腾讯乐享 AI 搜索检索当前知识库。'
+              : '用真实权限验证已发布版本，或精确预览一个已审核候选版本。'}
+          </p>
         </div>
       </header>
       {knowledgeBaseStatus === 'DRAFT' ? (
@@ -150,13 +157,17 @@ export function KnowledgeRetrievalTestPanel({
             <select
               value={documentVersionId}
               onChange={(event) => setDocumentVersionId(event.target.value)}
+              disabled={managedByLexiang}
             >
-              <option value="">当前已发布版本（正式口径）</option>
-              {candidateVersions.map((version) => (
-                <option value={version.id} key={version.id}>
-                  {version.label}
-                </option>
-              ))}
+              <option value="">
+                {managedByLexiang ? '腾讯乐享当前内容（远程检索）' : '当前已发布版本（正式口径）'}
+              </option>
+              {!managedByLexiang &&
+                candidateVersions.map((version) => (
+                  <option value={version.id} key={version.id}>
+                    {version.label}
+                  </option>
+                ))}
             </select>
           </label>
         </div>
@@ -175,13 +186,23 @@ export function KnowledgeRetrievalTestPanel({
 
       {result ? (
         <div className="knowledge-retrieval-results" aria-live="polite">
+          {managedByLexiang && lexiangSearchApplied(result) ? (
+            <Notice tone="success">
+              本次检索已通过本系统知识库权限校验，并由腾讯乐享 AI 搜索返回证据。
+            </Notice>
+          ) : managedByLexiang ? (
+            <Notice tone="error">
+              {lexiangSearchFailureMessage(result.degradedReason) ??
+                '本次没有执行腾讯乐享 AI 搜索，请检查知识库绑定和知识来源连接状态。'}
+            </Notice>
+          ) : null}
           {result.noAnswer || result.items.length === 0 ? (
             <Notice tone="info">
               未找到达到阈值且当前用户有权访问的内容。智能体应返回“暂无可信答案”，不会拼接无依据回复。
             </Notice>
           ) : (
             <>
-              <KnowledgeEvidenceSummary result={result} />
+              <KnowledgeEvidenceSummary result={result} managedByLexiang={managedByLexiang} />
               <div className="knowledge-retrieval-result-list">
                 {result.items.map((item, index) => (
                   <article key={item.chunkId}>
@@ -190,7 +211,8 @@ export function KnowledgeRetrievalTestPanel({
                       <div>
                         <strong>{item.title}</strong>
                         <small>
-                          {item.knowledgeBaseName} · v{item.documentVersion}
+                          {item.knowledgeBaseName}
+                          {managedByLexiang ? '' : ` · v${item.documentVersion}`}
                           {item.headingPath.length > 0 ? ` · ${item.headingPath.join(' / ')}` : ''}
                         </small>
                       </div>
@@ -280,12 +302,22 @@ export function KnowledgeRetrievalTestPanel({
                 ) : null}
                 <span>
                   检索模式{' '}
-                  <strong>{result.mode === 'HYBRID' ? '语义混合检索' : '仅词法检索'}</strong>
+                  <strong>
+                    {managedByLexiang
+                      ? '腾讯乐享 AI 搜索'
+                      : result.mode === 'HYBRID'
+                        ? '语义混合检索'
+                        : '仅词法检索'}
+                  </strong>
                 </span>
                 <span>
                   重排{' '}
                   <strong>
-                    {result.reranker === 'CROSS_ENCODER' ? '模型 Reranker' : result.reranker}
+                    {managedByLexiang
+                      ? '乐享内置 Rerank'
+                      : result.reranker === 'CROSS_ENCODER'
+                        ? '模型 Reranker'
+                        : result.reranker}
                   </strong>
                 </span>
                 <span>
@@ -338,20 +370,22 @@ export function KnowledgeRetrievalTestPanel({
                 </Notice>
               ) : null}
               {result.degradedReason &&
-              result.degradedReason !== 'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK' ? (
+              !managedByLexiang &&
+              result.degradedReason !== 'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK' &&
+              !result.degradedReason.startsWith('LEXIANG_') ? (
                 <Notice tone="info">
                   语义检索已安全降级（{result.degradedReason}）。当前结果不可标记为完整语义 RAG。
                 </Notice>
               ) : null}
-              {!hasStrongRelationshipRetrieval(result) ? (
+              {!managedByLexiang && !hasStrongRelationshipRetrieval(result) ? (
                 <Notice tone="info">
                   本次查询没有完成可验证的关系扩展。结果可能仍来自关键词或向量匹配，不能作为“强关系检索”验收通过。
                 </Notice>
-              ) : (
+              ) : !managedByLexiang ? (
                 <Notice tone="success">
                   本次查询已执行关系扩展，命中结果包含可追溯到来源切片的一至两跳关系证据。
                 </Notice>
-              )}
+              ) : null}
             </div>
           </details>
         </div>
@@ -370,8 +404,10 @@ export function KnowledgeRetrievalTestPanel({
 
 function KnowledgeEvidenceSummary({
   result,
+  managedByLexiang,
 }: {
   result: KnowledgeRetrievalTestResponse;
+  managedByLexiang: boolean;
 }): ReactNode {
   const first = result.items[0];
   if (!first) return null;
@@ -381,13 +417,38 @@ function KnowledgeEvidenceSummary({
       <span>{calculation ? '精准计算结果' : '最相关证据'}</span>
       <h3>{calculation ?? knowledgeEvidenceExcerpt(first.excerpt)}</h3>
       <p>
-        来源：{first.title} · v{first.documentVersion}
+        来源：{first.title}
+        {managedByLexiang ? '' : ` · v${first.documentVersion}`}
         {first.headingPath.length > 0 ? ` · ${first.headingPath.join(' / ')}` : ''}
       </p>
       <small>
         共找到 {result.items.length} 条权限内证据，用时 {Math.round(result.elapsedMs)} ms。
       </small>
     </section>
+  );
+}
+
+function lexiangSearchFailureMessage(reason: string | null): string | null {
+  if (reason === 'LEXIANG_FORBIDDEN') {
+    return '腾讯乐享拒绝了 AI 搜索。请确认当前 AppKey 已开通“AI 助手”权限，并检查可信 IP 和操作成员账号。';
+  }
+  if (reason === 'LEXIANG_SEARCH_INVALID_RESPONSE') {
+    return '腾讯乐享返回了无法识别的搜索结果，请检查接口版本后重试。';
+  }
+  if (reason?.startsWith('LEXIANG_') === true) {
+    return `腾讯乐享搜索暂不可用（${reason}），请检查知识来源连接后重试。`;
+  }
+  return null;
+}
+
+function lexiangSearchApplied(result: KnowledgeRetrievalTestResponse): boolean {
+  return (
+    result.diagnostics?.some(
+      (diagnostic) =>
+        diagnostic.stage === 'EXTERNAL' &&
+        diagnostic.status === 'APPLIED' &&
+        diagnostic.code === 'LEXIANG_AI_SEARCH_APPLIED',
+    ) === true
   );
 }
 

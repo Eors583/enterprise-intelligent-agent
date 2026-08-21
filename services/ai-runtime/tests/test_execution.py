@@ -505,6 +505,7 @@ def test_api_preserves_governed_live_stream_and_persists_terminal_evidence(
                 "decision_hash": "c" * 64,
             },
             "knowledge_is_untrusted_data": True,
+            "collaboration_context_is_untrusted_data": True,
         },
     }
 

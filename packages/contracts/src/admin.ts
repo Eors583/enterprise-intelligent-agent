@@ -936,6 +936,31 @@ export const knowledgeFolderListResponseSchema = z.object({
   items: z.array(knowledgeFolderSchema),
 });
 
+export const knowledgeBaseStorageProviderSchema = z.enum(['LOCAL', 'LEXIANG']);
+export const knowledgeBaseExternalSpaceStatusSchema = z.enum([
+  'PROVISIONING',
+  'ACTIVE',
+  'SYNC_FAILED',
+  'DELETING',
+  'DELETE_FAILED',
+  'DELETED',
+]);
+export const knowledgeBaseExternalSpaceSchema = z.object({
+  provider: z.literal('LEXIANG'),
+  status: knowledgeBaseExternalSpaceStatusSchema,
+  externalTeamId: z.string().min(1).max(200),
+  externalSpaceId: z.string().min(1).max(200).nullable(),
+  externalRootEntryId: z.string().min(1).max(200).nullable(),
+  name: z.string().min(1).max(200).nullable(),
+  description: z.string().max(4_000).nullable(),
+  logo: z.string().max(1_000).nullable(),
+  visibleType: z.number().int().min(0).max(2).nullable(),
+  managerInheritType: z.string().max(24).nullable(),
+  memberInheritType: z.string().max(24).nullable(),
+  lastSyncedAt: z.iso.datetime().nullable(),
+  lastErrorCode: z.string().max(120).nullable(),
+});
+
 export const knowledgeBaseSchema = z.object({
   id: z.uuid(),
   key: z.string().min(1),
@@ -951,6 +976,8 @@ export const knowledgeBaseSchema = z.object({
   orgUnitIds: z.array(z.uuid()),
   orgUnitScopes: z.array(knowledgeBaseOrgUnitScopeSchema),
   memberUserIds: z.array(z.uuid()),
+  storageProvider: knowledgeBaseStorageProviderSchema.optional(),
+  externalSpace: knowledgeBaseExternalSpaceSchema.nullable().optional(),
   documentCount: z.number().int().nonnegative(),
   folders: z.array(knowledgeFolderSchema),
   documents: z.array(knowledgeDocumentSummarySchema),
@@ -974,6 +1001,7 @@ export const createKnowledgeBaseRequestSchema = z.object({
   orgUnitIds: z.array(z.uuid()).max(500).default([]),
   orgUnitScopes: z.array(knowledgeBaseOrgUnitScopeSchema).max(500).optional(),
   memberUserIds: z.array(z.uuid()).max(500).default([]),
+  storageProvider: knowledgeBaseStorageProviderSchema.optional(),
   retrievalConfig: knowledgeRetrievalConfigSchema.optional(),
   chunkingConfig: knowledgeChunkingConfigSchema.optional(),
 });
@@ -1166,7 +1194,16 @@ export const knowledgeRelationshipEvidenceSchema = z
   });
 
 export const knowledgeRetrievalDiagnosticSchema = z.object({
-  stage: z.enum(['ROUTER', 'LEXICAL', 'VECTOR', 'SQL', 'RELATIONSHIP', 'BUSINESS_API', 'RERANK']),
+  stage: z.enum([
+    'ROUTER',
+    'LEXICAL',
+    'VECTOR',
+    'SQL',
+    'RELATIONSHIP',
+    'BUSINESS_API',
+    'EXTERNAL',
+    'RERANK',
+  ]),
   status: z.enum(['APPLIED', 'SKIPPED', 'DEGRADED']),
   code: z
     .string()
@@ -1263,6 +1300,8 @@ export type UpdateMemberRequest = z.infer<typeof updateMemberRequestSchema>;
 export type ResetMemberPasswordRequest = z.infer<typeof resetMemberPasswordRequestSchema>;
 export type ResetMemberPasswordResponse = z.infer<typeof resetMemberPasswordResponseSchema>;
 export type KnowledgeBase = z.infer<typeof knowledgeBaseSchema>;
+export type KnowledgeBaseStorageProvider = z.infer<typeof knowledgeBaseStorageProviderSchema>;
+export type KnowledgeBaseExternalSpace = z.infer<typeof knowledgeBaseExternalSpaceSchema>;
 export type KnowledgeFolder = z.infer<typeof knowledgeFolderSchema>;
 export type EnsureKnowledgeFoldersRequest = z.infer<typeof ensureKnowledgeFoldersRequestSchema>;
 export type KnowledgeFolderListResponse = z.infer<typeof knowledgeFolderListResponseSchema>;

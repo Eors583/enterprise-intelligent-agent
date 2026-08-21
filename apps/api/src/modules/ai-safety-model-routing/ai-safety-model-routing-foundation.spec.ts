@@ -14,6 +14,17 @@ const migration = readFileSync(
   'utf8',
 );
 
+const ownerSelfPublishMigration = readFileSync(
+  join(
+    process.cwd(),
+    'prisma',
+    'migrations',
+    '20260817000100_owner_self_publish_ai_model_governance',
+    'migration.sql',
+  ),
+  'utf8',
+);
+
 describe('AI safety and model routing database foundation', () => {
   it('creates governed model routing, immutable evidence and Run snapshot tables', () => {
     for (const table of [
@@ -32,8 +43,17 @@ describe('AI safety and model routing database foundation', () => {
     expect(migration).toContain('ai_evidence_append_only');
   });
 
-  it('enforces maker-checker, CAS, RLS, ACL, audit and Outbox side effects', () => {
+  it('preserves workflow evidence, CAS, RLS, ACL, audit and Outbox side effects', () => {
     expect(migration).toContain('"reviewed_by_user_id" <> "submitted_by_user_id"');
+    expect(ownerSelfPublishMigration).toContain(
+      'DROP CONSTRAINT "ai_model_catalog_versions_workflow_check"',
+    );
+    expect(ownerSelfPublishMigration).toContain(
+      'ADD CONSTRAINT "ai_model_catalog_versions_workflow_check"',
+    );
+    expect(ownerSelfPublishMigration).not.toContain(
+      '"reviewed_by_user_id" <> "submitted_by_user_id"',
+    );
     expect(migration).toContain('ai_governance_revision_cas');
     expect(migration).toContain('ai_governance_commands_tenant_idempotency_key');
     expect(migration).toContain('ENABLE ROW LEVEL SECURITY');

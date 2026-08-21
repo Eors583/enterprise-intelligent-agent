@@ -232,6 +232,26 @@ export const knowledgeCitationSchema = z.preprocess((value) => {
   return value;
 }, normalizedKnowledgeCitationSchema);
 
+export const collaborationCitationSchema = z
+  .object({
+    sourceId: z.string().uuid(),
+    sourceType: z.enum(['PERSONAL_MANUAL', 'WORK_AVAILABILITY', 'TASK_FACT']),
+    sourceVersion: z.number().int().positive(),
+    title: z.string().min(1).max(300),
+    excerpt: z.string().min(1).max(500),
+    updatedAt: z.iso.datetime(),
+    contentHash: z.string().regex(/^[a-f0-9]{64}$/u),
+    verificationStatus: z
+      .literal('COLLABORATION_POLICY_VERIFIED')
+      .default('COLLABORATION_POLICY_VERIFIED'),
+  })
+  .strict();
+
+export const messageCitationSchema = z.union([
+  knowledgeCitationSchema,
+  collaborationCitationSchema,
+]);
+
 export const knowledgeCitationDetailSchema = z
   .object({
     knowledgeBaseId: z.string().uuid(),
@@ -338,7 +358,7 @@ export const textMessageContentSchema = z
   .object({
     type: z.literal('text'),
     text: z.string().trim().min(1).max(20_000),
-    citations: z.array(knowledgeCitationSchema).max(12).optional(),
+    citations: z.array(messageCitationSchema).max(12).optional(),
   })
   .strict();
 
@@ -397,6 +417,7 @@ export const conversationAgentRunSchema = z.object({
   ]),
   errorCode: z.string().nullable(),
   errorMessage: z.string().nullable(),
+  supersededByRunId: z.string().uuid().nullable().optional(),
   retryable: z.boolean(),
   createdAt: z.iso.datetime(),
   startedAt: z.iso.datetime().nullable(),
@@ -439,6 +460,8 @@ export type UpdateGroupMembersRequest = z.infer<typeof updateGroupMembersRequest
 export type ConversationListResponse = z.infer<typeof conversationListResponseSchema>;
 export type MessageSender = z.infer<typeof messageSenderSchema>;
 export type KnowledgeCitation = z.infer<typeof knowledgeCitationSchema>;
+export type CollaborationCitation = z.infer<typeof collaborationCitationSchema>;
+export type MessageCitation = z.infer<typeof messageCitationSchema>;
 export type KnowledgeCitationDetail = z.infer<typeof knowledgeCitationDetailSchema>;
 export type KnowledgeCitationOriginalQuery = z.infer<typeof knowledgeCitationOriginalQuerySchema>;
 export type AnswerFeedbackRating = z.infer<typeof answerFeedbackRatingSchema>;

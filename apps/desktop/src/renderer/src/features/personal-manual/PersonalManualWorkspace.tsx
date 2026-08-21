@@ -1,8 +1,17 @@
-import type { PersonalManualContent, PersonalManualSelfProfile } from '@enterprise/contracts';
+import type {
+  CollaborationDisclosureScope,
+  EmployeeAgentCollaborationSettings,
+  MemberSummary,
+  PersonalManualContent,
+  PersonalManualDisclosurePolicy,
+  PersonalManualSection,
+  PersonalManualSelfProfile,
+} from '@enterprise/contracts';
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 
 import { ApiClientError } from '../../shared/api/client';
 import { getMyPersonalManual, updateMyPersonalManual } from './api';
+import { scopeOptions, WorkAvailabilityPanel } from './WorkAvailabilityPanel';
 import './personal-manual.css';
 
 type ManualTextField =
@@ -38,7 +47,11 @@ const EMPTY_DRAFT: ManualDraft = {
   faqs: [],
 };
 
-export function PersonalManualWorkspace(): React.JSX.Element {
+export function PersonalManualWorkspace({
+  members = [],
+}: {
+  members?: readonly MemberSummary[];
+}): React.JSX.Element {
   const [profile, setProfile] = useState<PersonalManualSelfProfile | null>(null);
   const [draft, setDraft] = useState<ManualDraft>(EMPTY_DRAFT);
   const [loading, setLoading] = useState(true);
@@ -46,6 +59,11 @@ export function PersonalManualWorkspace(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [savedMessage, setSavedMessage] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [disclosurePolicy, setDisclosurePolicy] = useState<PersonalManualDisclosurePolicy | null>(
+    null,
+  );
+  const [collaborationSettings, setCollaborationSettings] =
+    useState<EmployeeAgentCollaborationSettings | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -55,6 +73,8 @@ export function PersonalManualWorkspace(): React.JSX.Element {
       .then((value) => {
         setProfile(value);
         setDraft(manualToDraft(value.manual));
+        setDisclosurePolicy(value.disclosurePolicy);
+        setCollaborationSettings(value.collaborationSettings);
       })
       .catch((caught: unknown) => {
         if (!controller.signal.aborted) setError(readableError(caught));
@@ -66,7 +86,13 @@ export function PersonalManualWorkspace(): React.JSX.Element {
   }, [reloadKey]);
 
   const manual = useMemo(() => draftToManual(draft), [draft]);
-  const dirty = profile !== null && JSON.stringify(manual) !== JSON.stringify(profile.manual);
+  const dirty =
+    profile !== null &&
+    disclosurePolicy !== null &&
+    collaborationSettings !== null &&
+    (JSON.stringify(manual) !== JSON.stringify(profile.manual) ||
+      JSON.stringify(disclosurePolicy) !== JSON.stringify(profile.disclosurePolicy) ||
+      JSON.stringify(collaborationSettings) !== JSON.stringify(profile.collaborationSettings));
   const completedSections = completionStates(draft).filter((section) => section.complete).length;
   const progress = Math.round((completedSections / 6) * 100);
 
@@ -81,7 +107,14 @@ export function PersonalManualWorkspace(): React.JSX.Element {
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
-    if (profile === null || !dirty || saving) return;
+    if (
+      profile === null ||
+      disclosurePolicy === null ||
+      collaborationSettings === null ||
+      !dirty ||
+      saving
+    )
+      return;
     setSaving(true);
     setError(null);
     setSavedMessage(null);
@@ -89,9 +122,13 @@ export function PersonalManualWorkspace(): React.JSX.Element {
       const saved = await updateMyPersonalManual({
         expectedUpdatedAt: profile.updatedAt,
         manual,
+        disclosurePolicy,
+        collaborationSettings,
       });
       setProfile(saved);
       setDraft(manualToDraft(saved.manual));
+      setDisclosurePolicy(saved.disclosurePolicy);
+      setCollaborationSettings(saved.collaborationSettings);
       setSavedMessage('个人使用说明书已保存。');
     } catch (caught) {
       setError(readableError(caught));
@@ -105,7 +142,7 @@ export function PersonalManualWorkspace(): React.JSX.Element {
       <ManualState title="正在读取个人使用说明书" detail="正在加载你的企业档案和已填写内容。" />
     );
   }
-  if (profile === null) {
+  if (profile === null || disclosurePolicy === null || collaborationSettings === null) {
     return (
       <ManualState
         title="个人使用说明书加载失败"
@@ -148,6 +185,45 @@ export function PersonalManualWorkspace(): React.JSX.Element {
         </span>
       </div>
 
+      <section className="personal-manual-sharing" aria-labelledby="personal-manual-sharing-title">
+        <div>
+          <h2 id="personal-manual-sharing-title">同事通过我的智能体可以了解什么</h2>
+          <p>默认仅自己可见。开启后也只会按每个部分的范围和当前工作关系提供必要摘要。</p>
+        </div>
+        <label className="personal-manual-switch">
+          <input
+            type="checkbox"
+            checked={collaborationSettings.manualSharingEnabled}
+            onChange={(event) => updateSettings('manualSharingEnabled', event.target.checked)}
+          />
+          <span>允许我的智能体介绍我主动公开的内容</span>
+        </label>
+        <label className="personal-manual-switch">
+          <input
+            type="checkbox"
+            checked={collaborationSettings.availabilitySharingEnabled}
+            onChange={(event) => updateSettings('availabilitySharingEnabled', event.target.checked)}
+          />
+          <span>允许我的智能体分享我设置的工作状态</span>
+        </label>
+        <label className="personal-manual-switch">
+          <input
+            type="checkbox"
+            checked={collaborationSettings.privateRiskRemindersEnabled}
+            onChange={(event) =>
+              updateSettings('privateRiskRemindersEnabled', event.target.checked)
+            }
+          />
+          <span>有任务风险时优先私下提醒我</span>
+        </label>
+      </section>
+
+      <WorkAvailabilityPanel
+        currentUserId={profile.user.id}
+        members={members}
+        sharingEnabled={collaborationSettings.availabilitySharingEnabled}
+      />
+
       {error ? (
         <div className="personal-manual-feedback error" role="alert">
           {error}
@@ -170,6 +246,9 @@ export function PersonalManualWorkspace(): React.JSX.Element {
           title="我是谁？"
           description="用几句话介绍自己，再补充教育和职业经历，帮助同事快速建立基本认识。"
           complete={completionStates(draft)[0]!.complete}
+          scope={disclosurePolicy.IDENTITY}
+          sharingEnabled={collaborationSettings.manualSharingEnabled}
+          onScopeChange={(scope) => updateScope('IDENTITY', scope)}
         >
           <ManualTextarea
             label="个人简介"
@@ -200,6 +279,9 @@ export function PersonalManualWorkspace(): React.JSX.Element {
           title="我的岗位职责是什么？"
           description="说清楚你目前主要负责的事项、边界和结果；管理者可以补充团队职责。"
           complete={completionStates(draft)[1]!.complete}
+          scope={disclosurePolicy.RESPONSIBILITIES}
+          sharingEnabled={collaborationSettings.manualSharingEnabled}
+          onScopeChange={(scope) => updateScope('RESPONSIBILITIES', scope)}
         >
           <ManualTextarea
             label="岗位职责"
@@ -214,6 +296,9 @@ export function PersonalManualWorkspace(): React.JSX.Element {
           title="怎样与我高效协同？"
           description="告诉同事怎样联系你、怎样安排会议，以及哪些习惯能让合作更顺畅。"
           complete={completionStates(draft)[2]!.complete}
+          scope={disclosurePolicy.COLLABORATION}
+          sharingEnabled={collaborationSettings.manualSharingEnabled}
+          onScopeChange={(scope) => updateScope('COLLABORATION', scope)}
         >
           <div className="personal-manual-two-columns">
             <ManualTextarea
@@ -252,6 +337,9 @@ export function PersonalManualWorkspace(): React.JSX.Element {
           title="如何用好我？我还能提供哪些资源？"
           description="让同事知道你擅长解决什么问题，以及你愿意共享哪些信息、渠道或资源。"
           complete={completionStates(draft)[3]!.complete}
+          scope={disclosurePolicy.RESOURCES}
+          sharingEnabled={collaborationSettings.manualSharingEnabled}
+          onScopeChange={(scope) => updateScope('RESOURCES', scope)}
         >
           <div className="personal-manual-two-columns">
             <ManualTextarea
@@ -274,6 +362,9 @@ export function PersonalManualWorkspace(): React.JSX.Element {
           title="我有哪些兴趣爱好？"
           description="分享工作以外的你，让同事更容易找到共同话题。"
           complete={completionStates(draft)[4]!.complete}
+          scope={disclosurePolicy.INTERESTS}
+          sharingEnabled={collaborationSettings.manualSharingEnabled}
+          onScopeChange={(scope) => updateScope('INTERESTS', scope)}
         >
           <div className="personal-manual-two-columns">
             <ManualTextarea
@@ -298,6 +389,9 @@ export function PersonalManualWorkspace(): React.JSX.Element {
           title="您可能会问这些问题"
           description="提前回答同事最常问的问题，可以减少重复沟通。问题和答案必须同时填写。"
           complete={completionStates(draft)[5]!.complete}
+          scope={disclosurePolicy.FAQ}
+          sharingEnabled={collaborationSettings.manualSharingEnabled}
+          onScopeChange={(scope) => updateScope('FAQ', scope)}
           action={
             <button
               type="button"
@@ -392,6 +486,20 @@ export function PersonalManualWorkspace(): React.JSX.Element {
       faqs: current.faqs.map((item) => (item.id === id ? { ...item, [field]: value } : item)),
     }));
   }
+
+  function updateScope(section: PersonalManualSection, scope: CollaborationDisclosureScope): void {
+    setSavedMessage(null);
+    setDisclosurePolicy((current) =>
+      current === null ? current : { ...current, [section]: scope },
+    );
+  }
+
+  function updateSettings(field: keyof EmployeeAgentCollaborationSettings, value: boolean): void {
+    setSavedMessage(null);
+    setCollaborationSettings((current) =>
+      current === null ? current : { ...current, [field]: value },
+    );
+  }
 }
 
 function ManualSection({
@@ -399,6 +507,9 @@ function ManualSection({
   title,
   description,
   complete,
+  scope,
+  sharingEnabled,
+  onScopeChange,
   action,
   children,
 }: {
@@ -406,6 +517,9 @@ function ManualSection({
   title: string;
   description: string;
   complete: boolean;
+  scope: CollaborationDisclosureScope;
+  sharingEnabled: boolean;
+  onScopeChange: (scope: CollaborationDisclosureScope) => void;
   action?: React.ReactNode;
   children: React.ReactNode;
 }): React.JSX.Element {
@@ -422,6 +536,16 @@ function ManualSection({
         >
           {complete ? '已填写' : '待完善'}
         </span>
+        <label className="personal-manual-scope">
+          <span>可见范围</span>
+          <select
+            value={scope}
+            disabled={!sharingEnabled}
+            onChange={(event) => onScopeChange(event.target.value as CollaborationDisclosureScope)}
+          >
+            {scopeOptions()}
+          </select>
+        </label>
         {action}
       </header>
       <div className="personal-manual-section-body">{children}</div>
@@ -458,20 +582,26 @@ function ManualTextarea({
 }
 
 function ProfileAvatar({ profile }: { profile: PersonalManualSelfProfile }): React.JSX.Element {
-  const [imageFailed, setImageFailed] = useState(false);
+  const [imageLoaded, setImageLoaded] = useState(false);
 
-  useEffect(() => setImageFailed(false), [profile.user.avatarUrl]);
+  useEffect(() => setImageLoaded(false), [profile.user.avatarUrl]);
 
-  return profile.user.avatarUrl && !imageFailed ? (
-    <img
-      className="personal-manual-avatar"
-      src={profile.user.avatarUrl}
-      alt={`${profile.user.displayName}的头像`}
-      onError={() => setImageFailed(true)}
-    />
-  ) : (
+  return (
     <span className="personal-manual-avatar fallback" aria-hidden="true">
-      {[...profile.user.displayName].slice(-2).join('')}
+      <span className="personal-manual-avatar-initials">
+        {[...profile.user.displayName].slice(-2).join('')}
+      </span>
+      {profile.user.avatarUrl && (
+        <img
+          className={
+            imageLoaded ? 'personal-manual-avatar-image loaded' : 'personal-manual-avatar-image'
+          }
+          src={profile.user.avatarUrl}
+          alt=""
+          onLoad={() => setImageLoaded(true)}
+          onError={() => setImageLoaded(false)}
+        />
+      )}
     </span>
   );
 }

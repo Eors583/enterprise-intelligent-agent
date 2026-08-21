@@ -4,7 +4,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
-  ServiceUnavailableException,
+  Optional,
 } from '@nestjs/common';
 import type {
   Conversation,
@@ -24,12 +24,11 @@ import type {
 } from '@enterprise/contracts';
 
 import { AgentControlService } from '../agent-control/application/agent-control.service.js';
-import { AgentOperationalReadinessService } from '../ai-safety-model-routing/agent-operational-readiness.service.js';
+import { AgentRunWorker } from '../agent-run/application/agent-run.worker.js';
 import { AuthorizationService } from '../authorization/authorization.service.js';
 import { IdentityService } from '../identity/application/identity.service.js';
 import { IdentityRepository } from '../identity/domain/identity.repository.js';
 import {
-  ActiveAgentRunConflictError,
   AgentUnavailableForRunError,
   ConversationResponseTargetUnavailableError,
   ConversationRepository,
@@ -44,8 +43,9 @@ export class ConversationService {
     @Inject(AgentControlService) private readonly agents: AgentControlService,
     @Inject(ConversationRepository) private readonly conversations: ConversationRepository,
     @Inject(AuthorizationService) private readonly authorization: AuthorizationService,
-    @Inject(AgentOperationalReadinessService)
-    private readonly operationalReadiness: AgentOperationalReadinessService,
+    @Optional()
+    @Inject(AgentRunWorker)
+    private readonly agentRuns?: AgentRunWorker,
   ) {}
 
   async list(
@@ -91,9 +91,6 @@ export class ConversationService {
       );
       if (selectedAgents.some((agent) => agent === undefined || !isExecutableAgent(agent))) {
         throw new NotFoundException('One or more group Agents are unavailable.');
-      }
-      if (request.agentIds.length > 0) {
-        await this.requireOperationalAgents(tenant.id, request.agentIds);
       }
       return this.conversations.createGroup({
         tenantId: tenant.id,
@@ -173,7 +170,6 @@ export class ConversationService {
       ) {
         throw new NotFoundException('One or more target agents are unavailable.');
       }
-      await this.requireOperationalAgents(tenant.id, [agentA.id, agentB.id]);
       return this.conversations.createDirect({
         tenantId: tenant.id,
         actorUserId: user.id,
@@ -198,7 +194,6 @@ export class ConversationService {
     if (target === undefined || !isExecutableAgent(target)) {
       throw new NotFoundException('The target agent is unavailable.');
     }
-    await this.requireOperationalAgents(tenant.id, [target.id]);
     if (!('ownerUserId' in target)) {
       return this.conversations.createDirect({
         tenantId: tenant.id,
@@ -361,9 +356,6 @@ export class ConversationService {
     if (addedAgents.some((agent) => agent === undefined || !isExecutableAgent(agent))) {
       throw new NotFoundException('One or more group Agents are unavailable.');
     }
-    if (request.addAgentIds.length > 0) {
-      await this.requireOperationalAgents(tenant.id, request.addAgentIds);
-    }
     try {
       const conversation = await this.conversations.updateGroupMembers({
         tenantId: tenant.id,
@@ -420,11 +412,14 @@ export class ConversationService {
         ...(request.responseTarget === undefined ? {} : { responseTarget: request.responseTarget }),
       });
       if (message === null) throw this.conversationNotFound();
+      // createUserMessage commits the message, Agent Run and Outbox atomically.
+      // Wake the co-located worker only after that commit is visible; periodic
+      // polling still covers separately deployed workers and process failures.
+      this.agentRuns?.notifyWorkAvailable();
       return message;
     } catch (error) {
       if (
         error instanceof MessageIdempotencyConflictError ||
-        error instanceof ActiveAgentRunConflictError ||
         error instanceof AgentUnavailableForRunError ||
         error instanceof ConversationResponseTargetUnavailableError
       ) {
@@ -444,24 +439,6 @@ export class ConversationService {
       this.agents.listDepartmentAgents(),
     ]);
     return [...memberAgents, ...departmentAgents];
-  }
-
-  private async requireOperationalAgents(
-    tenantId: string,
-    agentIds: readonly string[],
-  ): Promise<void> {
-    const availability = await this.operationalReadiness.inspectAgents(tenantId, agentIds);
-    const unavailableAgentIds = agentIds.filter(
-      (agentId) => availability.get(agentId)?.status !== 'AVAILABLE',
-    );
-    if (unavailableAgentIds.length > 0) {
-      throw new ServiceUnavailableException({
-        code: 'AGENT_OPERATIONAL_NOT_READY',
-        message:
-          'The target agent configuration is enabled, but verified model availability is not ready.',
-        agentIds: unavailableAgentIds,
-      });
-    }
   }
 }
 

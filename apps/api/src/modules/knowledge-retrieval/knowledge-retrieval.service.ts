@@ -1,4 +1,7 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { createHash } from 'node:crypto';
+
+import { Inject, Injectable, Optional } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import type {
   AiDataClassification,
   KnowledgeRetrievalConfig,
@@ -7,6 +10,7 @@ import type {
 import { Prisma } from '@prisma/client';
 
 import { PrismaService } from '../../database/prisma.service.js';
+import type { EnvironmentVariables } from '../../config/environment.js';
 import {
   isExternalKnowledgeAiApproved,
   knowledgeClassificationToAi,
@@ -25,6 +29,11 @@ import {
   type KnowledgeSearchIndexHit,
   type KnowledgeSearchIndexProfile,
 } from '../knowledge-search-index/knowledge-search-index.port.js';
+import {
+  KnowledgeProviderRetrievalError,
+  KnowledgeProviderRetrievalService,
+  type ExternalKnowledgeEvidence,
+} from '../knowledge-provider/application/knowledge-provider-retrieval.service.js';
 import type {
   KnowledgeEvidenceRecheckInput,
   KnowledgeRetrievalAuthorizationContext,
@@ -36,6 +45,7 @@ import type {
   KnowledgeReranker,
   KnowledgeSearchInput,
 } from '../knowledge-gateway/knowledge-gateway.port.js';
+import { KnowledgeRetrievalUnavailableError } from '../knowledge-gateway/knowledge-gateway.port.js';
 import {
   KnowledgeRelationshipExpander,
   type KnowledgeRelationshipTargetRecord,
@@ -63,6 +73,8 @@ const CANDIDATE_LIMIT = 40;
 // interactive path stays within its measured P95 budget; GPU deployments can
 // raise this value after their own benchmark.
 const RERANK_CANDIDATE_LIMIT = 3;
+const RERANK_INTERACTIVE_BUDGET_MS = 3_000;
+const RERANK_TIMEOUT_COOLDOWN_MS = 60_000;
 const RELATIONSHIP_SEED_LIMIT = 20;
 const RELATIONSHIP_CANDIDATE_LIMIT = 80;
 const MINIMUM_LEXICAL_SCORE = 0.08;
@@ -163,7 +175,10 @@ interface ResolvedEmbeddingIndexProfile {
   readonly model: string;
   readonly dimensions: number;
   readonly indexVersionIds: readonly string[];
-  readonly searchIndexProfile: KnowledgeSearchIndexProfile;
+  readonly searchIndexScopes: readonly {
+    readonly knowledgeBaseIds: readonly string[];
+    readonly profile: KnowledgeSearchIndexProfile;
+  }[];
 }
 
 const DEFAULT_RETRIEVAL_CONFIG: KnowledgeRetrievalConfig = {
@@ -179,6 +194,9 @@ const DEFAULT_RETRIEVAL_CONFIG: KnowledgeRetrievalConfig = {
 
 @Injectable()
 export class KnowledgeRetrievalService {
+  private rerankCooldownUntil = 0;
+  private readonly localBackendEnabled: boolean;
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(KnowledgeAiRuntimeClient) private readonly semantic: KnowledgeAiRuntimeClient,
@@ -189,7 +207,16 @@ export class KnowledgeRetrievalService {
     private readonly authorization: AuthorizationDecisionService,
     @Inject(KnowledgeStructuredQueryService)
     private readonly structured: KnowledgeStructuredQueryService,
-  ) {}
+    @Optional()
+    @Inject(ConfigService)
+    config?: ConfigService<EnvironmentVariables, true>,
+    @Optional()
+    @Inject(KnowledgeProviderRetrievalService)
+    private readonly providerRetrieval?: KnowledgeProviderRetrievalService,
+  ) {
+    this.localBackendEnabled =
+      config?.get('KNOWLEDGE_LOCAL_BACKEND_ENABLED', { infer: true }) ?? true;
+  }
 
   async resolveAccessibleKnowledgeBaseIds(input: {
     readonly tenantId: string;
@@ -244,6 +271,22 @@ export class KnowledgeRetrievalService {
   }
 
   async search(input: KnowledgeSearchInput): Promise<KnowledgeRetrievalResponse> {
+    if (!this.localBackendEnabled) {
+      const requested = new Set(input.knowledgeBaseIds);
+      const accessibleKnowledgeBaseIds = (
+        await this.resolveAccessibleKnowledgeBaseIds({
+          tenantId: input.tenantId,
+          userId: input.userId,
+          ...(input.authorization === undefined ? {} : { authorization: input.authorization }),
+        })
+      ).filter((id) => requested.has(id));
+      const query = normalizeQuery(input.query);
+      return this.mergeExternalResults(
+        input,
+        localBackendDisabledResponse(accessibleKnowledgeBaseIds),
+        resolveOutboundClassification(input, query),
+      );
+    }
     const authorizationFilters = this.authorizeRetrieval(input);
     const query = normalizeQuery(input.query);
     const queryRoute = routeKnowledgeQuery(input.query);
@@ -287,6 +330,7 @@ export class KnowledgeRetrievalService {
         transaction,
         input,
         query,
+        queryRoute,
         embedding,
         embeddingProfile,
         authorizationFilters,
@@ -304,13 +348,141 @@ export class KnowledgeRetrievalService {
         loaded.relationshipDegradedReason,
       outboundClassification,
     );
-    return this.applyQueryRoute(input, ranked);
+    const routed = await this.applyQueryRoute(input, ranked);
+    return this.mergeExternalResults(input, routed, outboundClassification);
   }
 
   async areChunksAccessible(input: KnowledgeEvidenceRecheckInput): Promise<boolean> {
+    // A Run with no knowledge evidence has nothing to re-authorize. Selected
+    // Knowledge Base ids are not model context; any evidence that is present is
+    // still rechecked below and fails closed when its backend is unavailable.
+    if (input.chunks.length === 0) return true;
+    const externalChunks = input.chunks.filter((chunk) => chunk.sourceProvider === 'LEXIANG');
+    if (externalChunks.length > 0) {
+      if (
+        this.providerRetrieval === undefined ||
+        externalChunks.some(
+          (chunk) =>
+            chunk.knowledgeBaseId === undefined ||
+            chunk.governanceHash !== externalGovernanceHash(input.tenantId, chunk.knowledgeBaseId),
+        )
+      ) {
+        return false;
+      }
+      const externalKnowledgeBaseIds = [
+        ...new Set(externalChunks.flatMap((chunk) => chunk.knowledgeBaseId ?? [])),
+      ];
+      const accessibleKnowledgeBaseIds = new Set(
+        await this.resolveAccessibleKnowledgeBaseIds({
+          tenantId: input.tenantId,
+          userId: input.userId,
+          ...(input.authorization === undefined ? {} : { authorization: input.authorization }),
+        }),
+      );
+      if (
+        externalKnowledgeBaseIds.some((id) => !accessibleKnowledgeBaseIds.has(id)) ||
+        !(await this.providerRetrieval.areKnowledgeBasesRetrievable(
+          input.tenantId,
+          input.userId,
+          externalKnowledgeBaseIds,
+        ))
+      ) {
+        return false;
+      }
+    }
+    const localChunks = input.chunks.filter((chunk) => chunk.sourceProvider !== 'LEXIANG');
+    if (localChunks.length === 0) return true;
+    if (!this.localBackendEnabled) return false;
     return this.prisma.withTenant(input.tenantId, (transaction) =>
-      this.areChunksAccessibleInTransaction(transaction, input),
+      this.areChunksAccessibleInTransaction(transaction, { ...input, chunks: localChunks }),
     );
+  }
+
+  private async mergeExternalResults(
+    input: KnowledgeSearchInput,
+    local: KnowledgeRetrievalResponse,
+    outboundClassification: AiDataClassification,
+  ): Promise<KnowledgeRetrievalResponse> {
+    if (
+      local.accessibleKnowledgeBaseIds.length === 0 ||
+      !isExternalKnowledgeAiApproved(outboundClassification)
+    ) {
+      return local;
+    }
+    if (this.providerRetrieval === undefined) {
+      if (!this.localBackendEnabled && local.items.length === 0) {
+        throw new KnowledgeRetrievalUnavailableError('KNOWLEDGE_PROVIDER_RETRIEVAL_UNAVAILABLE');
+      }
+      return local;
+    }
+    const limit = Math.min(20, Math.max(1, input.limit ?? DEFAULT_RETRIEVAL_CONFIG.topK));
+    try {
+      const external = await this.providerRetrieval.search({
+        tenantId: input.tenantId,
+        userId: input.userId,
+        knowledgeBaseIds: local.accessibleKnowledgeBaseIds,
+        query: input.query,
+        limit,
+      });
+      if (external.searchedKnowledgeBaseIds.length === 0) {
+        if (local.items.length === 0) {
+          throw new KnowledgeRetrievalUnavailableError('LEXIANG_SEARCH_TARGET_UNAVAILABLE');
+        }
+        return local;
+      }
+      const externalItems = external.items.map((item, index) =>
+        externalRetrievalResult(input.tenantId, item, index, external.items.length),
+      );
+      const allExternal = local.accessibleKnowledgeBaseIds.every((id) =>
+        external.searchedKnowledgeBaseIds.includes(id),
+      );
+      return {
+        ...local,
+        mode: 'HYBRID',
+        reranker: 'WEIGHTED_SCORE',
+        degradedReason:
+          allExternal &&
+          (local.degradedReason === 'KNOWLEDGE_EMBEDDING_INDEX_PROFILE_UNAVAILABLE' ||
+            local.degradedReason === 'KNOWLEDGE_LOCAL_BACKEND_DISABLED')
+            ? null
+            : local.degradedReason,
+        diagnostics: [
+          ...local.diagnostics,
+          {
+            stage: 'EXTERNAL',
+            status: 'APPLIED',
+            code: 'LEXIANG_AI_SEARCH_APPLIED',
+            candidateCount: externalItems.length,
+          },
+        ],
+        items: [...local.items, ...externalItems]
+          .sort(
+            (left, right) =>
+              right.finalScore - left.finalScore || left.chunkId.localeCompare(right.chunkId),
+          )
+          .slice(0, limit),
+      };
+    } catch (error) {
+      if (error instanceof KnowledgeRetrievalUnavailableError) throw error;
+      if (!(error instanceof KnowledgeProviderRetrievalError)) throw error;
+      // An unavailable remote-only source is not the same as a successful
+      // search with zero matches. Let Agent Run keep the event queued and retry
+      // instead of publishing a false "no enterprise knowledge" answer.
+      if (local.items.length === 0) throw new KnowledgeRetrievalUnavailableError(error.code);
+      return {
+        ...local,
+        degradedReason: error.code,
+        diagnostics: [
+          ...local.diagnostics,
+          {
+            stage: 'EXTERNAL',
+            status: 'DEGRADED',
+            code: error.code,
+            candidateCount: 0,
+          },
+        ],
+      };
+    }
   }
 
   private async resolveEmbeddingProfile(
@@ -322,6 +494,7 @@ export class KnowledgeRetrievalService {
       transaction.knowledgeBase.findMany({
         where: { tenantId: input.tenantId, id: { in: requestedIds } },
         select: {
+          id: true,
           activeEmbeddingIndexVersion: {
             select: {
               id: true,
@@ -336,7 +509,9 @@ export class KnowledgeRetrievalService {
       }),
     );
     const active = indexes.flatMap((item) =>
-      item.activeEmbeddingIndexVersion == null ? [] : [item.activeEmbeddingIndexVersion],
+      item.activeEmbeddingIndexVersion == null
+        ? []
+        : [{ knowledgeBaseId: item.id, ...item.activeEmbeddingIndexVersion }],
     );
     if (active.length === 0) return null;
     const first = active[0];
@@ -345,23 +520,37 @@ export class KnowledgeRetrievalService {
       (item) =>
         item.model === first.model &&
         item.dimensions === first.dimensions &&
-        item.distance === first.distance &&
-        item.collectionName === first.collectionName,
+        item.distance === first.distance,
     );
     if (!compatible) return null;
+    const scopesByCollection = new Map<string, typeof active>();
+    for (const item of active) {
+      const key = item.collectionName ?? '';
+      const scope = scopesByCollection.get(key);
+      if (scope === undefined) scopesByCollection.set(key, [item]);
+      else scope.push(item);
+    }
     return {
       model: first.model,
       dimensions: first.dimensions,
       indexVersionIds: active.map((item) => item.id),
-      searchIndexProfile: {
-        indexVersionId: first.id,
-        ...(active.every((item) => item.provider === 'legacy_runtime')
-          ? {}
-          : { compatibleIndexVersionIds: active.map((item) => item.id) }),
-        collectionName: first.collectionName,
-        dimensions: first.dimensions,
-        distance: 'COSINE',
-      },
+      searchIndexScopes: [...scopesByCollection.values()].map((scope) => {
+        const scopeFirst = scope[0];
+        if (scopeFirst === undefined)
+          throw new Error('KNOWLEDGE_EMBEDDING_INDEX_PROFILE_UNAVAILABLE');
+        return {
+          knowledgeBaseIds: scope.map((item) => item.knowledgeBaseId),
+          profile: {
+            indexVersionId: scopeFirst.id,
+            ...(scope.every((item) => item.provider === 'legacy_runtime')
+              ? {}
+              : { compatibleIndexVersionIds: scope.map((item) => item.id) }),
+            collectionName: scopeFirst.collectionName,
+            dimensions: scopeFirst.dimensions,
+            distance: 'COSINE' as const,
+          },
+        };
+      }),
     };
   }
 
@@ -471,10 +660,12 @@ export class KnowledgeRetrievalService {
   ): Promise<KnowledgeRetrievalResponse> {
     const authorizationFilters = this.authorizeRetrieval(input);
     const query = normalizeQuery(input.query);
+    const queryRoute = routeKnowledgeQuery(input.query);
     const loaded = await this.loadCandidates(
       transaction,
       input,
       query,
+      queryRoute,
       null,
       null,
       authorizationFilters,
@@ -623,6 +814,7 @@ export class KnowledgeRetrievalService {
     transaction: Prisma.TransactionClient,
     input: KnowledgeSearchInput,
     query: string,
+    queryRoute: KnowledgeQueryRoute,
     embedding: KnowledgeEmbeddingBatch | null,
     embeddingProfile: ResolvedEmbeddingIndexProfile | null,
     authorizationFilters: KnowledgeResourceAuthorizationFilters,
@@ -754,12 +946,18 @@ export class KnowledgeRetrievalService {
             ${Prisma.join(previewVersionIds.map((id) => Prisma.sql`${id}::uuid`))}
           )`;
     const keywordExpression = keywordScoreExpression(terms);
+    const lexicalCandidateFilter = lexicalCandidateFilterExpression(terms);
     const resourceFilterSql = knowledgeVersionResourcePolicySql(
       Prisma.sql`version`,
       resolvedAuthorization.filters,
     );
     const versionPolicySql = knowledgeVersionResourcePolicySnapshotSql(Prisma.sql`version`);
-    const lexicalRows = await transaction.$queryRaw<CandidateRow[]>(Prisma.sql`
+    const requiresPostgresLexical =
+      this.searchIndex.driver === 'postgres' ||
+      prefetchedSearchIndex.hits === null ||
+      policies.some((policy) => policy.mode === 'FULL_TEXT');
+    const lexicalRows = requiresPostgresLexical
+      ? await transaction.$queryRaw<CandidateRow[]>(Prisma.sql`
       SELECT *
       FROM (
         SELECT
@@ -805,6 +1003,7 @@ export class KnowledgeRetrievalService {
          AND version."status" = 'READY'
         WHERE chunk."tenant_id" = ${input.tenantId}::uuid
           AND chunk."knowledge_base_id" IN (${accessibleKnowledgeBaseIdSql})
+          AND (${lexicalCandidateFilter})
           AND ${resourceFilterSql}
       ) AS lexical_candidate
       WHERE lexical_candidate.keyword_score > 0
@@ -815,7 +1014,8 @@ export class KnowledgeRetrievalService {
         lexical_candidate.document_version DESC,
         lexical_candidate.chunk_id ASC
       LIMIT ${CANDIDATE_LIMIT}
-    `);
+    `)
+      : [];
 
     let vectorRows: VectorCandidateRow[] = [];
     let searchIndexDegradedReason = prefetchedSearchIndex.degradedReason;
@@ -987,6 +1187,29 @@ export class KnowledgeRetrievalService {
     );
     const seeds = relationshipSeeds(baseCandidates);
 
+    // Graph expansion is materially more expensive than dense/sparse document
+    // retrieval. Keep it on the hot path only for an explicit relationship
+    // question, while preserving entity-name graph discovery when ordinary
+    // retrieval could not find any seed candidates.
+    if (queryRoute.primary !== 'RELATIONSHIP' && baseCandidates.length > 0) {
+      return {
+        accessibleKnowledgeBaseIds: accessibleIds,
+        candidates: baseCandidates,
+        lexicalCandidateCount: effectiveLexicalRows.length,
+        vectorCandidateCount: authorizedVectorRows.length,
+        relationshipCandidateCount: 0,
+        relationshipExpandedCount: 0,
+        relationshipDiagnostic: relationshipDiagnostic(
+          'SKIPPED',
+          'KNOWLEDGE_RELATIONSHIP_ROUTE_NOT_SELECTED',
+          0,
+        ),
+        relationshipDegradedReason: null,
+        searchIndexDegradedReason,
+        policies,
+      };
+    }
+
     const relationshipKnowledgeBaseIds = accessibleIds.filter(
       (knowledgeBaseId) =>
         retrievalPolicy(policyByKnowledgeBaseId, knowledgeBaseId).relationshipRetrievalEnabled,
@@ -1107,15 +1330,29 @@ export class KnowledgeRetrievalService {
         0,
         20,
       );
-      const hits = await this.searchIndex.query({
-        profile: embeddingProfile.searchIndexProfile,
-        tenantId: input.tenantId,
-        knowledgeBaseIds,
-        ...(previewDocumentVersionIds.length === 0 ? {} : { previewDocumentVersionIds }),
-        query,
-        vector,
-        limit: CANDIDATE_LIMIT,
-      });
+      const hitsByScope = await Promise.all(
+        embeddingProfile.searchIndexScopes.map((scope) =>
+          this.searchIndex.query({
+            profile: scope.profile,
+            tenantId: input.tenantId,
+            knowledgeBaseIds: scope.knowledgeBaseIds.filter((id) => knowledgeBaseIds.includes(id)),
+            ...(previewDocumentVersionIds.length === 0 ? {} : { previewDocumentVersionIds }),
+            query,
+            vector,
+            limit: CANDIDATE_LIMIT,
+          }),
+        ),
+      );
+      const scoreByChunkId = new Map<string, number>();
+      for (const hit of hitsByScope.flat()) {
+        scoreByChunkId.set(hit.chunkId, Math.max(scoreByChunkId.get(hit.chunkId) ?? 0, hit.score));
+      }
+      const hits = [...scoreByChunkId.entries()]
+        .map(([chunkId, score]) => ({ chunkId, score }))
+        .sort(
+          (left, right) => right.score - left.score || left.chunkId.localeCompare(right.chunkId),
+        )
+        .slice(0, CANDIDATE_LIMIT);
       return { hits, degradedReason: null };
     } catch {
       return { hits: null, degradedReason: 'KNOWLEDGE_QDRANT_UNAVAILABLE' };
@@ -1148,6 +1385,14 @@ export class KnowledgeRetrievalService {
     if (!this.semantic.rerankEnabled || eligible.length === 0) {
       return this.rankWithoutRemote(input, loaded, embedding, degradedReason);
     }
+    if (Date.now() < this.rerankCooldownUntil) {
+      return this.rankWithoutRemote(
+        input,
+        loaded,
+        embedding,
+        'KNOWLEDGE_RERANK_CIRCUIT_OPEN_FALLBACK',
+      );
+    }
     const rerankClassification = maximumAiDataClassification(
       outboundClassification,
       ...eligible.map((candidate) =>
@@ -1163,16 +1408,20 @@ export class KnowledgeRetrievalService {
       );
     }
 
+    const rerankController = new AbortController();
+    const rerankTimer = setTimeout(() => rerankController.abort(), RERANK_INTERACTIVE_BUDGET_MS);
+    rerankTimer.unref?.();
     try {
       const reranked = await this.semantic.rerank(
         input.tenantId,
         query,
         eligible.map((candidate) => ({
           id: candidate.row.chunk_id,
-          text: rerankDocumentText(candidate),
+          text: rerankDocumentText(candidate, query),
         })),
         Math.min(20, eligible.length),
         rerankClassification,
+        rerankController.signal,
       );
       if (reranked.results.every((item) => item.relevanceScore < MINIMUM_RERANK_SCORE)) {
         return this.rankWithoutRemote(
@@ -1202,7 +1451,19 @@ export class KnowledgeRetrievalService {
       }
       return crossEncoderResponse;
     } catch (error) {
-      return this.rankWithoutRemote(input, loaded, embedding, safeSemanticErrorCode(error));
+      if (rerankController.signal.aborted) {
+        this.rerankCooldownUntil = Date.now() + RERANK_TIMEOUT_COOLDOWN_MS;
+      }
+      return this.rankWithoutRemote(
+        input,
+        loaded,
+        embedding,
+        rerankController.signal.aborted
+          ? 'KNOWLEDGE_RERANK_TIMEOUT_FALLBACK'
+          : safeSemanticErrorCode(error),
+      );
+    } finally {
+      clearTimeout(rerankTimer);
     }
   }
 
@@ -1222,6 +1483,26 @@ export class KnowledgeRetrievalService {
       null,
     );
   }
+}
+
+function localBackendDisabledResponse(
+  accessibleKnowledgeBaseIds: readonly string[] = [],
+): KnowledgeRetrievalResponse {
+  return {
+    accessibleKnowledgeBaseIds,
+    mode: 'LEXICAL',
+    embeddingModel: null,
+    reranker: 'LEXICAL',
+    rerankerModel: null,
+    degradedReason: 'KNOWLEDGE_LOCAL_BACKEND_DISABLED',
+    lexicalCandidateCount: 0,
+    vectorCandidateCount: 0,
+    relationshipCandidateCount: 0,
+    relationshipExpandedCount: 0,
+    semanticCoverage: 0,
+    diagnostics: [],
+    items: [],
+  };
 }
 
 export function resolveOrganizationAuthorization(
@@ -1540,6 +1821,8 @@ function buildResponse(
     .sort(
       (left, right) =>
         right.finalScore - left.finalScore ||
+        right.directEvidence.termCoverage - left.directEvidence.termCoverage ||
+        right.directEvidence.fuzzyScore - left.directEvidence.fuzzyScore ||
         left.candidate.row.chunk_id.localeCompare(right.candidate.row.chunk_id),
     )
     .filter(({ candidate }) => {
@@ -1598,6 +1881,59 @@ function buildResponse(
     diagnostics: buildDiagnostics(loaded, embedding, reranker, degradedReason),
     items,
   };
+}
+
+function externalRetrievalResult(
+  tenantId: string,
+  evidence: ExternalKnowledgeEvidence,
+  index: number,
+  total: number,
+): KnowledgeRetrievalResult {
+  const score = clampUnitScore(evidence.score ?? Math.max(0.05, 1 - index / Math.max(1, total)));
+  const documentIdentity = `${evidence.knowledgeBaseId}\0${evidence.sourceUri}`;
+  return {
+    chunkId: deterministicUuid(`lexiang-chunk\0${evidence.evidenceId}`),
+    knowledgeBaseId: evidence.knowledgeBaseId,
+    knowledgeBaseName: evidence.knowledgeBaseName,
+    documentId: deterministicUuid(`lexiang-document\0${documentIdentity}`),
+    documentVersionId: deterministicUuid(`lexiang-version\0${documentIdentity}`),
+    documentVersion: 1,
+    title: evidence.title.trim() || '腾讯乐享知识',
+    headingPath: [],
+    pageStart: null,
+    pageEnd: null,
+    sheetName: null,
+    content: evidence.content,
+    sourceProvider: 'LEXIANG',
+    sourceUri: evidence.sourceUri,
+    sourceType: 'WEB',
+    classification: 'INTERNAL',
+    governanceHash: externalGovernanceHash(tenantId, evidence.knowledgeBaseId),
+    contentHash: createHash('sha256').update(evidence.content.normalize('NFC')).digest('hex'),
+    updatedAt: evidence.updatedAt,
+    keywordScore: 0,
+    fuzzyScore: 0,
+    semanticScore: score,
+    fusionScore: score,
+    rerankerScore: score,
+    relationshipScore: 0,
+    relationshipEvidence: [],
+    finalScore: score,
+  };
+}
+
+function externalGovernanceHash(tenantId: string, knowledgeBaseId: string): string {
+  return createHash('sha256')
+    .update(`lexiang-governance\0${tenantId}\0${knowledgeBaseId}`)
+    .digest('hex');
+}
+
+function deterministicUuid(value: string): string {
+  const bytes = createHash('sha256').update(value).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString('hex');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function resolveOutboundClassification(
@@ -1814,7 +2150,23 @@ function keywordScoreExpression(terms: readonly string[]): Prisma.Sql {
   );
 }
 
-function rerankDocumentText(candidate: CandidateState): string {
+function lexicalCandidateFilterExpression(terms: readonly string[]): Prisma.Sql {
+  // The GIN pg_trgm index is defined on the original content column. Applying
+  // lower(content) or calculating similarity before narrowing the row set makes
+  // PostgreSQL score every chunk. Three-character terms give pg_trgm a selective,
+  // indexable prefilter; shorter outage-mode queries fail fast instead of causing
+  // an unbounded tenant-wide scan.
+  const indexableTerms = terms.filter((term) => Array.from(term).length >= 3).slice(0, 16);
+  if (indexableTerms.length === 0) return Prisma.sql`false`;
+  return Prisma.join(
+    indexableTerms.map(
+      (term) => Prisma.sql`chunk."content" ILIKE ${`%${escapeLike(term)}%`} ESCAPE '\\'`,
+    ),
+    ' OR ',
+  );
+}
+
+function rerankDocumentText(candidate: CandidateState, query: string): string {
   const relationshipContext = candidate.relationshipEvidence
     .flatMap((evidence) =>
       evidence.path.map(
@@ -1822,15 +2174,24 @@ function rerankDocumentText(candidate: CandidateState): string {
       ),
     )
     .join('\n');
-  return [
-    candidate.row.title,
-    candidate.row.heading_path.join(' / '),
-    relationshipContext,
-    candidate.row.content,
-  ]
+  const content = relevantContentWindow(candidate.row.content, query, 1_000);
+  return [candidate.row.title, candidate.row.heading_path.join(' / '), relationshipContext, content]
     .filter(Boolean)
     .join('\n')
-    .slice(0, 20_000);
+    .slice(0, 1_500);
+}
+
+function relevantContentWindow(content: string, query: string, maximumLength: number): string {
+  if (content.length <= maximumLength) return content;
+  const terms = queryTerms(query).sort((left, right) => right.length - left.length);
+  const normalizedContent = content.toLowerCase();
+  const match = terms
+    .map((term) => normalizedContent.indexOf(term))
+    .find((position) => position >= 0);
+  if (match === undefined) return content.slice(0, maximumLength);
+  const start = Math.max(0, match - Math.floor(maximumLength * 0.35));
+  const windowStart = Math.min(start, content.length - maximumLength);
+  return content.slice(windowStart, windowStart + maximumLength);
 }
 
 function normalizeQuery(value: string): string {
@@ -1838,11 +2199,15 @@ function normalizeQuery(value: string): string {
 }
 
 function queryTerms(value: string): string[] {
-  const lowered = value.toLowerCase();
+  const lowered = evidenceQueryText(value).toLowerCase();
   const words = (lowered.match(/[a-z0-9][a-z0-9._-]{1,31}/g) ?? []).filter(
     (word) => !ENGLISH_QUERY_STOP_WORDS.has(word),
   );
-  const chineseRuns = lowered.match(/[\p{Script=Han}]+/gu) ?? [];
+  const chineseContent = lowered.replace(
+    /(?:我想知道|我想了解|请问|麻烦介绍|告诉我|什么是|是什么|什么意思|的含义|如何|怎么|怎样|关于)/gu,
+    ' ',
+  );
+  const chineseRuns = chineseContent.match(/[\p{Script=Han}]+/gu) ?? [];
   const completeRuns = chineseRuns.filter((run) => run.length >= 2 && run.length <= 16);
   const bigrams = chineseRuns.flatMap((run) =>
     Array.from({ length: Math.max(0, run.length - 1) }, (_, index) => run.slice(index, index + 2)),
@@ -1851,6 +2216,21 @@ function queryTerms(value: string): string[] {
     Array.from({ length: Math.max(0, run.length - 2) }, (_, index) => run.slice(index, index + 3)),
   );
   return [...new Set([...words, ...completeRuns, ...trigrams, ...bigrams])].slice(0, 64);
+}
+
+function evidenceQueryText(value: string): string {
+  // Source-grounded questions commonly wrap the evidence in document/title
+  // instructions. Those instructions are useful to route and retrieve, but
+  // counting their Chinese n-grams as required evidence can reject an exact
+  // sparse hit. Prefer the quoted source excerpt, or the text after the
+  // explanation colon, while leaving ordinary questions unchanged.
+  const explanation = value.match(/(?:含义|原文内容)\s*[：:]\s*(.{8,})$/u)?.[1]?.trim();
+  if (explanation) return explanation;
+
+  const quotedSegments = [...value.matchAll(/[“"]([^”"]{8,})[”"]/gu)]
+    .map((match) => match[1]?.trim() ?? '')
+    .filter(Boolean);
+  return quotedSegments.length > 0 ? quotedSegments.join(' ') : value;
 }
 
 function directEvidenceStrength(

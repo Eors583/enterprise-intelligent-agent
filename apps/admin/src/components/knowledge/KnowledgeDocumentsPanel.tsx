@@ -6,10 +6,14 @@ import type {
 } from '@enterprise/contracts';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 
-import { archiveKnowledgeDocument, retryKnowledgeDocumentIngestion } from '@/api/admin-api';
+import {
+  archiveKnowledgeDocument,
+  deleteKnowledgeFolder,
+  retryKnowledgeDocumentIngestion,
+} from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
-import { EmptyState, FieldError, Modal, Spinner, StatusPill } from '@/components/ui';
+import { EmptyState, FieldError, Modal, Notice, Spinner, StatusPill } from '@/components/ui';
 
 import { KnowledgeUploadModal } from './KnowledgeUploadModal';
 import {
@@ -125,6 +129,7 @@ export function KnowledgeDocumentsPanel({
   const [retryingVersionId, setRetryingVersionId] = useState<string | null>(null);
   const [optimisticRetryVersionId, setOptimisticRetryVersionId] = useState<string | null>(null);
   const [archivingDocumentId, setArchivingDocumentId] = useState<string | null>(null);
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<KnowledgeDocumentSourceFilter>('ALL');
   const [statusFilter, setStatusFilter] = useState<KnowledgeDocumentStatusFilter>('ALL');
@@ -135,6 +140,7 @@ export function KnowledgeDocumentsPanel({
   const [error, setError] = useState<string | null>(null);
   const folders = item.folders ?? [];
   const currentFolder = folders.find((folder) => folder.id === currentFolderId) ?? null;
+  const breadcrumbFolders = knowledgeFolderAncestors(currentFolder, folders);
   const childFolders = folders.filter((folder) => folder.parentId === currentFolderId);
   const directoryDocuments = item.documents.filter(
     (document) => document.folderId === currentFolderId,
@@ -145,6 +151,9 @@ export function KnowledgeDocumentsPanel({
     sourceFilter,
     statusFilter,
   );
+  const managedByLexiang = item.storageProvider === 'LEXIANG';
+  const lexiangWritable = !managedByLexiang || item.externalSpace?.status === 'ACTIVE';
+  const writesDisabled = item.status === 'ARCHIVED' || !lexiangWritable;
 
   useEffect(() => {
     if (optimisticRetryVersionId === null) return;
@@ -199,13 +208,40 @@ export function KnowledgeDocumentsPanel({
     }
   };
 
+  const deleteFolder = async (folder: KnowledgeBase['folders'][number]): Promise<void> => {
+    const processing = knowledgeFolderProcessingSummary(folder, item.documents);
+    const documentWarning =
+      processing.totalDocuments > 0
+        ? `目录及子目录中的 ${processing.totalDocuments} 篇文档也会被删除。`
+        : '空的子文件夹也会一并删除。';
+    if (!window.confirm(`确认删除文件夹“${folder.name}”吗？${documentWarning}`)) return;
+    setDeletingFolderId(folder.id);
+    setError(null);
+    try {
+      await deleteKnowledgeFolder(item.id, folder.id);
+      if (currentFolderId === folder.id) setCurrentFolderId(folder.parentId);
+      onChanged(
+        processing.totalDocuments > 0
+          ? `文件夹“${folder.name}”及其中 ${processing.totalDocuments} 篇文档已删除。`
+          : `文件夹“${folder.name}”已删除。`,
+      );
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setDeletingFolderId(null);
+    }
+  };
+
   return (
     <>
       <section className="card documents-card knowledge-tab-panel">
         <header className="card-header">
           <div>
             <h2>知识文档</h2>
-            <p>当前 {item.documents.length} 篇；文件会自动完成解析、切片和索引。</p>
+            <p>
+              当前 {item.documents.length} 篇；
+              {managedByLexiang ? '此知识库由腾讯乐享托管。' : '文件会自动完成解析、切片和索引。'}
+            </p>
           </div>
           <div className="knowledge-document-actions">
             <input
@@ -227,7 +263,7 @@ export function KnowledgeDocumentsPanel({
               className="button primary compact"
               type="button"
               onClick={() => folderInputRef.current?.click()}
-              disabled={item.status === 'ARCHIVED'}
+              disabled={writesDisabled}
             >
               <span aria-hidden="true">↑</span> 导入文件夹
             </button>
@@ -235,59 +271,66 @@ export function KnowledgeDocumentsPanel({
               className="button secondary compact"
               type="button"
               onClick={() => setCreateFolderOpen(true)}
-              disabled={item.status === 'ARCHIVED'}
+              disabled={writesDisabled}
             >
               <Icon name="plus" size={16} /> 新建文件夹
             </button>
-            <button
-              className="button secondary compact"
-              type="button"
-              onClick={() => setWebImportOpen(true)}
-              disabled={item.status === 'ARCHIVED'}
-            >
-              导入网页
-            </button>
-            <button
-              className="button primary compact"
-              type="button"
-              onClick={() => setUploadTarget('new')}
-              disabled={item.status === 'ARCHIVED'}
-            >
-              <span aria-hidden="true">↑</span> 上传文件
-            </button>
-            <button
-              className="button secondary compact"
-              type="button"
-              onClick={() => setSourceConnectorsOpen(true)}
-              disabled={item.status === 'ARCHIVED'}
-            >
-              其他来源接入
-            </button>
-            <button
-              className="button secondary compact"
-              type="button"
-              onClick={onCreateDocument}
-              disabled={item.status === 'ARCHIVED'}
-            >
-              <Icon name="plus" size={16} /> 粘贴文本
-            </button>
+            {!managedByLexiang ? (
+              <>
+                <button
+                  className="button secondary compact"
+                  type="button"
+                  onClick={() => setWebImportOpen(true)}
+                  disabled={writesDisabled}
+                >
+                  导入网页
+                </button>
+                <button
+                  className="button primary compact"
+                  type="button"
+                  onClick={() => setUploadTarget('new')}
+                  disabled={writesDisabled}
+                >
+                  <span aria-hidden="true">↑</span> 上传文件
+                </button>
+                <button
+                  className="button secondary compact"
+                  type="button"
+                  onClick={() => setSourceConnectorsOpen(true)}
+                  disabled={writesDisabled}
+                >
+                  其他来源接入
+                </button>
+                <button
+                  className="button secondary compact"
+                  type="button"
+                  onClick={onCreateDocument}
+                  disabled={writesDisabled}
+                >
+                  <Icon name="plus" size={16} /> 粘贴文本
+                </button>
+              </>
+            ) : null}
           </div>
         </header>
+        {managedByLexiang ? (
+          <Notice tone="info">
+            {lexiangWritable
+              ? '这里上传的文件夹和文件会写入腾讯乐享；本系统只保存受权限控制的目录映射，不复制远端文件内容。可用资料会通过权限受控的乐享 AI 搜索参与智能体回答。'
+              : '该乐享知识库尚未通过隐私范围校验，已禁止从本系统上传资料；请修正乐享权限后重新同步。'}
+          </Notice>
+        ) : null}
         {item.documents.length > 0 || folders.length > 0 ? (
           <nav className="knowledge-folder-breadcrumb" aria-label="当前文件夹路径">
             <button type="button" onClick={() => setCurrentFolderId(null)}>
               全部资料
             </button>
-            {currentFolder?.path.split('/').map((segment, index, segments) => {
-              const path = segments.slice(0, index + 1).join('/');
-              const folder = folders.find((candidate) => candidate.path === path);
-              return folder ? (
-                <button type="button" key={folder.id} onClick={() => setCurrentFolderId(folder.id)}>
-                  <span aria-hidden="true">/</span>
-                  {segment}
-                </button>
-              ) : null;
-            })}
+            {breadcrumbFolders.map((folder) => (
+              <button type="button" key={folder.id} onClick={() => setCurrentFolderId(folder.id)}>
+                <span aria-hidden="true">/</span>
+                {folder.name}
+              </button>
+            ))}
           </nav>
         ) : null}
         {item.documents.length > 0 || folders.length > 0 ? (
@@ -348,6 +391,9 @@ export function KnowledgeDocumentsPanel({
                 folder={folder}
                 processing={knowledgeFolderProcessingSummary(folder, item.documents)}
                 onOpen={() => setCurrentFolderId(folder.id)}
+                onDelete={() => void deleteFolder(folder)}
+                deleting={deletingFolderId === folder.id}
+                managedByLexiang={managedByLexiang}
               />
             ))}
           </div>
@@ -355,16 +401,31 @@ export function KnowledgeDocumentsPanel({
         {item.documents.length === 0 && folders.length === 0 ? (
           <EmptyState
             title="还没有文档"
-            description="优先上传 PDF、Word、Excel、TXT 或 Markdown 文件；网页和粘贴文本作为辅助来源。"
+            description={
+              managedByLexiang
+                ? '乐享知识库当前没有文件夹或文档；可直接选择本地文件夹上传到乐享。'
+                : '优先上传 PDF、Word、Excel、TXT 或 Markdown 文件；网页和粘贴文本作为辅助来源。'
+            }
             action={
-              <button
-                className="button primary"
-                type="button"
-                onClick={() => setUploadTarget('new')}
-                disabled={item.status === 'ARCHIVED'}
-              >
-                上传第一份资料
-              </button>
+              managedByLexiang ? (
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => folderInputRef.current?.click()}
+                  disabled={writesDisabled}
+                >
+                  上传第一个文件夹
+                </button>
+              ) : (
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => setUploadTarget('new')}
+                  disabled={writesDisabled}
+                >
+                  上传第一份资料
+                </button>
+              )
             }
           />
         ) : filteredDocuments.length === 0 && childFolders.length === 0 ? (
@@ -396,29 +457,33 @@ export function KnowledgeDocumentsPanel({
                 !inProgress &&
                 document.status !== 'ARCHIVED';
               const displayedStatus =
-                document.status === 'ARCHIVED'
-                  ? { value: 'ARCHIVED', label: '已删除' }
-                  : retryQueued && latest
-                    ? {
-                        value: 'PROCESSING',
-                        label: `最新 v${latest.versionNumber} · 等待处理`,
-                      }
-                    : latest && (inProgress || failed || currentPublished === null)
+                managedByLexiang && document.status !== 'ARCHIVED'
+                  ? { value: 'DRAFT', label: '已同步目录' }
+                  : document.status === 'ARCHIVED'
+                    ? { value: 'ARCHIVED', label: '已删除' }
+                    : retryQueued && latest
                       ? {
-                          value: latest.status,
-                          label: `最新 v${latest.versionNumber} · ${documentStatusLabel(latest.status)}`,
+                          value: 'PROCESSING',
+                          label: `最新 v${latest.versionNumber} · 等待处理`,
                         }
-                      : currentPublished
+                      : latest && (inProgress || failed || currentPublished === null)
                         ? {
-                            value: 'READY',
-                            label: `当前可用 v${currentPublished.versionNumber}`,
+                            value: latest.status,
+                            label: `最新 v${latest.versionNumber} · ${documentStatusLabel(latest.status)}`,
                           }
-                        : { value: 'DRAFT', label: '当前不可用' };
+                        : currentPublished
+                          ? {
+                              value: 'READY',
+                              label: `当前可用 v${currentPublished.versionNumber}`,
+                            }
+                          : { value: 'DRAFT', label: '当前不可用' };
 
               return (
                 <article className="knowledge-document-entry" key={document.id}>
                   <div className="knowledge-document-row">
-                    <span className="document-icon">{sourceGlyph(document)}</span>
+                    <span className="document-icon">
+                      {managedByLexiang ? 'LX' : sourceGlyph(document)}
+                    </span>
                     <button
                       className="document-copy knowledge-document-open"
                       type="button"
@@ -438,8 +503,7 @@ export function KnowledgeDocumentsPanel({
                     >
                       <strong>{document.title}</strong>
                       <small>
-                        {sourceLabel(document)} · 最新 v
-                        {latest?.versionNumber ?? document.documentVersion} ·{' '}
+                        {managedByLexiang ? '腾讯乐享托管' : sourceLabel(document)} ·{' '}
                         {formatDate(document.updatedAt)}
                       </small>
                     </button>
@@ -456,7 +520,7 @@ export function KnowledgeDocumentsPanel({
                         {retryingVersionId === latest.id ? <Spinner label="重试中…" /> : '重试'}
                       </button>
                     ) : null}
-                    {document.status !== 'ARCHIVED' ? (
+                    {!managedByLexiang && document.status !== 'ARCHIVED' ? (
                       <div className="knowledge-document-row-actions">
                         <button
                           className="button secondary compact"
@@ -601,7 +665,7 @@ export function KnowledgeDocumentsPanel({
       {createFolderOpen ? (
         <KnowledgeCreateFolderModal
           knowledgeBaseId={item.id}
-          parentPath={currentFolder?.path ?? null}
+          parentPath={breadcrumbFolders.map((folder) => folder.name).join('/') || null}
           onClose={() => setCreateFolderOpen(false)}
           onCreated={(message) => {
             setCreateFolderOpen(false);
@@ -663,10 +727,16 @@ function KnowledgeFolderCard({
   folder,
   processing,
   onOpen,
+  onDelete,
+  deleting,
+  managedByLexiang,
 }: {
   folder: KnowledgeBase['folders'][number];
   processing: KnowledgeFolderProcessingSummary;
   onOpen: () => void;
+  onDelete: () => void;
+  deleting: boolean;
+  managedByLexiang: boolean;
 }): ReactNode {
   const statusText =
     processing.state === 'EMPTY'
@@ -679,36 +749,68 @@ function KnowledgeFolderCard({
   const progressLabel = processing.state === 'EMPTY' ? '尚未开始' : `${processing.progress}%`;
 
   return (
-    <button
+    <article
       className={`knowledge-folder-card ${processing.state.toLowerCase()}`}
-      type="button"
-      onClick={onOpen}
-      aria-label={`${folder.name}，${statusText}，切片与索引进度${progressLabel}`}
+      aria-label={`${folder.name}，${managedByLexiang ? `已同步 ${processing.totalDocuments} 篇乐享文档` : `${statusText}，切片与索引进度${progressLabel}`}`}
     >
-      <span className="knowledge-folder-icon" aria-hidden="true">
-        ▰
-      </span>
-      <span className="knowledge-folder-card-content">
-        <span className="knowledge-folder-card-heading">
-          <strong>{folder.name}</strong>
-          {processing.failedDocuments > 0 ? <em>{processing.failedDocuments} 个异常</em> : null}
+      <button
+        className="knowledge-folder-open"
+        type="button"
+        onClick={onOpen}
+        aria-label={`${folder.name}，${managedByLexiang ? `已同步 ${processing.totalDocuments} 篇乐享文档` : `${statusText}，切片与索引进度${progressLabel}`}`}
+      >
+        <span className="knowledge-folder-icon" aria-hidden="true">
+          ▰
         </span>
-        <small>
-          {folder.directChildCount} 个子文件夹 · {processing.totalDocuments} 篇文档（含子目录）
-        </small>
-        {processing.state !== 'EMPTY' ? (
-          <span className="knowledge-folder-processing">
-            <span>
-              <small>切片与索引</small>
-              <strong>{processing.progress}%</strong>
-            </span>
-            <progress max={100} value={processing.progress} />
-            <small>{statusText}</small>
+        <span className="knowledge-folder-card-content">
+          <span className="knowledge-folder-card-heading">
+            <strong>{folder.name}</strong>
+            {processing.failedDocuments > 0 ? <em>{processing.failedDocuments} 个异常</em> : null}
           </span>
-        ) : (
-          <small className="knowledge-folder-processing-empty">尚未上传可处理的文档</small>
-        )}
-      </span>
-    </button>
+          <small>
+            {folder.directChildCount} 个子文件夹 · {processing.totalDocuments} 篇文档（含子目录）
+          </small>
+          {managedByLexiang ? (
+            <small className="knowledge-folder-processing-empty">目录已从腾讯乐享同步</small>
+          ) : processing.state !== 'EMPTY' ? (
+            <span className="knowledge-folder-processing">
+              <span>
+                <small>切片与索引</small>
+                <strong>{processing.progress}%</strong>
+              </span>
+              <progress max={100} value={processing.progress} />
+              <small>{statusText}</small>
+            </span>
+          ) : (
+            <small className="knowledge-folder-processing-empty">尚未上传可处理的文档</small>
+          )}
+        </span>
+      </button>
+      {!managedByLexiang ? (
+        <button
+          className="button danger compact knowledge-folder-delete"
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+        >
+          {deleting ? '删除中…' : '删除'}
+        </button>
+      ) : null}
+    </article>
   );
+}
+
+function knowledgeFolderAncestors(
+  current: KnowledgeBase['folders'][number] | null,
+  folders: KnowledgeBase['folders'],
+): KnowledgeBase['folders'] {
+  const ancestors: KnowledgeBase['folders'][number][] = [];
+  const visited = new Set<string>();
+  let folder = current;
+  while (folder !== null && !visited.has(folder.id)) {
+    ancestors.unshift(folder);
+    visited.add(folder.id);
+    folder = folders.find((candidate) => candidate.id === folder?.parentId) ?? null;
+  }
+  return ancestors;
 }

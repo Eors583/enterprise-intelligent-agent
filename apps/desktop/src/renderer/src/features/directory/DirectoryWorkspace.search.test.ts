@@ -65,7 +65,7 @@ describe('unifiedSearchResults', () => {
     expect(unifiedSearchResults('智能体', [restrictedMember], [])).toEqual([]);
   });
 
-  it('does not expose a configured agent when provider evidence is not ready', () => {
+  it('keeps an enabled agent searchable when provider evidence is not ready', () => {
     const unavailableMember: MemberSummary = {
       ...member,
       agent: {
@@ -79,7 +79,9 @@ describe('unifiedSearchResults', () => {
       },
     };
 
-    expect(unifiedSearchResults('产品决策智能体', [unavailableMember], [])).toEqual([]);
+    expect(unifiedSearchResults('产品决策智能体', [unavailableMember], [])).toEqual([
+      expect.objectContaining({ kind: 'agent', id: unavailableMember.agent?.id }),
+    ]);
   });
 
   it('normalizes full-width input and gives untitled conversations an honest label', () => {

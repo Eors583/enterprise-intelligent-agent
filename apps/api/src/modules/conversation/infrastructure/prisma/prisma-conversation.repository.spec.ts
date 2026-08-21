@@ -196,6 +196,18 @@ describe('Role Agent Run snapshot creation', () => {
       }),
     });
     expect(fixture.transaction.agentRun.create).toHaveBeenCalledTimes(1);
+    expect(fixture.transaction.agentRun.updateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        tenantId: fixture.input.tenantId,
+        conversationId: fixture.input.conversationId,
+        status: 'UNKNOWN',
+        supersededByRunId: null,
+      }),
+      data: expect.objectContaining({
+        supersededByRunId: expect.any(String),
+        supersededAt: expect.any(Date),
+      }),
+    });
   });
 
   it('copies the effective Assignment and immutable role/prompt evidence into the Run snapshot', async () => {
@@ -361,6 +373,7 @@ function conversationRunFixture(
     agentRun: {
       findFirst: vi.fn().mockResolvedValue(null),
       create: vi.fn().mockResolvedValue({}),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     outboxEvent: { create: vi.fn().mockResolvedValue({}) },
     auditEvent: { create: vi.fn().mockResolvedValue({}) },

@@ -19,6 +19,7 @@ export type AdminPageId =
   | 'identity-security'
   | 'ai-model-routing'
   | 'ai-evaluation'
+  | 'knowledge-integrations'
   | 'knowledge';
 
 export type LegacyAdminRouteId =
@@ -94,6 +95,7 @@ export const ADMIN_SECONDARY_NAVIGATION: Readonly<
   ],
   'knowledge-center': [
     { id: 'knowledge', label: '知识库与文档', description: '导入、自动处理与检索' },
+    { id: 'knowledge-integrations', label: '知识来源', description: '外部知识服务连接与检测' },
     {
       id: 'experience-governance',
       label: '经验候选',
@@ -127,6 +129,7 @@ const PAGE_PRIMARY: Readonly<Record<Exclude<AdminPageId, 'identity-security'>, A
   'role-blueprints': 'agent-center',
   'ai-evaluation': 'agent-center',
   knowledge: 'knowledge-center',
+  'knowledge-integrations': 'knowledge-center',
   'experience-governance': 'knowledge-center',
   'business-semantics': 'business-management',
   'marketing-management': 'business-management',

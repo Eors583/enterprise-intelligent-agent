@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { createHash, randomUUID } from 'node:crypto';
 
@@ -11,23 +11,30 @@ import type {
 } from '../../../authorization/authorization.types.js';
 import {
   KnowledgeRetrievalGateway,
+  KnowledgeRetrievalUnavailableError,
   type KnowledgeRetrievalAuthorizationContext,
+  type KnowledgeRetrievalResult,
 } from '../../../knowledge-gateway/knowledge-gateway.port.js';
 import type {
   AgentRunCancellationPreparation,
   AgentRunExternalAttachment,
   AgentRunContextMessage,
+  AgentRunEvidenceSource,
   AgentRunKnowledgeSource,
   AgentRunMemoryContext,
   AgentRunMemoryContextSnapshot,
   AgentRunPreparation,
+  AgentRunReconciliationPreparation,
   AgentRunStreamMode,
   AgentRunUsage,
   AgentRunModelAttempt,
   PreparedAgentRun,
   StoredAgentRunStatus,
 } from '../../domain/agent-run.models.js';
-import { ROLE_ASSIGNMENT_REVOKED_AGENT_RUN_ERROR_CODE } from '../../domain/agent-run.models.js';
+import {
+  AGENT_RUN_REQUESTED_EVENT_TYPE,
+  ROLE_ASSIGNMENT_REVOKED_AGENT_RUN_ERROR_CODE,
+} from '../../domain/agent-run.models.js';
 import {
   buildAgentRunPolicySnapshot,
   isAgentRunPolicySnapshotV2,
@@ -36,7 +43,10 @@ import {
   resolveAgentRunExecutionSnapshot,
   type AgentRunExecutionSnapshot,
 } from '../../domain/agent-run-policy-snapshot.js';
-import { packConservativeAgentRunInput } from '../../domain/agent-run-input-budget.js';
+import {
+  contextualRecallQuery,
+  packConservativeAgentRunInput,
+} from '../../domain/agent-run-input-budget.js';
 import {
   AGENT_RUN_CONCURRENCY_HOLD_STATUSES,
   DEFAULT_AGENT_RUN_MAX_INPUT_TOKENS,
@@ -58,8 +68,14 @@ import {
 } from '../../../ai-safety-model-routing/model-route-execution.js';
 import { evaluateAndMinimizeRunInput } from '../../../ai-safety-model-routing/ai-safety-policy.js';
 import {
+  EmployeeCollaborationContextPort,
+  inferEmployeeCollaborationPurpose,
+} from '../../../people-organization/employee-collaboration-context.port.js';
+import {
+  employeeCollaborationContextSnapshotSchema,
   trustedModelRouteSnapshotSchema,
   type AiSafetyDecision,
+  type EmployeeCollaborationContextSnapshot,
   type TrustedModelRouteSnapshot,
 } from '@enterprise/contracts';
 
@@ -96,151 +112,177 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
     private readonly retrieval: KnowledgeRetrievalGateway,
     @Inject(AuthorizationDecisionService)
     private readonly authorization: AuthorizationDecisionService,
+    @Optional()
+    @Inject(EmployeeCollaborationContextPort)
+    private readonly employeeCollaboration?: EmployeeCollaborationContextPort,
   ) {
     super();
   }
 
   async prepare(tenantId: string, runId: string): Promise<AgentRunPreparation> {
-    const snapshot = await this.prisma.withTenant(tenantId, async (transaction) => {
-      await lockTenantQuota(transaction, tenantId);
-      await lockRun(transaction, tenantId, runId);
-      const run = await findRunForExecution(transaction, tenantId, runId);
-      if (run === null) {
-        return { preparation: terminalPreparation('FAILED', null, 'AGENT_RUN_NOT_FOUND') };
-      }
-      if (isTerminal(run.status)) {
-        return { preparation: terminalPreparation(run.status, run.externalRunId, run.errorCode) };
-      }
+    const snapshot = await this.prisma.withTenant(
+      tenantId,
+      async (transaction) => {
+        await lockTenantQuota(transaction, tenantId);
+        await lockRun(transaction, tenantId, runId);
+        const run = await findRunForExecution(transaction, tenantId, runId);
+        if (run === null) {
+          return { preparation: terminalPreparation('FAILED', null, 'AGENT_RUN_NOT_FOUND') };
+        }
+        if (isTerminal(run.status)) {
+          return { preparation: terminalPreparation(run.status, run.externalRunId, run.errorCode) };
+        }
 
-      if (run.status === 'DISPATCHING' && run.externalRunId === null) {
-        return { preparation: { kind: 'ambiguous_dispatch' } as AgentRunPreparation };
-      }
-      if (run.status === 'RUNNING' && run.externalRunId === null) {
-        return { preparation: { kind: 'ambiguous_dispatch' } as AgentRunPreparation };
-      }
+        if (run.status === 'RUNNING' && run.externalRunId === null) {
+          return { preparation: { kind: 'ambiguous_dispatch' } as AgentRunPreparation };
+        }
 
-      if (
-        run.status === 'QUEUED' &&
-        run.turnLimit === 1 &&
-        (await hasEarlierActiveDirectRun(transaction, run))
-      ) {
-        return {
-          preparation: {
-            kind: 'deferred',
-            reasonCode: 'EARLIER_AGENT_RUN_ACTIVE',
-          } as AgentRunPreparation,
-        };
-      }
-      if (run.status !== 'QUEUED' && run.status !== 'DISPATCHING' && run.status !== 'RUNNING') {
-        return { preparation: { kind: 'ambiguous_dispatch' } as AgentRunPreparation };
-      }
-
-      const validation = await validateQueuedRun(transaction, run, this.authorization);
-      if (validation.errorCode !== null) {
-        await markRunTerminal(
-          transaction,
-          run,
-          'FAILED',
-          validation.errorCode,
-          'Agent Run policy validation failed.',
-        );
-        return { preparation: terminalPreparation('FAILED', null, validation.errorCode) };
-      }
-      const executionSnapshot = resolveAgentRunExecutionSnapshot(
-        run.policySnapshot,
-        run.agentVersion,
-      );
-      if (executionSnapshot === null) {
-        await markRunTerminal(
-          transaction,
-          run,
-          'FAILED',
-          'AGENT_RUN_SNAPSHOT_INVALID',
-          'Agent Run policy snapshot validation failed.',
-        );
-        return {
-          preparation: terminalPreparation('FAILED', null, 'AGENT_RUN_SNAPSHOT_INVALID'),
-        };
-      }
-
-      if (run.status === 'QUEUED') {
-        const quotaNow = new Date();
-        const quotaDecision = decideAgentRunQuota(
-          await loadQuotaSnapshot(transaction, tenantId, quotaNow),
-          DEFAULT_AGENT_RUN_RESERVED_TOKENS,
-          quotaNow,
-        );
-        if (quotaDecision.kind === 'deferred') {
+        if (run.status === 'QUEUED' && (await hasEarlierActiveConversationRun(transaction, run))) {
           return {
             preparation: {
               kind: 'deferred',
-              reasonCode: quotaDecision.reasonCode,
-              availableAt: quotaDecision.availableAt,
+              reasonCode: 'EARLIER_AGENT_RUN_ACTIVE',
             } as AgentRunPreparation,
           };
         }
-        if (quotaDecision.kind === 'rejected') {
+        if (run.status !== 'QUEUED' && run.status !== 'DISPATCHING' && run.status !== 'RUNNING') {
+          return { preparation: { kind: 'ambiguous_dispatch' } as AgentRunPreparation };
+        }
+
+        const validation = await validateQueuedRun(transaction, run, this.authorization);
+        if (validation.errorCode !== null) {
           await markRunTerminal(
             transaction,
             run,
             'FAILED',
-            quotaDecision.reasonCode,
-            'The tenant monthly Agent token quota has been exhausted.',
+            validation.errorCode,
+            'Agent Run policy validation failed.',
+          );
+          return { preparation: terminalPreparation('FAILED', null, validation.errorCode) };
+        }
+        const executionSnapshot = resolveAgentRunExecutionSnapshot(
+          run.policySnapshot,
+          run.agentVersion,
+        );
+        if (executionSnapshot === null) {
+          await markRunTerminal(
+            transaction,
+            run,
+            'FAILED',
+            'AGENT_RUN_SNAPSHOT_INVALID',
+            'Agent Run policy snapshot validation failed.',
           );
           return {
-            preparation: terminalPreparation('FAILED', null, quotaDecision.reasonCode),
+            preparation: terminalPreparation('FAILED', null, 'AGENT_RUN_SNAPSHOT_INVALID'),
           };
         }
-      }
-      const messages = await loadRecentContext(
-        transaction,
-        tenantId,
-        run.conversationId,
-        run.inputMessage,
-      );
-      const knowledgeBaseIds = readSelectedKnowledgeBaseIds(executionSnapshot.knowledgeScope);
-      const resolveAuthorizedKnowledgeBases = isOwnerAuthorizedKnowledgeScope(
-        executionSnapshot.knowledgeScope,
-      );
-      const storedMemorySnapshot = parseAgentRunMemoryContextSnapshot(run.memoryContextSnapshot);
-      if (run.memoryContextSnapshot != null && storedMemorySnapshot === null) {
-        await markRunTerminal(
+
+        if (run.status === 'QUEUED') {
+          const quotaNow = new Date();
+          const quotaDecision = decideAgentRunQuota(
+            await loadQuotaSnapshot(transaction, tenantId, quotaNow),
+            DEFAULT_AGENT_RUN_RESERVED_TOKENS,
+            quotaNow,
+          );
+          if (quotaDecision.kind === 'deferred') {
+            return {
+              preparation: {
+                kind: 'deferred',
+                reasonCode: quotaDecision.reasonCode,
+                availableAt: quotaDecision.availableAt,
+              } as AgentRunPreparation,
+            };
+          }
+          if (quotaDecision.kind === 'rejected') {
+            await markRunTerminal(
+              transaction,
+              run,
+              'FAILED',
+              quotaDecision.reasonCode,
+              'The tenant monthly Agent token quota has been exhausted.',
+            );
+            return {
+              preparation: terminalPreparation('FAILED', null, quotaDecision.reasonCode),
+            };
+          }
+        }
+        const messages = await loadRecentContext(
           transaction,
-          run,
-          'FAILED',
-          'AGENT_RUN_MEMORY_SNAPSHOT_INVALID',
-          'Agent Run memory context snapshot validation failed.',
+          tenantId,
+          run.conversationId,
+          run.inputMessage,
         );
-        return {
-          preparation: terminalPreparation(
+        const knowledgeBaseIds = readSelectedKnowledgeBaseIds(executionSnapshot.knowledgeScope);
+        const resolveAuthorizedKnowledgeBases = isOwnerAuthorizedKnowledgeScope(
+          executionSnapshot.knowledgeScope,
+        );
+        const storedMemorySnapshot = parseAgentRunMemoryContextSnapshot(run.memoryContextSnapshot);
+        if (run.memoryContextSnapshot != null && storedMemorySnapshot === null) {
+          await markRunTerminal(
+            transaction,
+            run,
             'FAILED',
-            run.externalRunId,
             'AGENT_RUN_MEMORY_SNAPSHOT_INVALID',
-          ),
+            'Agent Run memory context snapshot validation failed.',
+          );
+          return {
+            preparation: terminalPreparation(
+              'FAILED',
+              run.externalRunId,
+              'AGENT_RUN_MEMORY_SNAPSHOT_INVALID',
+            ),
+          };
+        }
+        const memorySnapshot =
+          storedMemorySnapshot ??
+          (await loadAgentRunMemoryContextSnapshot(
+            transaction,
+            run,
+            contextualRecallQuery(messages),
+          ));
+        const storedCollaborationSnapshot = parseEmployeeCollaborationContextSnapshot(
+          run.collaborationContextSnapshot,
+        );
+        if (run.collaborationContextSnapshot != null && storedCollaborationSnapshot === null) {
+          await markRunTerminal(
+            transaction,
+            run,
+            'FAILED',
+            'AGENT_RUN_COLLABORATION_SNAPSHOT_INVALID',
+            'Agent Run collaboration snapshot validation failed.',
+          );
+          return {
+            preparation: terminalPreparation(
+              'FAILED',
+              run.externalRunId,
+              'AGENT_RUN_COLLABORATION_SNAPSHOT_INVALID',
+            ),
+          };
+        }
+        return {
+          run,
+          messages,
+          knowledgeBaseIds,
+          resolveAuthorizedKnowledgeBases,
+          knowledgeAuthorization: validation.knowledgeAuthorization,
+          executionSnapshot,
+          memorySnapshot,
+          storedCollaborationSnapshot,
         };
-      }
-      const memorySnapshot =
-        storedMemorySnapshot ??
-        (await loadAgentRunMemoryContextSnapshot(transaction, run, messages.at(-1)?.text ?? ''));
-      return {
-        run,
-        messages,
-        knowledgeBaseIds,
-        resolveAuthorizedKnowledgeBases,
-        knowledgeAuthorization: validation.knowledgeAuthorization,
-        executionSnapshot,
-        memorySnapshot,
-      };
-    });
+      },
+      { timeout: 30_000 },
+    );
     if ('preparation' in snapshot) return snapshot.preparation;
 
     const modelPolicyClassification = readModelRouteRequest(
       snapshot.executionSnapshot.modelPolicy,
     ).classification;
+    const collaborationContext = await this.resolveEmployeeCollaborationContext(snapshot.run);
     const preRetrievalSafety = evaluateAndMinimizeRunInput({
       messages: snapshot.messages,
       knowledgeSources: [],
       memoryContexts: snapshot.memorySnapshot.contexts,
+      collaborationSources: collaborationContext?.sources ?? [],
       modelPolicyClassification,
     });
     if (preRetrievalSafety.decision.action === 'BLOCK') {
@@ -282,15 +324,32 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
     // advisory Run lock have been released. Unexpected retrieval failures leave the Run
     // QUEUED; explicitly classified semantic-provider failures degrade to lexical retrieval
     // and are recorded in the retrieval metadata.
-    const retrieval = await this.retrieval.search({
-      tenantId,
-      userId: snapshot.run.requesterUserId,
-      knowledgeBaseIds,
-      authorization: snapshot.knowledgeAuthorization,
-      query: preRetrievalSafety.messages.at(-1)?.text ?? '',
-      maximumOutboundClassification: preRetrievalSafety.decision.classification,
-    });
-    const knowledgeSources: AgentRunKnowledgeSource[] = retrieval.items.map((item) => ({
+    let retrievalItems: readonly KnowledgeRetrievalResult[];
+    try {
+      retrievalItems =
+        knowledgeBaseIds.length === 0
+          ? []
+          : (
+              await this.retrieval.search({
+                tenantId,
+                userId: snapshot.run.requesterUserId,
+                knowledgeBaseIds,
+                authorization: snapshot.knowledgeAuthorization,
+                query: contextualRecallQuery(preRetrievalSafety.messages),
+                maximumOutboundClassification: preRetrievalSafety.decision.classification,
+              })
+            ).items;
+    } catch (error) {
+      if (!(error instanceof KnowledgeRetrievalUnavailableError)) throw error;
+      await this.completeFailed(
+        tenantId,
+        runId,
+        error.code,
+        'Tencent Lexiang knowledge retrieval did not complete after waiting and retrying.',
+      );
+      return terminalPreparation('FAILED', snapshot.run.externalRunId, error.code);
+    }
+    const knowledgeSources: AgentRunKnowledgeSource[] = retrievalItems.map((item) => ({
       documentId: item.documentId,
       documentVersionId: item.documentVersionId,
       chunkId: item.chunkId,
@@ -300,12 +359,17 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
       documentVersion: item.documentVersion,
       headingPath: [...item.headingPath],
       sourceType: item.sourceType,
+      ...(item.sourceProvider === undefined ? {} : { sourceProvider: item.sourceProvider }),
+      ...(item.sourceUri === undefined ? {} : { sourceUri: item.sourceUri }),
       excerpt: createCitationExcerpt(item.content),
       classification: item.classification,
       governanceHash: item.governanceHash,
       contentHash: item.contentHash,
       updatedAt: item.updatedAt.toISOString(),
     }));
+    const dispatchCollaborationContext = await this.resolveEmployeeCollaborationContext(
+      snapshot.run,
+    );
 
     return this.prisma.withTenant(tenantId, async (transaction) => {
       await lockTenantQuota(transaction, tenantId);
@@ -320,8 +384,15 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         snapshot.run.externalRunId !== null &&
         run.status === 'RUNNING' &&
         run.externalRunId === snapshot.run.externalRunId;
+      const isCreateRetry =
+        snapshot.run.status === 'DISPATCHING' &&
+        snapshot.run.externalRunId === null &&
+        run.status === 'DISPATCHING' &&
+        run.externalRunId === null &&
+        run.version === snapshot.run.version;
       if (
         !isRunningReconciliation &&
+        !isCreateRetry &&
         (run.status !== 'QUEUED' || run.version !== snapshot.run.version)
       ) {
         return { kind: 'ambiguous_dispatch' };
@@ -359,6 +430,8 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         chunks: knowledgeSources.map((source) => ({
           chunkId: source.chunkId,
           documentVersionId: source.documentVersionId,
+          knowledgeBaseId: source.knowledgeBaseId,
+          ...(source.sourceProvider === undefined ? {} : { sourceProvider: source.sourceProvider }),
           classification: source.classification,
           governanceHash: source.governanceHash,
           contentHash: source.contentHash,
@@ -394,10 +467,34 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
           'AGENT_RUN_MEMORY_SNAPSHOT_CHANGED',
         );
       }
+      const currentStoredCollaborationSnapshot = parseEmployeeCollaborationContextSnapshot(
+        run.collaborationContextSnapshot,
+      );
+      if (
+        run.collaborationContextSnapshot != null &&
+        (currentStoredCollaborationSnapshot === null ||
+          dispatchCollaborationContext === undefined ||
+          currentStoredCollaborationSnapshot.snapshotHash !==
+            dispatchCollaborationContext.snapshotHash)
+      ) {
+        await markRunTerminal(
+          transaction,
+          run,
+          'FAILED',
+          'EMPLOYEE_COLLABORATION_ACCESS_CHANGED',
+          'Employee collaboration access changed before runtime dispatch.',
+        );
+        return terminalPreparation(
+          'FAILED',
+          run.externalRunId,
+          'EMPLOYEE_COLLABORATION_ACCESS_CHANGED',
+        );
+      }
       const safety = evaluateAndMinimizeRunInput({
         messages: snapshot.messages,
         knowledgeSources,
         memoryContexts: snapshot.memorySnapshot.contexts,
+        collaborationSources: dispatchCollaborationContext?.sources ?? [],
         modelPolicyClassification,
       });
       await persistSafetyDecision(
@@ -474,7 +571,14 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         safety.messages,
         safety.knowledgeSources,
         safety.memoryContexts,
-        snapshot.resolveAuthorizedKnowledgeBases || knowledgeBaseIds.length > 0,
+        dispatchCollaborationContext === undefined
+          ? undefined
+          : { ...dispatchCollaborationContext, sources: [...safety.collaborationSources] },
+        shouldRequireGroundedOutput(
+          safety.messages.at(-1)?.text ?? '',
+          safety.knowledgeSources.length + safety.collaborationSources.length,
+          dispatchCollaborationContext?.purpose,
+        ),
         modelRoute,
         safety.decision,
         storedProbeCatalogId,
@@ -490,7 +594,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         );
         return terminalPreparation('FAILED', null, 'INPUT_TOKEN_BUDGET_PREFLIGHT_EXCEEDED');
       }
-      if (isRunningReconciliation) {
+      if (isRunningReconciliation || isCreateRetry) {
         return {
           kind: 'ready',
           run: packing.kind === 'packed' ? packing.run : preparedRun,
@@ -540,6 +644,12 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
                 memoryContextSnapshot: memoryContextSnapshotJson(snapshot.memorySnapshot),
               }
             : {}),
+          ...(run.collaborationContextSnapshot == null && dispatchCollaborationContext !== undefined
+            ? {
+                collaborationContextSnapshot:
+                  dispatchCollaborationContext as unknown as Prisma.InputJsonValue,
+              }
+            : {}),
         },
       });
       if (transitioned.count !== 1) return { kind: 'ambiguous_dispatch' };
@@ -547,6 +657,88 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         kind: 'ready',
         run: packing.kind === 'packed' ? packing.run : preparedRun,
       };
+    });
+  }
+
+  async prepareReconciliation(
+    tenantId: string,
+    runId: string,
+  ): Promise<AgentRunReconciliationPreparation> {
+    const disposition = await this.prisma.withTenant(tenantId, async (transaction) => {
+      await lockTenantQuota(transaction, tenantId);
+      await lockRun(transaction, tenantId, runId);
+      const run = await transaction.agentRun.findFirst({
+        where: { tenantId, id: runId },
+        select: {
+          status: true,
+          externalRunId: true,
+          errorCode: true,
+          conversationId: true,
+        },
+      });
+      if (run === null) {
+        return terminalPreparation('FAILED', null, 'AGENT_RUN_NOT_FOUND');
+      }
+      if (run.status !== 'UNKNOWN') {
+        if (isTerminal(run.status)) {
+          return terminalPreparation(run.status, run.externalRunId, run.errorCode);
+        }
+        // A manual or earlier automatic reconciliation already owns this
+        // same external execution. This delayed trigger is redundant and must
+        // never make a second provider request.
+        return { kind: 'redundant', externalRunId: run.externalRunId } as const;
+      }
+      if (run.externalRunId === null) {
+        return terminalPreparation('UNKNOWN', null, run.errorCode);
+      }
+
+      await transaction.agentRun.update({
+        where: { id: runId },
+        data: {
+          status: 'RUNNING',
+          finishedAt: null,
+          errorCode: null,
+          errorMessage: null,
+          version: { increment: 1 },
+        },
+      });
+      await transaction.auditEvent.create({
+        data: {
+          tenantId,
+          actorType: 'SERVICE',
+          actorId: runId,
+          action: 'agent.run.reconciliation_started',
+          resourceType: 'agent_run',
+          resourceId: runId,
+          metadata: {
+            conversationId: run.conversationId,
+            externalRunId: run.externalRunId,
+            createsNewExternalRun: false,
+          },
+        },
+      });
+      return null;
+    });
+    return disposition ?? this.prepare(tenantId, runId);
+  }
+
+  private async resolveEmployeeCollaborationContext(
+    run: RunForExecution,
+  ): Promise<EmployeeCollaborationContextSnapshot | undefined> {
+    if (
+      this.employeeCollaboration === undefined ||
+      run.agent.kind !== 'MEMBER' ||
+      run.agent.ownerUserId === null
+    ) {
+      return undefined;
+    }
+    const query = readText(run.inputMessage.content);
+    return this.employeeCollaboration.resolve({
+      tenantId: run.tenantId,
+      requesterUserId: run.requesterUserId,
+      representedEmployeeId: run.agent.ownerUserId,
+      purpose: inferEmployeeCollaborationPurpose(query, run.requesterUserId, run.agent.ownerUserId),
+      query,
     });
   }
 
@@ -855,10 +1047,10 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
     tenantId: string,
     runId: string,
     output: string,
-    citations: readonly AgentRunKnowledgeSource[] = [],
+    citations: readonly AgentRunEvidenceSource[] = [],
     usage?: AgentRunUsage,
     streamMode: AgentRunStreamMode = 'terminal_only',
-  ): Promise<{ readonly outputMessageId: string; readonly externalRunId: string | null }> {
+  ): Promise<{ readonly outputMessageId: string | null; readonly externalRunId: string | null }> {
     return this.prisma.withTenant(tenantId, async (transaction) => {
       const initial = await transaction.agentRun.findFirst({
         where: { tenantId, id: runId },
@@ -875,7 +1067,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
       });
       if (run === null) throw new Error('Agent Run does not exist.');
       if (run.status === 'SUCCEEDED') {
-        if (run.outputMessageId === null) {
+        if (run.outputMessageId === null && run.supersededByRunId === null) {
           throw new Error('Succeeded Agent Run has no output message.');
         }
         await appendTerminalStreamEvent(transaction, {
@@ -892,6 +1084,51 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
       }
       if (run.status !== 'RUNNING' || run.externalRunId === null) {
         throw new Error('Agent Run has no confirmed external execution.');
+      }
+
+      if (run.supersededByRunId !== null) {
+        const finishedAt = new Date();
+        const latencyMs = calculateLatencyMs(run, finishedAt);
+        await transaction.agentRun.update({
+          where: { id: run.id },
+          data: {
+            status: 'SUCCEEDED',
+            outputMessageId: null,
+            finishedAt,
+            errorCode: null,
+            errorMessage: null,
+            groundedCitationCount: Math.min(citations.length, 12),
+            latencyMs,
+            ...terminalUsageUpdate(run, 'SUCCEEDED', usage, finishedAt),
+            version: { increment: 1 },
+          },
+        });
+        await appendTerminalStreamEvent(transaction, {
+          tenantId,
+          runId,
+          status: 'SUCCEEDED',
+          mode: streamMode,
+          createdAt: finishedAt,
+        });
+        await transaction.auditEvent.create({
+          data: {
+            tenantId,
+            actorType: 'SERVICE',
+            actorId: run.id,
+            action: 'agent.run.late_success_suppressed',
+            resourceType: 'agent_run',
+            resourceId: run.id,
+            metadata: {
+              conversationId: run.conversationId,
+              supersededByRunId: run.supersededByRunId,
+              remoteSucceeded: true,
+              outputAppendedToConversation: false,
+              ...terminalUsageAuditMetadata(run, 'SUCCEEDED', usage, finishedAt, latencyMs),
+            },
+          },
+        });
+        await closeControlledConnectivityProbeParticipants(transaction, run, finishedAt);
+        return { outputMessageId: null, externalRunId: run.externalRunId };
       }
 
       const safeOutput = truncateOutput(output);
@@ -912,19 +1149,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
             ...(citations.length === 0
               ? {}
               : {
-                  citations: citations.slice(0, 12).map((citation) => ({
-                    documentId: citation.documentId,
-                    documentVersionId: citation.documentVersionId,
-                    chunkId: citation.chunkId,
-                    knowledgeBaseId: citation.knowledgeBaseId,
-                    knowledgeBaseName: citation.knowledgeBaseName,
-                    title: citation.title,
-                    documentVersion: citation.documentVersion,
-                    headingPath: [...citation.headingPath],
-                    sourceType: citation.sourceType,
-                    excerpt: citation.excerpt,
-                    updatedAt: citation.updatedAt,
-                  })),
+                  citations: citations.slice(0, 12).map(messageCitationFromEvidence),
                 }),
           },
         },
@@ -1054,6 +1279,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
     errorCode: string,
     usage?: AgentRunUsage,
     streamMode: AgentRunStreamMode = 'terminal_only',
+    reconcileAt?: Date,
   ): Promise<void> {
     return this.completeTerminal(
       tenantId,
@@ -1063,6 +1289,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
       'AI Runtime execution outcome is unknown.',
       usage,
       streamMode,
+      reconcileAt,
     );
   }
 
@@ -1074,6 +1301,7 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
     safeMessage: string,
     usage?: AgentRunUsage,
     streamMode: AgentRunStreamMode = 'terminal_only',
+    reconcileAt?: Date,
   ): Promise<void> {
     return this.prisma.withTenant(tenantId, async (transaction) => {
       const initial = await transaction.agentRun.findFirst({
@@ -1107,6 +1335,81 @@ export class PrismaAgentRunRepository extends AgentRunRepository {
         usage,
         streamMode,
       );
+      if (status === 'UNKNOWN') {
+        const successor = await transaction.agentRun.findFirst({
+          where: {
+            tenantId,
+            conversationId: run.conversationId,
+            OR: [
+              { conversationSequence: { gt: run.conversationSequence } },
+              {
+                conversationSequence: run.conversationSequence,
+                turnIndex: { gt: run.turnIndex },
+              },
+            ],
+          },
+          orderBy: [{ conversationSequence: 'asc' }, { turnIndex: 'asc' }, { id: 'asc' }],
+          select: { id: true, createdAt: true },
+        });
+        if (successor !== null) {
+          await transaction.agentRun.update({
+            where: { id: run.id },
+            data: {
+              supersededByRunId: successor.id,
+              supersededAt: successor.createdAt,
+              version: { increment: 1 },
+            },
+          });
+          await transaction.auditEvent.create({
+            data: {
+              tenantId,
+              actorType: 'SERVICE',
+              actorId: successor.id,
+              action: 'agent.run.unknown_superseded_by_queued_successor',
+              resourceType: 'agent_run',
+              resourceId: run.id,
+              metadata: {
+                conversationId: run.conversationId,
+                supersededByRunId: successor.id,
+              },
+            },
+          });
+        }
+      }
+      if (status === 'UNKNOWN' && reconcileAt !== undefined && run.externalRunId !== null) {
+        await Promise.all([
+          transaction.outboxEvent.create({
+            data: {
+              tenantId,
+              aggregateType: 'agent_run',
+              aggregateId: run.id,
+              eventType: AGENT_RUN_REQUESTED_EVENT_TYPE,
+              payload: {
+                runId: run.id,
+                reconciliation: true,
+                externalRunId: run.externalRunId,
+              },
+              availableAt: reconcileAt,
+            },
+          }),
+          transaction.auditEvent.create({
+            data: {
+              tenantId,
+              actorType: 'SERVICE',
+              actorId: run.id,
+              action: 'agent.run.reconciliation_scheduled',
+              resourceType: 'agent_run',
+              resourceId: run.id,
+              metadata: {
+                conversationId: run.conversationId,
+                externalRunId: run.externalRunId,
+                availableAt: reconcileAt.toISOString(),
+                createsNewExternalRun: false,
+              },
+            },
+          }),
+        ]);
+      }
     });
   }
 }
@@ -1135,6 +1438,7 @@ async function loadQuotaSnapshot(
     where: {
       tenantId,
       status: { in: [...AGENT_RUN_CONCURRENCY_HOLD_STATUSES] },
+      supersededByRunId: null,
       OR: [{ status: { not: 'UNKNOWN' } }, { cancellationConfirmedAt: null }],
     },
   });
@@ -1180,7 +1484,7 @@ async function loadQuotaSnapshot(
   };
 }
 
-async function hasEarlierActiveDirectRun(
+async function hasEarlierActiveConversationRun(
   transaction: Transaction,
   run: RunForExecution,
 ): Promise<boolean> {
@@ -1188,9 +1492,15 @@ async function hasEarlierActiveDirectRun(
     where: {
       tenantId: run.tenantId,
       conversationId: run.conversationId,
-      turnLimit: 1,
-      status: { in: ['QUEUED', 'DISPATCHING', 'RUNNING'] },
-      OR: [{ createdAt: { lt: run.createdAt } }, { createdAt: run.createdAt, id: { lt: run.id } }],
+      status: { in: ['QUEUED', 'DISPATCHING', 'RUNNING', 'UNKNOWN'] },
+      supersededByRunId: null,
+      OR: [
+        { conversationSequence: { lt: run.conversationSequence } },
+        {
+          conversationSequence: run.conversationSequence,
+          turnIndex: { lt: run.turnIndex },
+        },
+      ],
     },
     select: { id: true },
   });
@@ -1508,6 +1818,7 @@ async function memoryContextSnapshotStillAccessible(
 ): Promise<boolean> {
   if (snapshot.contexts.length === 0) return true;
   await setMemoryAccessContext(transaction, run.requesterUserId);
+  const assignmentId = readPolicySnapshotAssignmentId(run.policySnapshot);
   const ids = Prisma.join(snapshot.contexts.map((memory) => Prisma.sql`${memory.id}::uuid`));
   const rows = await transaction.$queryRaw<AgentRunMemoryRow[]>(Prisma.sql`
     SELECT
@@ -1530,6 +1841,38 @@ async function memoryContextSnapshotStillAccessible(
     WHERE memory."tenant_id" = ${run.tenantId}::uuid
       AND memory."id" IN (${ids})
       AND memory."status" IN ('ACTIVE', 'SEALED')
+      AND public.memory_record_accessible(
+        memory,
+        ${run.requesterUserId}::uuid,
+        ${AGENT_RUN_MEMORY_PURPOSE},
+        CURRENT_TIMESTAMP
+      )
+      AND (
+        memory."scope" <> 'ROLE'
+        OR (
+          ${assignmentId}::uuid IS NOT NULL
+          AND EXISTS (
+            SELECT 1
+            FROM public."role_assignments" assignment
+            WHERE assignment."tenant_id" = memory."tenant_id"
+              AND assignment."id" = ${assignmentId}::uuid
+              AND assignment."role_template_id" = memory."role_template_id"
+              AND assignment."role_version_id" = memory."role_version_id"
+              AND public.memory_assignment_active(
+                assignment."tenant_id",
+                assignment."id",
+                ${run.requesterUserId}::uuid,
+                assignment."role_template_id",
+                assignment."role_version_id",
+                CURRENT_TIMESTAMP
+              )
+          )
+        )
+      )
+      AND (
+        memory."scope" <> 'EMPLOYEE_PRIVATE'
+        OR memory."role_assignment_id" = ${assignmentId}::uuid
+      )
   `);
   if (rows.length !== snapshot.contexts.length) return false;
   const current = new Map(rows.map((row) => [row.id, mapAgentRunMemoryRow(row)]));
@@ -1598,6 +1941,13 @@ export function parseAgentRunMemoryContextSnapshot(
     contexts,
     snapshotSha256: value.snapshotSha256,
   };
+}
+
+export function parseEmployeeCollaborationContextSnapshot(
+  value: unknown,
+): EmployeeCollaborationContextSnapshot | null {
+  const parsed = employeeCollaborationContextSnapshotSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 function parseAgentRunMemoryContext(value: unknown): AgentRunMemoryContext | null {
@@ -1772,18 +2122,15 @@ async function loadRecentContext(
   transaction: Transaction,
   tenantId: string,
   conversationId: string,
-  inputMessage: { readonly id: string; readonly createdAt: Date },
+  inputMessage: { readonly id: string; readonly sequence: bigint },
 ): Promise<readonly AgentRunContextMessage[]> {
   const stored = await transaction.message.findMany({
     where: {
       tenantId,
       conversationId,
-      OR: [
-        { createdAt: { lt: inputMessage.createdAt } },
-        { createdAt: inputMessage.createdAt, id: { lte: inputMessage.id } },
-      ],
+      sequence: { lte: inputMessage.sequence },
     },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    orderBy: [{ sequence: 'desc' }],
     take: MAX_CONTEXT_MESSAGES,
   });
   const selected: AgentRunContextMessage[] = [];
@@ -1805,6 +2152,7 @@ function mapPreparedRun(
   messages: readonly AgentRunContextMessage[],
   knowledgeSources: readonly AgentRunKnowledgeSource[],
   memoryContexts: readonly AgentRunMemoryContext[],
+  collaborationContext: EmployeeCollaborationContextSnapshot | undefined,
   knowledgeGroundingRequired: boolean,
   modelRoute: TrustedModelRouteSnapshot | null,
   inputSafetyDecision: AiSafetyDecision,
@@ -1843,11 +2191,12 @@ function mapPreparedRun(
     maxOutputTokens: DEFAULT_AGENT_RUN_MAX_OUTPUT_TOKENS,
     maxSteps: controlledModelConnectivityProbe ? 1 : 3,
     maxToolCalls: 0,
-    timeoutMs: 60_000,
+    timeoutMs: 300_000,
     maxCostMicros: 1_000_000,
     messages,
     knowledgeSources,
     memoryContexts,
+    ...(collaborationContext === undefined ? {} : { collaborationContext }),
     knowledgeGroundingRequired,
     knowledgeEvidenceFallbackEnabled: true,
     controlledModelConnectivityProbe,
@@ -1876,8 +2225,61 @@ function isOwnerAuthorizedKnowledgeScope(value: Prisma.JsonValue): boolean {
   );
 }
 
+const EXPLICIT_UNGROUNDED_REQUEST_PATTERN =
+  /(?:不要|无需|不需要|禁止).{0,12}(?:引用|使用|查询|检索).{0,12}(?:(?:企业|公司|内部).{0,4})?(?:知识|事实|资料|来源)|do\s+not\s+(?:cite|use|search).{0,24}(?:enterprise|company|internal).{0,12}(?:knowledge|facts?|sources?)/giu;
+const ENTERPRISE_GROUNDING_QUERY_PATTERN =
+  /(?:公司|企业|我司|本公司|内部|部门|知识库|员工手册|制度|规定|政策|流程|标准|报销|年假|请假|考勤|薪酬|福利|绩效|采购|审批|合同|项目(?:进度|状态|目标)|任务(?:进度|状态|截止)|交付物|负责人|截止日期)|(?:company|enterprise|corporate|internal)\s+(?:knowledge|policy|procedure|handbook|rule|document|fact)|(?:leave|expense|attendance|payroll|benefit|procurement|approval)\s+(?:policy|rule|procedure)/iu;
+const CONVERSATION_MEMORY_QUERY_PATTERN =
+  /(?:(?:我|我们).{0,4}(?:刚|刚刚|刚才|前面|上一轮).{0,10}(?:问|说|聊|讨论))|(?:上一个|上一条|刚才的).{0,8}(?:问题|消息|话题)|(?:你还?记得).{0,16}(?:我|我们).{0,8}(?:问|说|聊)/u;
+
+export function shouldRequireGroundedOutput(
+  query: string,
+  evidenceSourceCount: number,
+  collaborationPurpose?: EmployeeCollaborationContextSnapshot['purpose'],
+): boolean {
+  // A configured knowledge scope is retrieval eligibility, not proof that every turn is factual.
+  if (
+    collaborationPurpose === 'AVAILABILITY_QUERY' ||
+    collaborationPurpose === 'WORK_PROGRESS_QUERY'
+  ) {
+    return true;
+  }
+  const normalizedQuery = query.replace(EXPLICIT_UNGROUNDED_REQUEST_PATTERN, ' ');
+  if (ENTERPRISE_GROUNDING_QUERY_PATTERN.test(normalizedQuery)) return true;
+  if (CONVERSATION_MEMORY_QUERY_PATTERN.test(normalizedQuery)) return false;
+  return evidenceSourceCount > 0;
+}
+
 function createCitationExcerpt(content: string): string {
   return content.replace(/\s+/g, ' ').trim().slice(0, 500);
+}
+
+function messageCitationFromEvidence(source: AgentRunEvidenceSource): Prisma.InputJsonObject {
+  if ('chunkId' in source) {
+    return {
+      documentId: source.documentId,
+      documentVersionId: source.documentVersionId,
+      chunkId: source.chunkId,
+      knowledgeBaseId: source.knowledgeBaseId,
+      knowledgeBaseName: source.knowledgeBaseName,
+      title: source.title,
+      documentVersion: source.documentVersion,
+      headingPath: [...source.headingPath],
+      sourceType: source.sourceType,
+      excerpt: source.excerpt,
+      updatedAt: source.updatedAt,
+    };
+  }
+  return {
+    sourceId: source.sourceId,
+    sourceType: source.sourceType,
+    sourceVersion: source.sourceVersion,
+    title: source.title,
+    excerpt: createCitationExcerpt(source.content),
+    updatedAt: source.updatedAt,
+    contentHash: source.contentHash,
+    verificationStatus: 'COLLABORATION_POLICY_VERIFIED',
+  };
 }
 
 function tokenize(value: string): string[] {
@@ -1950,6 +2352,7 @@ async function enqueueNextRelayRun(
       id: childId,
       tenantId: run.tenantId,
       conversationId: run.conversationId,
+      conversationSequence: run.conversationSequence,
       inputMessageId,
       requesterUserId: run.requesterUserId,
       agentId: nextAgent.id,

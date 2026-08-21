@@ -43,7 +43,14 @@ _SECRET = re.compile(
 )
 _EMAIL = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 _PHONE = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
-_OUTPUT_SAFETY_LOOKBEHIND = 512
+_UNAUTHORIZED_REPRESENTATIVE_ACTION = re.compile(
+    r"(?:\u6211|\u672c\u667a\u80fd\u4f53)(?:\u5df2\u7ecf|\u5df2|\u5c06|\u4f1a|\u73b0\u5728)?"
+    r"(?:\u4ee3\u8868[^\uff0c\u3002\uff01\uff1f\n]{0,40})?"
+    r"(?:\u627f\u8bfa[^\uff0c\u3002\uff01\uff1f\n]{0,60}(?:\u4ea4\u4ed8|\u5b8c\u6210|\u622a\u6b62)"
+    r"|\u6279\u51c6|\u5ba1\u6279\u901a\u8fc7|\u9a8c\u6536\u901a\u8fc7|\u53d1\u9001(?:\u4e86)?\u6d88\u606f|\u4fee\u6539(?:\u4e86)?\u4efb\u52a1"
+    r"|\u5347\u7ea7(?:\u4e86)?(?:\u95ee\u9898|\u4e8b\u9879))",
+)
+_OUTPUT_SAFETY_LOOKBEHIND = 128
 _MAX_OUTPUT_CHARACTERS = 1_000_000
 
 
@@ -546,6 +553,15 @@ def _attempt(
 
 def _safe_output(content: str) -> tuple[str, SafetyDecision]:
     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    if _UNAUTHORIZED_REPRESENTATIVE_ACTION.search(content):
+        decision = _decision(
+            classification="INTERNAL",
+            action="BLOCK",
+            reason_codes=["GENERATED_UNAUTHORIZED_REPRESENTATIVE_ACTION"],
+            content_sha256=content_hash,
+            redacted_content_sha256=None,
+        )
+        return "", decision
     if _PRIVATE_KEY.search(content) or _BEARER.search(content) or _SECRET.search(content):
         decision = _decision(
             classification="RESTRICTED",
@@ -596,7 +612,16 @@ class _IncrementalOutputGuard:
             raise ProviderResponseError()
         self.pending += content
         self._raise_if_blocked()
-        cutoff = max(0, len(self.pending) - _OUTPUT_SAFETY_LOOKBEHIND)
+        # A completed sentence/Markdown line cannot later grow into one of the
+        # bounded blocked patterns. Release that unit immediately so a normal
+        # short answer does not wait for a fixed 512-character buffer. For an
+        # unfinished unit, retain a 128-character look-behind; it is longer
+        # than every bounded policy pattern, while _safe_release_cutoff keeps
+        # unbounded credentials and PII candidates behind the guard.
+        cutoff = max(
+            max(0, len(self.pending) - _OUTPUT_SAFETY_LOOKBEHIND),
+            _completed_output_unit_cutoff(self.pending),
+        )
         cutoff = _safe_release_cutoff(self.pending, cutoff)
         if cutoff == 0:
             return ""
@@ -651,6 +676,8 @@ class _IncrementalOutputGuard:
             or _SECRET.search(self.pending)
         ):
             raise OutputSafetyBlockedError()
+        if _UNAUTHORIZED_REPRESENTATIVE_ACTION.search(self.pending):
+            raise OutputSafetyBlockedError("GENERATED_UNAUTHORIZED_REPRESENTATIVE_ACTION")
         possible_email = _possible_email(self.pending)
         if possible_email is not None and len(self.pending) - possible_email.start() > 320:
             raise OutputSafetyBlockedError("GENERATED_UNBOUNDED_PII_DETECTED")
@@ -683,6 +710,15 @@ def _safe_release_cutoff(content: str, cutoff: int) -> int:
             if len(content) - match.start() > _OUTPUT_SAFETY_LOOKBEHIND:
                 raise OutputSafetyBlockedError()
             cutoff = match.start()
+    return cutoff
+
+
+def _completed_output_unit_cutoff(content: str) -> int:
+    """Return the last complete prose/Markdown boundary safe to expose now."""
+
+    cutoff = 0
+    for match in re.finditer(r"(?:\r?\n|[。！？；.!?;])(?:[\"'”’）)\]]*)", content):
+        cutoff = match.end()
     return cutoff
 
 

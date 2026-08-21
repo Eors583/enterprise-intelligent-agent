@@ -12,6 +12,7 @@ const KNOWLEDGE_BOUNDARY_PREFIXES = [
   'knowledge-gateway/',
   'knowledge-graph-governance/',
   'knowledge-ingestion/',
+  'knowledge-provider/',
   'knowledge-retrieval/',
   'knowledge-search-index/',
   'knowledge-semantic/',
@@ -42,6 +43,10 @@ const KNOWLEDGE_PRISMA_MODELS = [
   'knowledgeChunk',
   'knowledgeChunkEmbedding',
   'knowledgeIngestionJob',
+  'knowledgeProviderConnection',
+  'knowledgeProviderUserBinding',
+  'knowledgeExternalSpaceBinding',
+  'knowledgeExternalEntryBinding',
   'knowledgeEntity',
   'knowledgeEntityMention',
   'knowledgeRelation',
@@ -61,7 +66,7 @@ const KNOWLEDGE_PRISMA_MODELS = [
 ] as const;
 
 const DIRECT_INTERNAL_IMPORT =
-  /(?:knowledge-ingestion|knowledge-retrieval|knowledge-search-index|knowledge-semantic|knowledge-graph-governance)\//u;
+  /(?:knowledge-ingestion|knowledge-provider|knowledge-retrieval|knowledge-search-index|knowledge-semantic|knowledge-graph-governance)\//u;
 const DIRECT_KNOWLEDGE_TABLE = new RegExp(
   `\\.(?:${KNOWLEDGE_PRISMA_MODELS.join('|')})\\.(?:find|count|aggregate|groupBy|create|update|delete|upsert)`,
   'u',
@@ -107,7 +112,7 @@ describe('knowledge independent business boundary', () => {
       'utf8',
     );
     expect(source).not.toMatch(
-      /\.\.\/knowledge-(?:ingestion|retrieval|search-index|semantic|graph-governance)\//u,
+      /\.\.\/knowledge-(?:ingestion|provider|retrieval|search-index|semantic|graph-governance)\//u,
     );
     expect(source).not.toMatch(/@prisma\/client|Prisma\.|TransactionClient/u);
     expect(source).not.toMatch(DIRECT_INFRASTRUCTURE);

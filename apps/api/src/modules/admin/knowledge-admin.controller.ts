@@ -46,6 +46,7 @@ import {
   type KnowledgeGraphQuery,
   type KnowledgeGraphRebuildResponse,
   type KnowledgeGraphResponse,
+  type LexiangSpaceSyncResponse,
   type KnowledgeStructuredDocumentPreview,
   type PublishKnowledgeDocumentVersionRequest,
   type KnowledgeRetrievalTestRequest,
@@ -153,6 +154,24 @@ export class KnowledgeAdminController {
     return this.knowledge.update(id, request);
   }
 
+  @Post('lexiang-sync')
+  syncLexiangSpaces(): Promise<LexiangSpaceSyncResponse> {
+    return this.knowledge.syncLexiangSpaces();
+  }
+
+  @Delete(':id')
+  deleteKnowledgeBase(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Query('expectedVersion', ParseIntPipe) expectedVersion: number,
+  ): Promise<KnowledgeBase> {
+    return this.knowledge.delete(id, expectedVersion);
+  }
+
+  @Post(':id/external-sync')
+  syncExternal(@Param('id', new ParseUUIDPipe()) id: string): Promise<KnowledgeBase> {
+    return this.knowledge.syncExternal(id);
+  }
+
   @Get(':knowledgeBaseId/embedding-index-versions')
   listEmbeddingIndexVersions(
     @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
@@ -193,6 +212,14 @@ export class KnowledgeAdminController {
     request: EnsureKnowledgeFoldersRequest,
   ): Promise<KnowledgeFolderListResponse> {
     return this.knowledge.ensureFolders(knowledgeBaseId, request);
+  }
+
+  @Delete(':knowledgeBaseId/folders/:folderId')
+  deleteFolder(
+    @Param('knowledgeBaseId', new ParseUUIDPipe()) knowledgeBaseId: string,
+    @Param('folderId', new ParseUUIDPipe()) folderId: string,
+  ): Promise<KnowledgeFolderListResponse> {
+    return this.knowledge.deleteFolder(knowledgeBaseId, folderId);
   }
 
   @Post(':knowledgeBaseId/documents/import-web')

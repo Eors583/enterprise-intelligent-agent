@@ -1,8 +1,9 @@
 import type {
   AgentRunCancellationPreparation,
   AgentRunExternalAttachment,
-  AgentRunKnowledgeSource,
+  AgentRunEvidenceSource,
   AgentRunPreparation,
+  AgentRunReconciliationPreparation,
   AgentRunStreamMode,
   AgentRunUsage,
   AgentRunModelAttempt,
@@ -10,6 +11,11 @@ import type {
 
 export abstract class AgentRunRepository {
   abstract prepare(tenantId: string, runId: string): Promise<AgentRunPreparation>;
+
+  abstract prepareReconciliation(
+    tenantId: string,
+    runId: string,
+  ): Promise<AgentRunReconciliationPreparation>;
 
   abstract attachExternalRun(
     tenantId: string,
@@ -33,10 +39,10 @@ export abstract class AgentRunRepository {
     tenantId: string,
     runId: string,
     output: string,
-    citations?: readonly AgentRunKnowledgeSource[],
+    citations?: readonly AgentRunEvidenceSource[],
     usage?: AgentRunUsage,
     streamMode?: AgentRunStreamMode,
-  ): Promise<{ readonly outputMessageId: string; readonly externalRunId: string | null }>;
+  ): Promise<{ readonly outputMessageId: string | null; readonly externalRunId: string | null }>;
 
   abstract completeFailed(
     tenantId: string,
@@ -53,6 +59,7 @@ export abstract class AgentRunRepository {
     errorCode: string,
     usage?: AgentRunUsage,
     streamMode?: AgentRunStreamMode,
+    reconcileAt?: Date,
   ): Promise<void>;
 
   abstract recordModelExecutionEvidence(

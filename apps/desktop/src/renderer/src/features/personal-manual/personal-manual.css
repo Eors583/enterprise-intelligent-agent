@@ -69,6 +69,23 @@
   font-weight: 800;
 }
 
+.personal-manual-avatar-initials,
+.personal-manual-avatar-image {
+  grid-area: 1 / 1;
+}
+
+.personal-manual-avatar-image {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  opacity: 0;
+}
+
+.personal-manual-avatar-image.loaded {
+  opacity: 1;
+}
+
 .personal-manual-person-tags {
   display: flex;
   flex-wrap: wrap;
@@ -159,6 +176,138 @@
   padding-bottom: 92px;
 }
 
+.personal-manual-sharing,
+.work-availability-panel {
+  display: grid;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+}
+
+.personal-manual-sharing > div h2,
+.personal-manual-sharing > div p,
+.work-availability-panel header h2,
+.work-availability-panel header p {
+  margin: 0;
+}
+
+.personal-manual-sharing > div h2,
+.work-availability-panel header h2 {
+  font-size: 18px;
+}
+
+.personal-manual-sharing > div p,
+.work-availability-panel header p {
+  margin-top: 5px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.personal-manual-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 28px;
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.personal-manual-switch input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--brand);
+}
+
+.work-availability-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.work-availability-panel > header > span {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.work-availability-panel > header > span.current {
+  color: var(--brand);
+  background: var(--brand-soft);
+}
+
+.work-availability-panel > header > span.expired {
+  color: var(--muted);
+  background: var(--brand-soft);
+}
+
+.work-availability-disabled,
+.work-availability-loading {
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: var(--muted);
+  background: var(--brand-soft);
+  font-size: 13px;
+}
+
+.work-availability-panel form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.work-availability-panel form label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.work-availability-panel form label > span,
+.personal-manual-scope > span {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.work-availability-panel form label.wide {
+  grid-column: 1 / -1;
+}
+
+.work-availability-panel input,
+.work-availability-panel select,
+.personal-manual-scope select {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 9px 11px;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+}
+
+.work-availability-panel input:focus,
+.work-availability-panel select:focus,
+.personal-manual-scope select:focus {
+  border-color: var(--brand);
+  outline: 2px solid var(--brand-soft);
+  outline-offset: 1px;
+}
+
+.work-availability-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+}
+
 .personal-manual-section {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -168,12 +317,33 @@
 
 .personal-manual-section > header {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(132px, auto) auto;
   align-items: center;
   gap: 14px;
   padding: 18px 20px;
   border-bottom: 1px solid #eef0f3;
   background: #fbfcfc;
+}
+
+.personal-manual-scope {
+  display: grid;
+  gap: 5px;
+  min-width: 132px;
+}
+
+.personal-manual-scope > span {
+  font-size: 11px;
+}
+
+.personal-manual-scope select {
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.personal-manual-scope select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .personal-manual-section h2,
@@ -414,6 +584,7 @@
   }
 
   .personal-manual-section > header .personal-manual-complete,
+  .personal-manual-section > header .personal-manual-scope,
   .personal-manual-section > header .personal-manual-secondary-button {
     grid-column: 2;
     justify-self: start;
@@ -421,5 +592,14 @@
 
   .personal-manual-save-bar {
     bottom: -16px;
+  }
+
+  .work-availability-panel form {
+    grid-template-columns: 1fr;
+  }
+
+  .work-availability-panel form label.wide,
+  .work-availability-actions {
+    grid-column: auto;
   }
 }

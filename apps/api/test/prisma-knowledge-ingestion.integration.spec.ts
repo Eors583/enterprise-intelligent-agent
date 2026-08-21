@@ -378,7 +378,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
         await request(app.getHttpServer())
           .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/retrieval-test`)
           .set(authorization)
-          .send({ query: 'GRAPHSEEDTOKEN2026', limit: 8 })
+          .send({ query: 'GRAPHSEEDTOKEN2026 关联', limit: 8 })
           .expect(201)
       ).body,
     );
@@ -422,7 +422,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
         await request(app.getHttpServer())
           .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/retrieval-test`)
           .set(authorization)
-          .send({ query: 'ROOTGRAPHALIAS-2026', limit: 8 })
+          .send({ query: 'ROOTGRAPHALIAS-2026 关系', limit: 8 })
           .expect(201)
       ).body,
     );

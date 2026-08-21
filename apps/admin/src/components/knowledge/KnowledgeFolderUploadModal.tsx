@@ -28,6 +28,47 @@ const ALLOWED_EXTENSIONS = new Set([
   'txt',
   'md',
 ]);
+const LEXIANG_ALLOWED_EXTENSIONS = new Set([
+  'jpg',
+  'jpeg',
+  'png',
+  'bmp',
+  'webp',
+  'tiff',
+  'gif',
+  'doc',
+  'dot',
+  'wps',
+  'wpt',
+  'docx',
+  'dotx',
+  'docm',
+  'dotm',
+  'xls',
+  'xlt',
+  'et',
+  'ett',
+  'xlsx',
+  'xltx',
+  'csv',
+  'xlsb',
+  'xlsm',
+  'xltm',
+  'ets',
+  'pptx',
+  'ppt',
+  'pot',
+  'potx',
+  'pps',
+  'ppsx',
+  'dps',
+  'dpt',
+  'pptm',
+  'potm',
+  'ppsm',
+  'pdf',
+  'txt',
+]);
 
 interface FolderFile {
   readonly file: File;
@@ -45,9 +86,10 @@ function relativePath(file: File): string {
   return (file.webkitRelativePath || file.name).replaceAll('\\', '/');
 }
 
-function fileProblem(file: File): string | null {
+function fileProblem(file: File, managedByLexiang: boolean): string | null {
   const extension = file.name.split('.').pop()?.toLowerCase() ?? '';
-  if (!ALLOWED_EXTENSIONS.has(extension)) return '格式不支持';
+  const supported = managedByLexiang ? LEXIANG_ALLOWED_EXTENSIONS : ALLOWED_EXTENSIONS;
+  if (!supported.has(extension)) return '格式不支持';
   if (file.size === 0) return '文件为空';
   return null;
 }
@@ -75,13 +117,18 @@ export function KnowledgeFolderUploadModal({
   onClose: () => void;
   onUploaded: (message: string) => void;
 }): ReactNode {
+  const managedByLexiang = knowledgeBase.storageProvider === 'LEXIANG';
   const entries = useMemo<FolderFile[]>(
     () =>
       files.map((file) => {
         const parts = relativePath(file).split('/').filter(Boolean);
-        return { file, folderPath: parts.slice(0, -1).join('/'), problem: fileProblem(file) };
+        return {
+          file,
+          folderPath: parts.slice(0, -1).join('/'),
+          problem: fileProblem(file, managedByLexiang),
+        };
       }),
-    [files],
+    [files, managedByLexiang],
   );
   const validEntries = entries.filter((entry) => entry.problem === null);
   const folderPaths = [...new Set(validEntries.map((entry) => entry.folderPath).filter(Boolean))];
@@ -126,40 +173,55 @@ export function KnowledgeFolderUploadModal({
         });
         ensuredFolders.push(...ensured.items);
       }
-      const folderIds = new Map(ensuredFolders.map((folder) => [folder.path, folder.id]));
+      const folderIds = managedByLexiang
+        ? knowledgeFolderIdsByDisplayPath(ensuredFolders)
+        : new Map(ensuredFolders.map((folder) => [folder.path, folder.id]));
       for (let index = 0; index < targets.length; index += 1) {
         const entry = targets[index]!;
         try {
           const folderId = entry.folderPath ? folderIds.get(entry.folderPath) : null;
           if (entry.folderPath && folderId === undefined) throw new Error('目录创建失败');
-          const inspection = await inspectKnowledgeUpload(knowledgeBase.id, {
-            fileName: entry.file.name,
-            size: entry.file.size,
-            sha256: await sha256(entry.file),
-            folderId: folderId ?? null,
-          });
-          if (inspection.decision === 'EXACT_DUPLICATE') {
-            batchIssues.push({
-              entry,
-              kind: 'SKIPPED',
-              reason: '与知识库中已有文件版本完全相同',
-            });
-          } else if (
-            inspection.decision === 'NEW_VERSION_CANDIDATE' &&
-            inspection.matchingDocument !== null
-          ) {
-            await uploadKnowledgeDocumentVersion(knowledgeBase.id, inspection.matchingDocument.id, {
-              file: entry.file,
-              changeSummary: '文件夹批量上传的新版本',
-            });
-            uploadedCount += 1;
-          } else {
+          if (managedByLexiang) {
             await uploadKnowledgeDocument(knowledgeBase.id, {
               file: entry.file,
               title: titleFromFile(entry.file.name),
               folderId: folderId ?? null,
             });
             uploadedCount += 1;
+          } else {
+            const inspection = await inspectKnowledgeUpload(knowledgeBase.id, {
+              fileName: entry.file.name,
+              size: entry.file.size,
+              sha256: await sha256(entry.file),
+              folderId: folderId ?? null,
+            });
+            if (inspection.decision === 'EXACT_DUPLICATE') {
+              batchIssues.push({
+                entry,
+                kind: 'SKIPPED',
+                reason: '与知识库中已有文件版本完全相同',
+              });
+            } else if (
+              inspection.decision === 'NEW_VERSION_CANDIDATE' &&
+              inspection.matchingDocument !== null
+            ) {
+              await uploadKnowledgeDocumentVersion(
+                knowledgeBase.id,
+                inspection.matchingDocument.id,
+                {
+                  file: entry.file,
+                  changeSummary: '文件夹批量上传的新版本',
+                },
+              );
+              uploadedCount += 1;
+            } else {
+              await uploadKnowledgeDocument(knowledgeBase.id, {
+                file: entry.file,
+                title: titleFromFile(entry.file.name),
+                folderId: folderId ?? null,
+              });
+              uploadedCount += 1;
+            }
           }
         } catch (caught) {
           batchIssues.push({ entry, kind: 'FAILED', reason: messageFromError(caught) });
@@ -171,7 +233,11 @@ export function KnowledgeFolderUploadModal({
       setIssues(nextIssues);
       setCompleted(true);
       if (nextIssues.length === 0) {
-        onUploaded(`文件夹上传完成：新增或更新 ${uploadedCount} 个。`);
+        onUploaded(
+          managedByLexiang
+            ? `文件夹已上传到腾讯乐享：新增或更新 ${uploadedCount} 个文件。`
+            : `文件夹上传完成：新增或更新 ${uploadedCount} 个。`,
+        );
       }
     } catch (caught) {
       const reason = messageFromError(caught);
@@ -200,7 +266,11 @@ export function KnowledgeFolderUploadModal({
   return (
     <Modal
       title="上传文件夹"
-      description="保留所选文件夹及其子目录结构；文件会继续执行安全检查、解析、切片和索引。"
+      description={
+        managedByLexiang
+          ? '保留所选文件的目录与子目录层级，并把支持的文件直接上传到腾讯乐享；本系统只保存目录映射。'
+          : '保留所选文件的目录与子目录层级；文件会继续执行安全检查、解析、切片和索引。'
+      }
       size="wide"
       onClose={onClose}
     >
@@ -295,7 +365,9 @@ export function KnowledgeFolderUploadModal({
               type="button"
               onClick={() =>
                 onUploaded(
-                  `文件夹上传完成：新增或更新 ${uploaded} 个，跳过 ${skippedIssues.length} 个。`,
+                  managedByLexiang
+                    ? `文件夹已上传到腾讯乐享：新增或更新 ${uploaded} 个文件，跳过 ${skippedIssues.length} 个。`
+                    : `文件夹上传完成：新增或更新 ${uploaded} 个，跳过 ${skippedIssues.length} 个。`,
                 )
               }
             >
@@ -314,6 +386,36 @@ export function KnowledgeFolderUploadModal({
       </form>
     </Modal>
   );
+}
+
+function knowledgeFolderIdsByDisplayPath(
+  folders: readonly KnowledgeFolder[],
+): ReadonlyMap<string, string> {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const pathsById = new Map<string, string>();
+  const resolving = new Set<string>();
+  const resolvePath = (folder: KnowledgeFolder): string => {
+    const previous = pathsById.get(folder.id);
+    if (previous !== undefined) return previous;
+    if (resolving.has(folder.id)) throw new Error('目录层级无效');
+    resolving.add(folder.id);
+    const parent = folder.parentId === null ? null : byId.get(folder.parentId);
+    if (folder.parentId !== null && parent === undefined) throw new Error('目录层级不完整');
+    const path =
+      parent === null || parent === undefined
+        ? folder.name
+        : `${resolvePath(parent)}/${folder.name}`;
+    resolving.delete(folder.id);
+    pathsById.set(folder.id, path);
+    return path;
+  };
+  const result = new Map<string, string>();
+  for (const folder of folders) {
+    const path = resolvePath(folder);
+    if (result.has(path)) throw new Error('存在同路径目录，无法确定上传位置');
+    result.set(path, folder.id);
+  }
+  return result;
 }
 
 export function KnowledgeCreateFolderModal({

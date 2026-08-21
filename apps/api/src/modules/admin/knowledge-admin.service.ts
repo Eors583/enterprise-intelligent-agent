@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import {
+  BadGatewayException,
   BadRequestException,
   ConflictException,
   Inject,
@@ -35,6 +36,7 @@ import {
   type KnowledgeGraphRebuildResponse,
   type KnowledgeGraphResponse,
   type KnowledgeStructuredDocumentPreview,
+  type LexiangSpaceSyncResponse,
   type PublishKnowledgeDocumentVersionRequest,
   type KnowledgeRetrievalTestRequest,
   type KnowledgeRetrievalTestResponse,
@@ -54,6 +56,7 @@ import { Prisma } from '@prisma/client';
 
 import { AdminPrismaService } from '../../database/admin-prisma.service.js';
 import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
+import { KnowledgeProviderSpaceService } from '../knowledge-provider/application/knowledge-provider-space.service.js';
 import {
   activateKnowledgeGraphProjection,
   persistKnowledgeGraphProjection,
@@ -158,18 +161,94 @@ export class KnowledgeAdminService {
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
     @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
     @Inject(KnowledgeAiRuntimeClient) private readonly semantic: KnowledgeAiRuntimeClient,
+    @Inject(KnowledgeProviderSpaceService)
+    private readonly providerSpaces: KnowledgeProviderSpaceService,
   ) {}
 
   async list(): Promise<KnowledgeBaseListResponse> {
     const principal = this.access.requireKnowledgeWrite();
-    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+    const items = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const items = await transaction.knowledgeBase.findMany({
         where: { tenantId: principal.tenantId },
         orderBy: [{ updatedAt: 'desc' }, { id: 'asc' }],
         include: knowledgeBaseInclude,
       });
-      return { items: items.map(mapKnowledgeBase) };
+      return items.map(mapKnowledgeBase);
     });
+    return { items: await this.attachExternalSpaces(principal.tenantId, items) };
+  }
+
+  async syncLexiangSpaces(): Promise<LexiangSpaceSyncResponse> {
+    const principal = this.access.requireKnowledgeWrite();
+    let remoteSpaces;
+    try {
+      remoteSpaces = await this.providerSpaces.listRemote(principal);
+    } catch (error) {
+      throw new BadGatewayException('乐享知识库目录读取失败，请检查连接状态后重试。', {
+        cause: error,
+      });
+    }
+    const linked = await this.providerSpaces.linkedKnowledgeBaseIds(
+      principal.tenantId,
+      remoteSpaces.map((space) => space.id),
+    );
+    let imported = 0;
+    let updated = 0;
+    let requiresPrivacyReview = 0;
+    let entriesDiscovered = 0;
+    let foldersSynchronized = 0;
+    let documentsDiscovered = 0;
+    let documentsImported = 0;
+    let documentsUpdated = 0;
+    let documentsArchived = 0;
+    for (const remote of remoteSpaces) {
+      let knowledgeBaseId = linked.get(remote.id);
+      if (knowledgeBaseId === undefined) {
+        const created = await this.create({
+          name: importedLexiangSpaceName(remote.name),
+          description: remote.description,
+          status: 'DRAFT',
+          orgUnitIds: [],
+          memberUserIds: [principal.userId],
+          storageProvider: 'LOCAL',
+        });
+        knowledgeBaseId = created.id;
+        imported += 1;
+      } else {
+        updated += 1;
+      }
+      const synchronized = await this.providerSpaces.bindExisting(
+        principal,
+        knowledgeBaseId,
+        remote,
+      );
+      if (synchronized.status !== 'ACTIVE') requiresPrivacyReview += 1;
+      try {
+        const entrySync = await this.providerSpaces.syncEntries(principal, knowledgeBaseId);
+        entriesDiscovered += entrySync.entriesDiscovered;
+        foldersSynchronized += entrySync.foldersSynchronized;
+        documentsDiscovered += entrySync.documentsDiscovered;
+        documentsImported += entrySync.documentsImported;
+        documentsUpdated += entrySync.documentsUpdated;
+        documentsArchived += entrySync.documentsArchived;
+      } catch (error) {
+        throw new BadGatewayException(`乐享知识库“${remote.name}”的文档目录同步失败，请重试。`, {
+          cause: error,
+        });
+      }
+    }
+    return {
+      discovered: remoteSpaces.length,
+      imported,
+      updated,
+      requiresPrivacyReview,
+      entriesDiscovered,
+      foldersSynchronized,
+      documentsDiscovered,
+      documentsImported,
+      documentsUpdated,
+      documentsArchived,
+    };
   }
 
   async ensureFolders(
@@ -181,8 +260,21 @@ export class KnowledgeAdminService {
       (left, right) =>
         left.split('/').length - right.split('/').length || left.localeCompare(right),
     );
+    await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId),
+    );
+    if (await this.providerSpaces.isManaged(principal.tenantId, knowledgeBaseId)) {
+      await this.providerSpaces.ensureFolders(principal, knowledgeBaseId, requestedPaths);
+      return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        const items = await transaction.knowledgeFolder.findMany({
+          where: { tenantId: principal.tenantId, knowledgeBaseId },
+          orderBy: [{ path: 'asc' }, { id: 'asc' }],
+          include: { _count: { select: { documents: true, children: true } } },
+        });
+        return { items: items.map(mapKnowledgeFolder) };
+      });
+    }
     return this.prisma.withTenant(principal.tenantId, async (transaction) => {
-      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
       for (const requestedPath of requestedPaths) {
         let parentId: string | null = null;
         const segments = requestedPath.split('/');
@@ -220,6 +312,85 @@ export class KnowledgeAdminService {
         include: { _count: { select: { documents: true, children: true } } },
       });
       return { items: items.map(mapKnowledgeFolder) };
+    });
+  }
+
+  async deleteFolder(
+    knowledgeBaseId: string,
+    folderId: string,
+  ): Promise<KnowledgeFolderListResponse> {
+    const principal = this.access.requireKnowledgeWrite();
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      await this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId);
+      const folders = await transaction.knowledgeFolder.findMany({
+        where: { tenantId: principal.tenantId, knowledgeBaseId },
+        select: { id: true, parentId: true },
+      });
+      if (!folders.some((folder) => folder.id === folderId)) {
+        throw new NotFoundException('The knowledge folder was not found.');
+      }
+      const externalFolder = await transaction.knowledgeExternalEntryBinding.findFirst({
+        where: { tenantId: principal.tenantId, knowledgeBaseId, folderId },
+        select: { id: true },
+      });
+      if (externalFolder !== null) {
+        throw new BadRequestException('腾讯乐享文件夹只能在乐享中修改或删除，然后重新同步。');
+      }
+
+      const descendantIds = new Set([folderId]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const folder of folders) {
+          if (
+            folder.parentId !== null &&
+            descendantIds.has(folder.parentId) &&
+            !descendantIds.has(folder.id)
+          ) {
+            descendantIds.add(folder.id);
+            changed = true;
+          }
+        }
+      }
+      const documents = await transaction.knowledgeDocument.findMany({
+        where: {
+          tenantId: principal.tenantId,
+          knowledgeBaseId,
+          folderId: { in: [...descendantIds] },
+        },
+        select: { id: true },
+      });
+      if (documents.length > 0) {
+        await transaction.knowledgeDocument.updateMany({
+          where: {
+            tenantId: principal.tenantId,
+            id: { in: documents.map((document) => document.id) },
+          },
+          data: { status: 'ARCHIVED', folderId: null },
+        });
+      }
+
+      await transaction.knowledgeFolder.deleteMany({
+        where: { tenantId: principal.tenantId, knowledgeBaseId, id: folderId },
+      });
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.knowledge-folder.deleted',
+        'knowledge_folder',
+        folderId,
+        {
+          knowledgeBaseId,
+          deletedFolderCount: descendantIds.size,
+          deletedDocumentCount: documents.length,
+        },
+      );
+      const remaining = await transaction.knowledgeFolder.findMany({
+        where: { tenantId: principal.tenantId, knowledgeBaseId },
+        orderBy: [{ path: 'asc' }, { id: 'asc' }],
+        include: { _count: { select: { documents: true, children: true } } },
+      });
+      return { items: remaining.map(mapKnowledgeFolder) };
     });
   }
 
@@ -649,9 +820,13 @@ export class KnowledgeAdminService {
 
   async create(request: CreateKnowledgeBaseRequest): Promise<KnowledgeBase> {
     const principal = this.access.requireKnowledgeWrite();
+    const storageProvider = request.storageProvider ?? 'LOCAL';
+    if (storageProvider === 'LEXIANG') {
+      await this.providerSpaces.assertLexiangReady(principal.tenantId);
+    }
     const capabilities = await this.safeKnowledgeCapabilities(principal.tenantId);
     try {
-      return await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const created = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
         const scopes = normalizeKnowledgeScopes(request.orgUnitScopes, request.orgUnitIds);
         const memberUserIds = uniqueIds(request.memberUserIds ?? []);
         const space = await resolveKnowledgeSpace(
@@ -679,7 +854,7 @@ export class KnowledgeAdminService {
             key: knowledgeBaseKey,
             name: request.name,
             description: request.description ?? null,
-            status: request.status,
+            status: storageProvider === 'LEXIANG' ? 'DRAFT' : request.status,
             spaceType: space.type,
             spaceTargetId: space.targetId,
             spaceTargetName: space.targetName,
@@ -839,6 +1014,26 @@ export class KnowledgeAdminService {
           await this.findKnowledgeBase(transaction, principal.tenantId, knowledgeBase.id),
         );
       });
+      if (storageProvider === 'LOCAL') return created;
+
+      const externalSpace = await this.providerSpaces.provision(
+        principal,
+        created.id,
+        created.name,
+      );
+      let result = created;
+      if (externalSpace.status === 'ACTIVE' && request.status !== 'DRAFT') {
+        result = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+          await transaction.knowledgeBase.update({
+            where: { id: created.id },
+            data: { status: request.status, version: { increment: 1 } },
+          });
+          return mapKnowledgeBase(
+            await this.findKnowledgeBase(transaction, principal.tenantId, created.id),
+          );
+        });
+      }
+      return { ...result, storageProvider: 'LEXIANG', externalSpace };
     } catch (error) {
       if (isUniqueConflict(error)) {
         throw new ConflictException('A knowledge base with this key already exists.');
@@ -1055,7 +1250,8 @@ export class KnowledgeAdminService {
 
   async update(id: string, request: UpdateKnowledgeBaseRequest): Promise<KnowledgeBase> {
     const principal = this.access.requireKnowledgeWrite();
-    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+    if (request.status === 'ARCHIVED') return this.delete(id, request.expectedVersion);
+    const updated = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const current = await transaction.knowledgeBase.findFirst({
         where: { id, tenantId: principal.tenantId },
       });
@@ -1176,6 +1372,83 @@ export class KnowledgeAdminService {
       );
       return mapKnowledgeBase(updated);
     });
+    const renamed =
+      request.name === undefined
+        ? null
+        : await this.providerSpaces.rename(principal, updated.id, request.name);
+    if (renamed !== null) {
+      return { ...updated, storageProvider: 'LEXIANG', externalSpace: renamed };
+    }
+    const [result] = await this.attachExternalSpaces(principal.tenantId, [updated]);
+    return result!;
+  }
+
+  async delete(id: string, expectedVersion: number): Promise<KnowledgeBase> {
+    const principal = this.access.requireKnowledgeWrite();
+    const current = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      transaction.knowledgeBase.findFirst({
+        where: { id, tenantId: principal.tenantId },
+        select: { id: true, name: true, version: true },
+      }),
+    );
+    if (current === null) throw knowledgeBaseNotFound();
+    if (current.version !== expectedVersion) throw optimisticConflict('knowledge base');
+
+    await this.providerSpaces.delete(principal, id);
+    const archived = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const result = await transaction.knowledgeBase.updateMany({
+        where: { id, tenantId: principal.tenantId, version: expectedVersion },
+        data: { status: 'ARCHIVED', version: { increment: 1 } },
+      });
+      if (result.count !== 1) throw optimisticConflict('knowledge base');
+      await recordAdminAudit(
+        transaction,
+        principal,
+        'admin.knowledge-base.deleted',
+        'knowledge_base',
+        id,
+        { previousVersion: expectedVersion, remoteDeleteCompleted: true },
+      );
+      return mapKnowledgeBase(await this.findKnowledgeBase(transaction, principal.tenantId, id));
+    });
+    const [result] = await this.attachExternalSpaces(principal.tenantId, [archived]);
+    return result!;
+  }
+
+  async syncExternal(id: string): Promise<KnowledgeBase> {
+    const principal = this.access.requireKnowledgeWrite();
+    const current = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      transaction.knowledgeBase.findFirst({
+        where: { id, tenantId: principal.tenantId },
+        select: { id: true, name: true, status: true },
+      }),
+    );
+    if (current === null) throw knowledgeBaseNotFound();
+    const existingExternalSpace = (await this.providerSpaces.list(principal.tenantId, [id])).get(
+      id,
+    );
+    if (existingExternalSpace === undefined || existingExternalSpace.status === 'DELETED') {
+      throw new BadRequestException('该知识库不是可重新同步的腾讯乐享知识库。');
+    }
+    const externalSpace = await this.providerSpaces.provision(principal, id, current.name);
+    await this.providerSpaces.syncEntries(principal, id);
+    let knowledgeBase = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      this.findKnowledgeBase(transaction, principal.tenantId, id),
+    );
+    if (externalSpace.status === 'ACTIVE' && current.status === 'DRAFT') {
+      knowledgeBase = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        await transaction.knowledgeBase.update({
+          where: { id },
+          data: { status: 'ACTIVE', version: { increment: 1 } },
+        });
+        return this.findKnowledgeBase(transaction, principal.tenantId, id);
+      });
+    }
+    return {
+      ...mapKnowledgeBase(knowledgeBase),
+      storageProvider: 'LEXIANG',
+      externalSpace,
+    };
   }
 
   async createDocument(
@@ -1214,6 +1487,14 @@ export class KnowledgeAdminService {
       readonly governance?: KnowledgeDocumentGovernancePolicy;
     },
   ): Promise<KnowledgeDocument> {
+    const principal = this.access.requireKnowledgeWrite();
+    if (await this.providerSpaces.isManaged(principal.tenantId, knowledgeBaseId)) {
+      await this.prisma.withTenant(principal.tenantId, (transaction) =>
+        this.requireKnowledgeBase(transaction, principal.tenantId, knowledgeBaseId),
+      );
+      const documentId = await this.providerSpaces.uploadFile(principal, knowledgeBaseId, input);
+      return this.getDocument(knowledgeBaseId, documentId);
+    }
     const duplicate = await this.inspectUpload(knowledgeBaseId, {
       fileName: input.fileName,
       size: input.bytes.byteLength,
@@ -1359,10 +1640,19 @@ export class KnowledgeAdminService {
           tenantId: principal.tenantId,
           knowledgeBaseId,
         },
-        select: { id: true, title: true, sourceType: true, status: true },
+        select: {
+          id: true,
+          title: true,
+          sourceType: true,
+          status: true,
+          externalEntryBinding: { select: { id: true } },
+        },
       }),
     );
     if (current === null) throw knowledgeDocumentNotFound();
+    if (current.externalEntryBinding) {
+      throw new BadRequestException('腾讯乐享文档只能在乐享中更新，然后重新同步。');
+    }
     if (current.sourceType !== 'FILE') {
       throw new BadRequestException('Only file documents accept uploaded file versions.');
     }
@@ -2491,7 +2781,7 @@ export class KnowledgeAdminService {
           sheetName: item.sheetName ?? readChunkSheetName(source?.metadata ?? null),
           sourceMimeType: source?.mimeType ?? null,
           sourceFileName: source?.fileName ?? null,
-          sourceUri: source?.sourceUri ?? null,
+          sourceUri: source?.sourceUri ?? item.sourceUri ?? null,
           sourceDownloadAvailable: source?.sourceDownloadAvailable ?? false,
           structuredPreviewAvailable: source?.structuredPreviewAvailable ?? false,
           excerpt: excerpt(item.content),
@@ -2577,6 +2867,9 @@ export class KnowledgeAdminService {
         include: knowledgeDocumentInclude,
       });
       if (current === null) throw knowledgeDocumentNotFound();
+      if (current.externalEntryBinding) {
+        throw new BadRequestException('腾讯乐享文档只能在乐享中删除，然后重新同步。');
+      }
       if (current.status === 'ARCHIVED') return mapKnowledgeDocument(current);
 
       await transaction.$queryRaw<Array<{ id: string }>>(Prisma.sql`
@@ -3014,6 +3307,24 @@ export class KnowledgeAdminService {
     return knowledgeBase;
   }
 
+  private async attachExternalSpaces(
+    tenantId: string,
+    knowledgeBases: readonly KnowledgeBase[],
+  ): Promise<KnowledgeBase[]> {
+    const bindings = await this.providerSpaces.list(
+      tenantId,
+      knowledgeBases.map((knowledgeBase) => knowledgeBase.id),
+    );
+    return knowledgeBases.map((knowledgeBase) => {
+      const externalSpace = bindings.get(knowledgeBase.id) ?? null;
+      return {
+        ...knowledgeBase,
+        storageProvider: externalSpace === null ? 'LOCAL' : 'LEXIANG',
+        externalSpace,
+      };
+    });
+  }
+
   private async findKnowledgeDocument(
     transaction: Prisma.TransactionClient,
     tenantId: string,
@@ -3045,6 +3356,7 @@ const knowledgeDocumentVersions = {
 const knowledgeDocumentInclude = {
   versions: knowledgeDocumentVersions,
   folder: { select: { path: true } },
+  externalEntryBinding: { select: { id: true } },
 } satisfies Prisma.KnowledgeDocumentInclude;
 
 const knowledgeDocumentSummarySelect = {
@@ -3721,6 +4033,11 @@ function generatedKnowledgeBaseKey(name: string): string {
     .replace(/-+$/u, '');
   if (normalized.length >= 2) return normalized;
   return `knowledge-${createHash('sha256').update(name.trim()).digest('hex').slice(0, 12)}`;
+}
+
+function importedLexiangSpaceName(name: string): string {
+  const withoutManagedMarker = name.replace(/ · BMS:[0-9a-f-]{36}$/iu, '').trim();
+  return withoutManagedMarker === '' ? name : withoutManagedMarker;
 }
 
 function knowledgeBaseNotFound(): NotFoundException {

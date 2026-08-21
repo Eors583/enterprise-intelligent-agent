@@ -34,12 +34,19 @@ export interface AgentRunKnowledgeSource {
   readonly documentVersion: number;
   readonly headingPath: readonly string[];
   readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
+  readonly sourceProvider?: 'LOCAL' | 'LEXIANG';
+  readonly sourceUri?: string | null;
   readonly excerpt: string;
   readonly classification: import('@enterprise/contracts').AiDataClassification;
   readonly governanceHash: string;
   readonly contentHash: string;
   readonly updatedAt: string;
 }
+
+export type AgentRunCollaborationSource =
+  import('@enterprise/contracts').EmployeeCollaborationSource;
+
+export type AgentRunEvidenceSource = AgentRunKnowledgeSource | AgentRunCollaborationSource;
 
 export interface AgentRunMemoryContext {
   readonly id: string;
@@ -98,6 +105,7 @@ export interface PreparedAgentRun {
   readonly messages: readonly AgentRunContextMessage[];
   readonly knowledgeSources?: readonly AgentRunKnowledgeSource[];
   readonly memoryContexts?: readonly AgentRunMemoryContext[];
+  readonly collaborationContext?: import('@enterprise/contracts').EmployeeCollaborationContextSnapshot;
   readonly knowledgeGroundingRequired?: boolean;
   readonly knowledgeEvidenceFallbackEnabled?: boolean;
   readonly controlledModelConnectivityProbe?: boolean;
@@ -118,6 +126,9 @@ export type AgentRunPreparation =
       readonly errorCode: string | null;
     }
   | { readonly kind: 'ambiguous_dispatch' };
+
+export type AgentRunReconciliationPreparation =
+  AgentRunPreparation | { readonly kind: 'redundant'; readonly externalRunId: string | null };
 
 export type AgentRunExternalAttachment = 'attached' | 'cancellation_required';
 
@@ -166,6 +177,15 @@ export function parseAgentRunRequestedEvent(event: ClaimedAgentRunEvent): string
     throw new Error('Agent Run outbox event validation failed.');
   }
   return event.aggregateId;
+}
+
+export function isAgentRunReconciliationEvent(event: ClaimedAgentRunEvent): boolean {
+  parseAgentRunRequestedEvent(event);
+  const reconciliation = Reflect.get(event.payload as object, 'reconciliation');
+  if (reconciliation !== undefined && reconciliation !== true) {
+    throw new Error('Agent Run reconciliation outbox event validation failed.');
+  }
+  return reconciliation === true;
 }
 
 export function parseAgentRunCancelRequestedEvent(event: ClaimedAgentRunEvent): string {

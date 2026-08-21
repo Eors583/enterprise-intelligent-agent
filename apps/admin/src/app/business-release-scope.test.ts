@@ -30,6 +30,7 @@ describe('business-only release scope', () => {
     for (const page of REMOVED_GOVERNANCE_PAGES) expect(secondaryIds).not.toContain(page);
     expect(secondaryIds).toContain('ai-model-routing');
     expect(secondaryIds).toContain('knowledge');
+    expect(secondaryIds).toContain('knowledge-integrations');
     expect(secondaryIds).toContain('agents');
   });
 
@@ -41,6 +42,7 @@ describe('business-only release scope', () => {
     for (const component of REMOVED_COMPONENTS) expect(shell).not.toContain(component);
     expect(shell).toContain('AiModelRoutingPage');
     expect(shell).toContain('KnowledgePage');
+    expect(shell).toContain('KnowledgeIntegrationsPage');
     expect(shell).toContain('AgentsPage');
   });
 

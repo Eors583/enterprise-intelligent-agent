@@ -85,6 +85,54 @@ describe('KnowledgeFolderUploadModal', () => {
       await dom.cleanup();
     }
   });
+
+  it('preserves the selected hierarchy and uploads Lexiang files without local inspection', async () => {
+    api.ensureKnowledgeFolders.mockResolvedValue({
+      items: [
+        { id: 'remote-root', parentId: null, name: '制度资料', path: '制度资料~hash-a' },
+        {
+          id: 'remote-child',
+          parentId: 'remote-root',
+          name: '财务',
+          path: '制度资料~hash-a/财务~hash-b',
+        },
+      ],
+    });
+    api.uploadKnowledgeDocument.mockResolvedValue({ id: 'uploaded' });
+    const onUploaded = vi.fn();
+    const dom = await renderInTestDom(
+      createElement(KnowledgeFolderUploadModal, {
+        knowledgeBase: {
+          ...knowledgeBase(),
+          storageProvider: 'LEXIANG',
+          externalSpace: { status: 'ACTIVE' },
+        } as KnowledgeBase,
+        files: [folderFile('报销制度.docx', '制度资料/财务/报销制度.docx')],
+        onClose: vi.fn(),
+        onUploaded,
+      }),
+    );
+
+    try {
+      expect(dom.container.textContent).toContain('直接上传到腾讯乐享');
+      await dom.submit(dom.container.querySelector('form') as HTMLFormElement);
+      await dom.flush();
+      await dom.flush();
+
+      expect(api.ensureKnowledgeFolders).toHaveBeenCalledWith(knowledgeBase().id, {
+        paths: ['制度资料/财务'],
+      });
+      expect(api.inspectKnowledgeUpload).not.toHaveBeenCalled();
+      expect(api.uploadKnowledgeDocument).toHaveBeenCalledWith(knowledgeBase().id, {
+        file: expect.objectContaining({ name: '报销制度.docx' }),
+        title: '报销制度',
+        folderId: 'remote-child',
+      });
+      expect(onUploaded).toHaveBeenCalledWith('文件夹已上传到腾讯乐享：新增或更新 1 个文件。');
+    } finally {
+      await dom.cleanup();
+    }
+  });
 });
 
 function folderFile(name: string, path: string): File {

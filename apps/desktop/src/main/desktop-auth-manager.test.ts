@@ -5,7 +5,10 @@ import type { AccountStore } from './account-store';
 import { DesktopAuthManager } from './desktop-auth-manager';
 
 describe('DesktopAuthManager account isolation', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
 
   it('keeps MFA challenges out of storage and accepts a session only after verification', async () => {
     const put = vi.fn(async () => undefined);
@@ -347,6 +350,21 @@ describe('DesktopAuthManager account isolation', () => {
         body: { expectedUpdatedAt: null, manual: { faqs: [] } },
       },
       {
+        path: '/api/v1/workbench/people/me/work-availability',
+        method: 'GET' as const,
+      },
+      {
+        path: '/api/v1/workbench/people/me/work-availability',
+        method: 'PUT' as const,
+        body: {
+          expectedRevision: 0,
+          status: 'AVAILABLE',
+          startsAt: '2026-08-13T00:00:00.000Z',
+          endsAt: '2026-08-14T00:00:00.000Z',
+          disclosureScope: 'SELF_ONLY',
+        },
+      },
+      {
         path: '/api/v1/workbench/memories?limit=100&scope=EMPLOYEE_PRIVATE&purpose=assist',
         method: 'GET' as const,
       },
@@ -671,6 +689,68 @@ describe('DesktopAuthManager account isolation', () => {
       newAccessToken,
       newAccessToken,
     ]);
+  });
+
+  it('retries a transient realtime session failure without requiring a renderer reload', async () => {
+    vi.useFakeTimers();
+    const first = account(1);
+    const accessToken = `ea_access_${'a'.repeat(43)}`;
+    const store = {
+      load: vi.fn(async () => undefined),
+      get activeId() {
+        return first.sessionId;
+      },
+      get: vi.fn(() => ({ account: first, refreshToken: 'ea_refresh_previous' })),
+      list: vi.fn(() => [first]),
+      get persistentStorageAvailable() {
+        return true;
+      },
+    } as unknown as AccountStore;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: 'Realtime is starting.' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          available: false,
+          provider: 'local',
+          reason: 'REALTIME_NOT_CONFIGURED',
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const manager = new DesktopAuthManager(store, 'http://127.0.0.1:3000');
+    await manager.initialize();
+    const accessTokens = Reflect.get(manager, 'accessTokens') as Map<
+      string,
+      { token: string; expiresAt: number }
+    >;
+    accessTokens.set(first.sessionId, {
+      token: accessToken,
+      expiresAt: Date.now() + 60_000,
+    });
+    const emit = vi.fn();
+    const controller = new AbortController();
+
+    const running = manager.streamImRealtime(
+      { expectedSessionId: first.sessionId },
+      emit,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(running).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenCalledWith({
+      kind: 'state',
+      state: 'reconnecting',
+      error: 'Realtime messaging connection was interrupted.',
+    });
+    expect(emit).toHaveBeenLastCalledWith({ kind: 'state', state: 'unavailable' });
   });
 });
 

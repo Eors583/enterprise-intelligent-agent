@@ -7,6 +7,10 @@ const PPT = Buffer.concat([
   Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
   Buffer.from('enterprise legacy powerpoint fixture'),
 ]);
+const PPTX = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04]),
+  Buffer.from('enterprise open xml powerpoint fixture'),
+]);
 
 describe('TikaPowerPointParserAdapter', () => {
   it('extracts normalized text from a genuine OLE2 PowerPoint request', async () => {
@@ -65,6 +69,26 @@ describe('TikaPowerPointParserAdapter', () => {
       }),
     ).rejects.toEqual(new DocumentParsingError('INVALID_FILE_SIGNATURE'));
     expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it('supports an Open XML PowerPoint as the Docling recovery path', async () => {
+    const fetchImplementation = vi
+      .fn()
+      .mockResolvedValue(new Response('年度战略', { status: 200 }));
+    const parser = new TikaPowerPointParserAdapter({
+      baseUrl: 'http://127.0.0.1:9998',
+      fetchImplementation,
+    });
+    const mimeType = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+
+    const result = await parser.parse({ bytes: PPTX, mimeType });
+
+    expect(result.text).toBe('年度战略');
+    expect(result.metadata.mimeType).toBe(mimeType);
+    expect(fetchImplementation).toHaveBeenCalledWith(
+      new URL('http://127.0.0.1:9998/tika'),
+      expect.objectContaining({ headers: expect.objectContaining({ 'Content-Type': mimeType }) }),
+    );
   });
 
   it('maps unavailable and oversized parser responses to safe error codes', async () => {

@@ -10,12 +10,18 @@ describe('ImRealtimeSessionService', () => {
 
   it('returns an honest unavailable state for the local provider', async () => {
     const fetchMock = vi.fn();
+    const requireCurrent = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
-    const service = createService({ IM_PROVIDER: 'local' });
+    const service = createService({ IM_PROVIDER: 'local' }, requireCurrent);
     await expect(service.create()).resolves.toEqual({
       available: false,
       provider: 'local',
       reason: 'REALTIME_NOT_CONFIGURED',
+    });
+    expect(requireCurrent).toHaveBeenCalledWith({
+      action: 'conversation.realtime.connect',
+      resourceTenantId: TENANT_ID,
+      risk: 'MEDIUM',
     });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -71,7 +77,10 @@ describe('ImRealtimeSessionService', () => {
   });
 });
 
-function createService(configuration: Record<string, unknown>): ImRealtimeSessionService {
+function createService(
+  configuration: Record<string, unknown>,
+  requireCurrent = vi.fn(),
+): ImRealtimeSessionService {
   const defaults: Record<string, unknown> = {
     IM_PROVIDER: 'local',
     WUKONG_IM_API_BASE_URL: 'http://127.0.0.1:5501',
@@ -86,6 +95,6 @@ function createService(configuration: Record<string, unknown>): ImRealtimeSessio
         user: { id: USER_ID },
       }),
     } as never,
-    { requireCurrent: vi.fn() } as never,
+    { requireCurrent } as never,
   );
 }

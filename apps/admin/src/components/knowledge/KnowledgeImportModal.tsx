@@ -62,6 +62,7 @@ export interface KnowledgeImportResult {
   readonly knowledgeBase: KnowledgeBase;
   readonly uploadedCount: number;
   readonly failedCount: number;
+  readonly createdKnowledgeBase: boolean;
 }
 
 export function KnowledgeImportModal({
@@ -69,6 +70,7 @@ export function KnowledgeImportModal({
   currentUserName,
   organization,
   knowledgeBases = [],
+  targetKnowledgeBase,
   onClose,
   onImported,
 }: {
@@ -76,6 +78,7 @@ export function KnowledgeImportModal({
   currentUserName: string;
   organization?: AdminOrganizationResponse | null;
   knowledgeBases?: readonly KnowledgeBase[];
+  targetKnowledgeBase?: KnowledgeBase;
   onClose: () => void;
   onImported: (result: KnowledgeImportResult) => void;
 }): ReactNode {
@@ -114,7 +117,7 @@ export function KnowledgeImportModal({
     const accepted: ImportFile[] = [];
     const problems: string[] = [];
     for (const file of candidates.slice(0, available)) {
-      const problem = fileProblem(file);
+      const problem = fileProblem(file, targetKnowledgeBase?.storageProvider === 'LEXIANG');
       if (problem !== null) {
         problems.push(`${file.name}：${problem}`);
         continue;
@@ -161,15 +164,17 @@ export function KnowledgeImportModal({
       setError('请先选择需要导入的文件。');
       return;
     }
-    const spaceError = knowledgeSpaceDraftError(space);
-    if (spaceError !== null) {
-      setError(spaceError);
-      return;
-    }
-    const accessError = knowledgeAccessError(accessMode, orgUnitScopes, memberUserIds);
-    if (accessError !== null) {
-      setError(accessError);
-      return;
+    if (targetKnowledgeBase === undefined) {
+      const spaceError = knowledgeSpaceDraftError(space);
+      if (spaceError !== null) {
+        setError(spaceError);
+        return;
+      }
+      const accessError = knowledgeAccessError(accessMode, orgUnitScopes, memberUserIds);
+      if (accessError !== null) {
+        setError(accessError);
+        return;
+      }
     }
 
     setImporting(true);
@@ -178,22 +183,24 @@ export function KnowledgeImportModal({
       current.map((item) => ({ ...item, status: 'QUEUED' as const, error: null })),
     );
 
-    let knowledgeBase: KnowledgeBase;
-    try {
-      knowledgeBase = await createKnowledgeBase({
-        key: createRandomKnowledgeBaseKey(),
-        name: knowledgeBaseNameFromFile(files[0]!.file.name),
-        description: null,
-        status: 'DRAFT',
-        space: knowledgeSpaceSelectionFromDraft(space),
-        orgUnitIds: [],
-        orgUnitScopes,
-        memberUserIds,
-      });
-    } catch (caught) {
-      setError(messageFromError(caught));
-      setImporting(false);
-      return;
+    let knowledgeBase = targetKnowledgeBase;
+    if (knowledgeBase === undefined) {
+      try {
+        knowledgeBase = await createKnowledgeBase({
+          key: createRandomKnowledgeBaseKey(),
+          name: knowledgeBaseNameFromFile(files[0]!.file.name),
+          description: null,
+          status: 'DRAFT',
+          space: knowledgeSpaceSelectionFromDraft(space),
+          orgUnitIds: [],
+          orgUnitScopes,
+          memberUserIds,
+        });
+      } catch (caught) {
+        setError(messageFromError(caught));
+        setImporting(false);
+        return;
+      }
     }
 
     let succeeded = 0;
@@ -220,37 +227,50 @@ export function KnowledgeImportModal({
       knowledgeBase,
       uploadedCount: succeeded,
       failedCount: failed,
+      createdKnowledgeBase: targetKnowledgeBase === undefined,
     });
   };
 
   return (
     <Modal
-      title="选择存放位置并导入知识"
-      description="归属账号自动使用当前登录账号。这里只选择资料存放在公司、部门、项目还是成员知识中。"
+      title={
+        targetKnowledgeBase === undefined
+          ? '选择存放位置并导入知识'
+          : `向“${targetKnowledgeBase.name}”上传文件`
+      }
+      description={
+        targetKnowledgeBase === undefined
+          ? '归属账号自动使用当前登录账号。这里只选择资料存放在公司、部门、项目还是成员知识中。'
+          : '文件只会写入当前知识库，不会创建新的知识库。需要保留目录层级时，请使用文档管理区的“导入文件夹”。'
+      }
       onClose={onClose}
       size="wide"
       dismissible={!importing}
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
-        <KnowledgeSpacePicker
-          currentUserId={currentUserId}
-          currentUserName={currentUserName}
-          organization={organization}
-          knowledgeBases={knowledgeBases}
-          value={space}
-          disabled={importing}
-          onChange={setSpace}
-        />
-        <KnowledgeAccessPicker
-          organization={organization ?? null}
-          mode={accessMode}
-          orgUnitScopes={orgUnitScopes}
-          memberUserIds={memberUserIds}
-          disabled={importing || organization === undefined || organization === null}
-          onModeChange={setAccessMode}
-          onOrgUnitScopesChange={setOrgUnitScopes}
-          onMemberUserIdsChange={setMemberUserIds}
-        />
+        {targetKnowledgeBase === undefined ? (
+          <>
+            <KnowledgeSpacePicker
+              currentUserId={currentUserId}
+              currentUserName={currentUserName}
+              organization={organization}
+              knowledgeBases={knowledgeBases}
+              value={space}
+              disabled={importing}
+              onChange={setSpace}
+            />
+            <KnowledgeAccessPicker
+              organization={organization ?? null}
+              mode={accessMode}
+              orgUnitScopes={orgUnitScopes}
+              memberUserIds={memberUserIds}
+              disabled={importing || organization === undefined || organization === null}
+              onModeChange={setAccessMode}
+              onOrgUnitScopesChange={setOrgUnitScopes}
+              onMemberUserIdsChange={setMemberUserIds}
+            />
+          </>
+        ) : null}
         <input
           ref={inputRef}
           className="visually-hidden"
@@ -290,7 +310,11 @@ export function KnowledgeImportModal({
             ↑
           </span>
           <strong>拖放多个文件到这里，或点击选择</strong>
-          <small>支持 PDF、DOCX、XLSX、PPT、PPTX、常见图片、TXT、MD；最多 20 个</small>
+          <small>
+            {targetKnowledgeBase?.storageProvider === 'LEXIANG'
+              ? '乐享支持 PDF、DOCX、XLSX、PPT、PPTX、常见图片和 TXT；最多 20 个'
+              : '支持 PDF、DOCX、XLSX、PPT、PPTX、常见图片、TXT、MD；最多 20 个'}
+          </small>
         </div>
 
         {files.length > 0 ? (
@@ -355,7 +379,9 @@ export function KnowledgeImportModal({
         ) : null}
         <FieldError message={error} />
         <p className="form-hint">
-          知识库将以草稿状态创建。本批文件共享上面选择的访问范围；后续添加到该知识库的文件会继承同一范围。
+          {targetKnowledgeBase === undefined
+            ? '知识库将以草稿状态创建。本批文件共享上面选择的访问范围；后续添加到该知识库的文件会继承同一范围。'
+            : `文件将写入现有知识库“${targetKnowledgeBase.name}”，并继承该库当前的访问范围。`}
         </p>
         <div className="modal-actions">
           <button className="button secondary" type="button" onClick={onClose} disabled={importing}>
@@ -368,8 +394,10 @@ export function KnowledgeImportModal({
           >
             {importing ? (
               <Spinner label="正在批量导入…" />
-            ) : (
+            ) : targetKnowledgeBase === undefined ? (
               `创建草稿并导入 ${files.length} 个文件`
+            ) : (
+              `上传到当前库（${files.length} 个文件）`
             )}
           </button>
         </div>
@@ -378,12 +406,15 @@ export function KnowledgeImportModal({
   );
 }
 
-function fileProblem(file: File): string | null {
+function fileProblem(file: File, managedByLexiang: boolean): string | null {
   if (file.name.trim().length === 0 || file.name.length > 300) {
     return '文件名长度必须在 1 到 300 个字符之间';
   }
   if (!ALLOWED_EXTENSIONS.has(extensionOf(file.name))) {
     return '仅支持 PDF、DOCX、XLSX、PPT、PPTX、常见图片、TXT 和 Markdown 文件';
+  }
+  if (managedByLexiang && ['md', 'tif'].includes(extensionOf(file.name))) {
+    return '腾讯乐享不支持该文件格式';
   }
   if (file.size === 0) return '文件内容为空';
   return null;

@@ -1956,7 +1956,7 @@ textarea:focus-visible {
 .tree-member-row {
   --tree-depth: 0;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) 27px;
+  grid-template-columns: minmax(0, 1fr) 27px;
   gap: 8px;
   align-items: center;
   width: 100%;
@@ -1967,6 +1967,19 @@ textarea:focus-visible {
   background: transparent;
   border: 0;
   border-radius: 8px;
+}
+
+.tree-member-main {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 0;
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
   cursor: pointer;
 }
 
@@ -2009,6 +2022,7 @@ textarea:focus-visible {
   font-weight: 820;
   letter-spacing: 0.2px;
   background: linear-gradient(145deg, #7769e5, #3971eb);
+  border: 0;
   border-radius: 50%;
   box-shadow: 0 4px 9px rgb(71 70 186 / 15%);
 }
@@ -2024,14 +2038,14 @@ textarea:focus-visible {
   cursor: not-allowed;
 }
 
-.tree-member-ai[data-agent-action='true'] {
+.tree-member-ai:not(:disabled) {
   cursor: pointer;
   transition:
     transform 140ms ease,
     box-shadow 140ms ease;
 }
 
-.tree-member-ai[data-agent-action='true']:hover {
+.tree-member-ai:not(:disabled):hover {
   transform: scale(1.08);
   box-shadow: 0 5px 13px rgb(71 70 186 / 28%);
 }
@@ -2834,13 +2848,12 @@ textarea:focus-visible {
   font-size: 8px;
 }
 
-.message-entry-body > p {
+.message-entry-body > .message-rich-text {
   margin: 0;
   padding: 10px 13px;
   color: #354155;
   font-size: 12px;
   line-height: 1.65;
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: white;
   border: 1px solid #e1e6ed;
@@ -2848,26 +2861,153 @@ textarea:focus-visible {
   box-shadow: 0 3px 10px rgb(36 53 80 / 4%);
 }
 
-.message-entry.mine .message-entry-body > p {
+.message-entry.mine .message-entry-body > .message-rich-text {
   color: white;
   background: linear-gradient(145deg, #4777ed, #3565df);
   border-color: #3561d5;
   border-radius: 13px 4px 13px 13px;
 }
 
-.message-entry.from-agent .message-entry-body > p {
+.message-entry.from-agent .message-entry-body > .message-rich-text {
   background: #fbfaff;
   border-color: #ded9f5;
+}
+
+.message-rich-text {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.message-rich-text > :first-child {
+  margin-top: 0;
+}
+
+.message-rich-text > :last-child {
+  margin-bottom: 0;
+}
+
+.message-rich-text p,
+.message-rich-text ul,
+.message-rich-text ol,
+.message-rich-text blockquote,
+.message-rich-text pre,
+.message-rich-text-table-scroll {
+  margin: 0.6em 0;
+}
+
+.message-rich-text p {
+  white-space: pre-wrap;
+}
+
+.message-rich-text ul,
+.message-rich-text ol {
+  padding-inline-start: 1.6em;
+}
+
+.message-rich-text li + li {
+  margin-top: 0.25em;
+}
+
+.message-rich-text strong {
+  font-weight: 780;
+}
+
+.message-rich-text h1,
+.message-rich-text h2,
+.message-rich-text h3,
+.message-rich-text h4 {
+  margin: 0.8em 0 0.4em;
+  color: inherit;
+  line-height: 1.4;
+}
+
+.message-rich-text h1,
+.message-rich-text h2 {
+  font-size: 1.18em;
+}
+
+.message-rich-text h3,
+.message-rich-text h4 {
+  font-size: 1.08em;
+}
+
+.message-rich-text blockquote {
+  padding-inline-start: 0.8em;
+  color: inherit;
+  border-inline-start: 0.22em solid color-mix(in srgb, currentcolor 35%, transparent);
+  opacity: 0.88;
+}
+
+.message-rich-text code,
+.message-rich-text pre {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  background: color-mix(in srgb, currentcolor 9%, transparent);
+  border-radius: 0.3em;
+}
+
+.message-rich-text code {
+  padding: 0.08em 0.3em;
+  word-break: break-all;
+}
+
+.message-rich-text pre {
+  max-width: 100%;
+  padding: 0.75em;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.message-rich-text pre code {
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+}
+
+.message-rich-text a {
+  color: inherit;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+}
+
+.message-rich-text-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.message-rich-text table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+}
+
+.message-rich-text th,
+.message-rich-text td {
+  padding: 0.4em 0.6em;
+  text-align: start;
+  border: 1px solid color-mix(in srgb, currentcolor 22%, transparent);
+}
+
+.message-rich-text-image-placeholder {
+  display: inline-block;
+  max-width: 100%;
+  font-style: italic;
+  opacity: 0.78;
 }
 
 .sending-indicator {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
   gap: 7px;
   margin: 3px 0 10px;
   color: #718096;
   font-size: 9px;
+  overflow-wrap: anywhere;
 }
 
 .sending-indicator span,
@@ -3529,7 +3669,7 @@ textarea:focus-visible {
   margin-bottom: 32px;
 }
 
-.message-entry-body > p {
+.message-entry-body > .message-rich-text {
   padding: 10px 14px;
   color: #293140;
   background: #fff;
@@ -3538,7 +3678,7 @@ textarea:focus-visible {
   box-shadow: 0 2px 6px rgb(33 44 64 / 5%);
 }
 
-.message-entry.mine .message-entry-body > p {
+.message-entry.mine .message-entry-body > .message-rich-text {
   background: #496cff;
   border: 0;
   border-radius: 16px 6px 16px 16px;
@@ -3555,7 +3695,8 @@ textarea:focus-visible {
 
 .message-composer textarea {
   min-height: 60px;
-  padding: 0;
+  box-sizing: border-box;
+  padding: 10px 12px;
   background: #fff;
   border: 0;
   border-radius: 0;
@@ -4095,13 +4236,13 @@ body {
     radial-gradient(circle at 85% 0%, rgb(119 103 250 / 6%), transparent 30%), var(--figma-canvas);
 }
 
-.message-entry-body > p {
+.message-entry-body > .message-rich-text {
   border-color: var(--figma-line);
   border-radius: 6px 15px 15px;
   box-shadow: 0 5px 18px rgb(50 42 95 / 5%);
 }
 
-.message-entry.mine .message-entry-body > p {
+.message-entry.mine .message-entry-body > .message-rich-text {
   background: linear-gradient(145deg, #7969f8, #6152e8);
   border-color: transparent;
   border-radius: 15px 6px 15px 15px;
@@ -4241,8 +4382,12 @@ body {
 .agent-run-status-detail,
 .agent-run-failure,
 .message-citations {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 100%;
   border-radius: 12px;
   padding: 10px 12px;
+  overflow-wrap: anywhere;
 }
 
 .agent-run-status-detail {
@@ -4265,10 +4410,6 @@ body {
 .agent-run-stream-state[data-stream-state='offline'] {
   color: #8a5a14;
   background: #fff1cf;
-}
-
-.agent-run-streaming .message-entry-body > p {
-  white-space: pre-wrap;
 }
 
 .agent-run-streaming[data-stream-state='live'] .message-entry-body {

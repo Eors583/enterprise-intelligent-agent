@@ -6,6 +6,8 @@ import { ApiClientError } from '../../shared/api/client';
 import {
   AgentRunFailureNotice,
   AgentRunStreamingBubble,
+  agentRunQueueMessage,
+  agentRunStatusLabel,
   agentRunStreamPhaseLabel,
   agentRunWaitingMessage,
   answerFeedbackUnavailable,
@@ -15,7 +17,12 @@ import {
   conversationHasAgentPair,
   conversationHasSharedMemberAgent,
   conversationTitle,
+  findAwaitingAgentRun,
+  findBlockingUnknownAgentRun,
+  findLatestAgentRunForMessage,
   MessageCitationCard,
+  MessageRichText,
+  normalizeMessageMarkdown,
 } from './MessagingWorkspace';
 
 const currentUserId = '00000000-0000-7000-8000-000000000100';
@@ -87,6 +94,12 @@ describe('Agent Run streaming labels', () => {
     expect(agentRunStreamPhaseLabel('terminal_only')).toBe('供应商仅返回终态');
   });
 
+  it('uses user-facing progress labels instead of internal queue states', () => {
+    expect(agentRunStatusLabel('QUEUED')).toBe('正在准备');
+    expect(agentRunStatusLabel('DISPATCHING')).toBe('正在连接');
+    expect(agentRunStatusLabel('RUNNING')).toBe('正在回答');
+  });
+
   it('shows an honest wait state before a terminal-only provider completes', () => {
     expect(agentRunWaitingMessage({ streamMode: 'terminal_only' })).toContain('等待供应商终态');
     expect(agentRunWaitingMessage({ streamMode: 'terminal_only' })).toContain('不提供增量输出');
@@ -94,19 +107,176 @@ describe('Agent Run streaming labels', () => {
     expect(agentRunWaitingMessage({ streamMode: null })).not.toContain('供应商终态');
   });
 
+  it('describes preparation without exposing internal queue terminology', () => {
+    expect(agentRunQueueMessage({ status: 'QUEUED', streamMode: null }, false, true)).toContain(
+      '正在恢复上一条请求',
+    );
+    expect(agentRunQueueMessage({ status: 'QUEUED', streamMode: null }, false, true)).toContain(
+      '自动开始',
+    );
+    expect(agentRunQueueMessage({ status: 'QUEUED', streamMode: null }, true, false)).toBe(
+      '问题已接收，正在准备回答。',
+    );
+  });
+
   it('renders partial content with an explicit reconnect state instead of a fake final message', () => {
     const html = renderToStaticMarkup(
       createElement(AgentRunStreamingBubble, {
         agentName: 'Finance Agent',
-        content: 'Partial trusted answer',
+        content: 'Partial **trusted** answer',
         phase: 'offline',
       }),
     );
 
     expect(html).toContain('data-stream-state="offline"');
     expect(html).toContain('连接中断，正在续传');
-    expect(html).toContain('Partial trusted answer');
+    expect(html).toContain('Partial <strong>trusted</strong> answer');
+    expect(html).not.toContain('**trusted**');
     expect(html).not.toContain('供应商仅返回终态');
+  });
+
+  it('does not present an UNKNOWN result as a Run that is still generating', () => {
+    const unknownRun = {
+      id: '00000000-0000-7000-8000-000000000811',
+      inputMessageId: '00000000-0000-7000-8000-000000000812',
+      outputMessageId: null,
+      agentId: '00000000-0000-7000-8000-000000000813',
+      agentName: '制度助手',
+      streamMode: 'terminal_only' as const,
+      status: 'UNKNOWN' as const,
+      errorCode: 'AI_RUNTIME_INVALID_RESPONSE',
+      errorMessage: 'AI Runtime execution outcome is unknown.',
+      retryable: false,
+      supersededByRunId: null,
+      createdAt: '2026-08-19T08:10:58.000Z',
+      startedAt: '2026-08-19T08:10:58.000Z',
+      finishedAt: '2026-08-19T08:10:58.000Z',
+    };
+
+    expect(findAwaitingAgentRun([unknownRun])).toBeUndefined();
+    expect(findBlockingUnknownAgentRun([unknownRun])).toEqual(unknownRun);
+    const queuedRun = {
+      ...unknownRun,
+      id: '00000000-0000-7000-8000-000000000814',
+      inputMessageId: '00000000-0000-7000-8000-000000000815',
+      status: 'QUEUED' as const,
+      startedAt: null,
+      finishedAt: null,
+    };
+    const supersededUnknownRun = {
+      ...unknownRun,
+      supersededByRunId: queuedRun.id,
+    };
+
+    expect(findAwaitingAgentRun([supersededUnknownRun, queuedRun])).toEqual(queuedRun);
+    expect(findBlockingUnknownAgentRun([supersededUnknownRun, queuedRun])).toBeUndefined();
+    expect(
+      findAwaitingAgentRun([{ ...unknownRun, status: 'RUNNING', finishedAt: null }]),
+    ).toMatchObject({ status: 'RUNNING' });
+  });
+
+  it('tracks the executing Run first and keeps retries attached to their own input message', () => {
+    const queuedFirst = {
+      id: '00000000-0000-7000-8000-000000000821',
+      inputMessageId: '00000000-0000-7000-8000-000000000831',
+      outputMessageId: null,
+      agentId: '00000000-0000-7000-8000-000000000841',
+      agentName: '制度助手',
+      streamMode: null,
+      status: 'QUEUED' as const,
+      errorCode: null,
+      errorMessage: null,
+      retryable: false,
+      createdAt: '2026-08-20T08:00:00.000Z',
+      startedAt: null,
+      finishedAt: null,
+    };
+    const queuedSecond = {
+      ...queuedFirst,
+      id: '00000000-0000-7000-8000-000000000822',
+      inputMessageId: '00000000-0000-7000-8000-000000000832',
+      createdAt: '2026-08-20T08:00:01.000Z',
+    };
+    const runningSecond = {
+      ...queuedSecond,
+      id: '00000000-0000-7000-8000-000000000823',
+      status: 'RUNNING' as const,
+      startedAt: '2026-08-20T08:00:02.000Z',
+    };
+
+    expect(findAwaitingAgentRun([queuedFirst, queuedSecond])).toEqual(queuedFirst);
+    expect(findAwaitingAgentRun([queuedFirst, queuedSecond, runningSecond])).toEqual(runningSecond);
+    expect(
+      findLatestAgentRunForMessage(
+        [queuedFirst, queuedSecond, runningSecond],
+        queuedSecond.inputMessageId,
+      ),
+    ).toEqual(runningSecond);
+    expect(
+      findLatestAgentRunForMessage(
+        [queuedFirst, queuedSecond, runningSecond],
+        queuedFirst.inputMessageId,
+      ),
+    ).toEqual(queuedFirst);
+  });
+});
+
+describe('MessageRichText', () => {
+  it('把 Markdown 语义渲染为富文本，不向用户展示格式符号', () => {
+    const html = renderToStaticMarkup(
+      createElement(MessageRichText, {
+        content:
+          '**一句话：核心结论。**它需要被突出，*补充说明*也要保留。\n\n- 第一项\n- 第二项\n\n~~旧结论~~',
+      }),
+    );
+
+    expect(html).toContain('<strong>一句话：核心结论。</strong>');
+    expect(html).toContain('<em>补充说明</em>');
+    expect(html).toContain('<ul>');
+    expect(html).toContain('<del>旧结论</del>');
+    expect(html).not.toContain('**一句话：核心结论。**');
+  });
+
+  it('把单独占行的编号和多余空行收拢为紧凑的有序列表', () => {
+    const content =
+      '华为销售管理的核心，是全过程管理。\n\n\n1.\n\n**设置专门的销售管理部门。** 负责销售目标全过程管理。[来源1]\n\n\n2、\n\n**实行准直销渠道模式。** 由代理商协同投标和履约。[来源2]';
+    const normalized = normalizeMessageMarkdown(content);
+    const html = renderToStaticMarkup(createElement(MessageRichText, { content }));
+
+    expect(normalized).toContain('1. **设置专门的销售管理部门。**');
+    expect(normalized).toContain('2. **实行准直销渠道模式。**');
+    expect(normalized).not.toMatch(/\n{3,}/);
+    expect(html).toContain('<ol>');
+    expect(html.match(/<li>/g)).toHaveLength(2);
+    expect(html).not.toContain('<p>1.</p>');
+    expect(html).not.toContain('<p>2、</p>');
+  });
+
+  it('表格拥有独立横向滚动容器，远程图片只显示说明而不加载资源', () => {
+    const html = renderToStaticMarkup(
+      createElement(MessageRichText, {
+        content:
+          '| 项目 | 状态 |\n| --- | --- |\n| 企业知识库中的超长项目名称 | 已完成 |\n\n![流程图](https://example.com/tracking.png)',
+      }),
+    );
+
+    expect(html).toContain('message-rich-text-table-scroll');
+    expect(html).toContain('<table>');
+    expect(html).toContain('图片：流程图');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('tracking.png');
+  });
+
+  it('不把回答中夹带的原始 HTML 当成可执行标签', () => {
+    const html = renderToStaticMarkup(
+      createElement(MessageRichText, {
+        content: '**安全内容**<script>alert("xss")</script>',
+      }),
+    );
+
+    expect(html).toContain('<strong>安全内容</strong>');
+    expect(html).not.toContain('<script');
+    expect(html).toContain('alert(&quot;xss&quot;)');
   });
 });
 
@@ -313,7 +483,46 @@ describe('Agent Run failure presentation', () => {
     expect(html).not.toContain('<button');
   });
 
-  it('does not offer retry when the remote Run result is still unknown', () => {
+  it('把输入预算失败解释为上下文过长，而不是供应商仍在生成', () => {
+    expect(agentRunFailureMessage('INPUT_TOKEN_BUDGET_PREFLIGHT_EXCEEDED')).toContain(
+      '会话和知识上下文过长',
+    );
+    expect(agentRunFailureMessage('UNSUPPORTED_RUNTIME_INPUT')).toContain('模型输入超出');
+  });
+
+  it('引用校验失败时不展示无意义兜底回答，并允许重新生成', () => {
+    const message = agentRunFailureMessage('KNOWLEDGE_GROUNDING_VALIDATION_FAILED');
+
+    expect(message).toContain('未作为正式回答保存');
+    expect(message).toContain('重新生成');
+  });
+
+  it('乐享等待和重试仍失败时展示明确错误，而不是声称没有资料', () => {
+    const message = agentRunFailureMessage('LEXIANG_SEARCH_UNAVAILABLE');
+
+    expect(message).toContain('腾讯乐享知识检索');
+    expect(message).toContain('等待和自动重试后仍未完成');
+    expect(message).not.toContain('没有找到');
+  });
+
+  it('Manus 创建任务被拒绝时明确指出已经越过乐享检索阶段', () => {
+    const message = agentRunFailureMessage('MANUS_TASK_CREATE_INVALID_ARGUMENT', false);
+
+    expect(message).toContain('出错步骤：Manus 模型任务创建');
+    expect(message).toContain('企业知识检索已完成');
+    expect(message).not.toContain('腾讯乐享知识检索失败');
+  });
+
+  it('模型执行和回答来源校验使用不同的失败步骤', () => {
+    expect(agentRunFailureMessage('PROVIDER_TASK_FAILED')).toContain(
+      '出错步骤：Manus 模型任务执行',
+    );
+    expect(agentRunFailureMessage('KNOWLEDGE_GROUNDING_VALIDATION_FAILED')).toContain(
+      '出错步骤：回答来源校验',
+    );
+  });
+
+  it('offers an explicit local escape hatch instead of pretending UNKNOWN is still generating', () => {
     const html = renderToStaticMarkup(
       createElement(AgentRunFailureNotice, {
         run: {
@@ -325,14 +534,19 @@ describe('Agent Run failure presentation', () => {
         isRetrying: false,
         retryError: new ApiClientError('http', '不应展示的旧重试错误。'),
         onRetry: () => undefined,
+        isAbandoning: false,
+        abandonError: null,
+        onAbandon: () => undefined,
       }),
     );
 
     expect(html).toContain('回复状态待确认');
-    expect(html).toContain('请稍后刷新消息或联系管理员，避免重复执行');
-    expect(html).not.toContain('重新生成');
+    expect(html).toContain('不会自动重复调用供应商');
+    expect(html).toContain('远端任务仍可能完成并产生费用');
+    expect(html).toContain('结束本次等待');
+    expect(html).not.toContain('>重新生成</button>');
     expect(html).not.toContain('不应展示的旧重试错误');
-    expect(html).not.toContain('<button');
+    expect(html).toContain('<button');
   });
 
   it('shows the retry API error and request ID while allowing another attempt', () => {

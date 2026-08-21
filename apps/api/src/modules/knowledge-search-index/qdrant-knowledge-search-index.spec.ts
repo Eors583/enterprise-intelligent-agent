@@ -119,6 +119,47 @@ describe('QdrantKnowledgeSearchIndex', () => {
     const upserts = requests.filter((request) => request.url.includes('/points?wait=true'));
     expect(upserts.map((request) => request.body.points?.length)).toEqual([128, 1]);
   });
+
+  it('normalizes hybrid RRF scores to the common retrieval score range', async () => {
+    const fetchImplementation = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      if ((init?.method ?? 'GET') === 'GET') {
+        return response({
+          status: 'ok',
+          result: { config: { params: { vectors: { dense: { size: 1 } } } } },
+        });
+      }
+      if (input.toString().endsWith('/points/query')) {
+        return response({
+          status: 'ok',
+          result: { points: [{ id: 'chunk-a', score: 1 / 61 }] },
+        });
+      }
+      return response({ status: 'ok', result: {} });
+    });
+    const index = new QdrantKnowledgeSearchIndex({
+      baseUrl: 'http://127.0.0.1:6333',
+      collection: 'knowledge',
+      dimensions: 1,
+      timeoutMs: 1_000,
+      fetchImplementation: fetchImplementation as typeof fetch,
+    });
+
+    const hits = await index.query({
+      profile: {
+        indexVersionId: '00000000-0000-7000-8000-000000000010',
+        collectionName: 'knowledge',
+        dimensions: 1,
+        distance: 'COSINE',
+      },
+      tenantId: '00000000-0000-7000-8000-000000000001',
+      knowledgeBaseIds: ['00000000-0000-7000-8000-000000000003'],
+      query: 'travel policy',
+      vector: [0.1],
+      limit: 8,
+    });
+
+    expect(hits).toEqual([{ chunkId: 'chunk-a', score: 0.5 }]);
+  });
 });
 
 function response(body: unknown, status = 200): Response {

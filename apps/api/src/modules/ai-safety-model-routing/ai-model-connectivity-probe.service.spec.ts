@@ -73,6 +73,22 @@ describe('AiModelConnectivityProbeService', () => {
     expect(result.status).toBe('UNKNOWN');
     expect(harness.participantsUpdate).not.toHaveBeenCalled();
   });
+
+  it('fails preparation errors without leaving a false ambiguous provider result', async () => {
+    const harness = createHarness();
+    harness.runs.prepare.mockRejectedValueOnce(new Error('retrieval unavailable'));
+
+    const result = await harness.service.run({ idempotencyKey: 'probe-preparation-failed' });
+
+    expect(harness.runs.completeFailed).toHaveBeenCalledWith(
+      TENANT_ID,
+      RUN_ID,
+      'CONNECTIVITY_PROBE_PREPARATION_FAILED',
+      expect.stringContaining('could not prepare'),
+    );
+    expect(harness.runs.completeUnknown).not.toHaveBeenCalled();
+    expect(result.status).toBe('FAILED');
+  });
 });
 
 function createHarness(options?: {

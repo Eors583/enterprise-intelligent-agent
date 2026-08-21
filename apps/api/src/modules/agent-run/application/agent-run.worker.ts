@@ -10,15 +10,15 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 
 import type { EnvironmentVariables } from '../../../config/environment.js';
-import { AgentOperationalReadinessService } from '../../ai-safety-model-routing/agent-operational-readiness.service.js';
 import { AgentRunQueueRepository } from '../domain/agent-run-queue.repository.js';
 import {
   AGENT_RUN_CANCEL_REQUESTED_EVENT_TYPE,
   ROLE_ASSIGNMENT_REVOKED_AGENT_RUN_ERROR_CODE,
+  isAgentRunReconciliationEvent,
   parseAgentRunCancelRequestedEvent,
   parseAgentRunRequestedEvent,
+  type AgentRunEvidenceSource,
   type AgentRunPreparation,
-  type AgentRunKnowledgeSource,
   type AgentRunUsage,
   type ClaimedAgentRunEvent,
   type PreparedAgentRun,
@@ -40,6 +40,7 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
   private readonly pollIntervalMs: number;
   private readonly claimTtlMs: number;
   private readonly reconciliationWindowMs: number;
+  private readonly unknownReconciliationDelayMs: number;
   private readonly workerId = `agent-run:${process.pid}:${randomUUID()}`;
   private readonly cancellationWorkerId = `${this.workerId}:cancel`;
   private readonly activeControllers = new Set<AbortController>();
@@ -49,6 +50,7 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
   private cancellationTimer: NodeJS.Timeout | undefined;
   private activeTick: Promise<void> | undefined;
   private activeCancellationTick: Promise<void> | undefined;
+  private wakeRequested = false;
 
   constructor(
     @Inject(ConfigService) config: ConfigService<EnvironmentVariables, true>,
@@ -56,8 +58,6 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
     private readonly queue: AgentRunQueueRepository,
     @Inject(AgentRunRepository) private readonly runs: AgentRunRepository,
     @Inject(AgentRuntimeClient) private readonly runtime: AgentRuntimeClient,
-    @Inject(AgentOperationalReadinessService)
-    private readonly operationalReadiness: AgentOperationalReadinessService,
     @Optional()
     @Inject(AgentRunStreamRepository)
     private readonly streamEvents?: AgentRunStreamRepository,
@@ -66,6 +66,9 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
     this.concurrency = config.get('AGENT_RUN_WORKER_CONCURRENCY', { infer: true });
     this.pollIntervalMs = config.get('AGENT_RUN_POLL_INTERVAL_MS', { infer: true });
     this.claimTtlMs = config.get('AGENT_RUN_CLAIM_TTL_MS', { infer: true });
+    this.unknownReconciliationDelayMs = config.get('AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS', {
+      infer: true,
+    });
     this.reconciliationWindowMs = Math.min(60_000, Math.max(1_000, this.claimTtlMs - 5_000));
   }
 
@@ -150,13 +153,32 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
     return events.length;
   }
 
+  /**
+   * Starts a new claim pass as soon as the message/outbox transaction commits.
+   * The periodic poll remains the cross-process and crash-recovery fallback.
+   */
+  notifyWorkAvailable(): void {
+    if (this.stopped) return;
+    this.wakeRequested = true;
+    if (this.activeTick !== undefined) return;
+    if (this.timer !== undefined) clearTimeout(this.timer);
+    this.timer = undefined;
+    this.wakeRequested = false;
+    this.schedule(0);
+  }
+
   private schedule(delayMs: number): void {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
+      this.timer = undefined;
       const tick = this.tick();
       this.activeTick = tick;
       void tick.finally(() => {
-        if (this.activeTick === tick) this.activeTick = undefined;
+        if (this.activeTick !== tick) return;
+        this.activeTick = undefined;
+        const nextDelay = this.wakeRequested ? 0 : this.pollIntervalMs;
+        this.wakeRequested = false;
+        this.schedule(nextDelay);
       });
     }, delayMs);
     this.timer.unref();
@@ -179,8 +201,6 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
       await this.runAvailableOnce();
     } catch (error) {
       this.logger.error(`Agent Run polling failed (${errorKind(error)}).`);
-    } finally {
-      this.schedule(this.pollIntervalMs);
     }
   }
 
@@ -213,8 +233,10 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
     }
 
     let runId: string;
+    let reconciliation: boolean;
     try {
       runId = parseAgentRunRequestedEvent(event);
+      reconciliation = isAgentRunReconciliationEvent(event);
     } catch {
       await this.runs.completeFailed(
         event.tenantId,
@@ -226,7 +248,13 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
       return;
     }
 
-    const preparation = await this.runs.prepare(event.tenantId, runId);
+    const preparation = reconciliation
+      ? await this.runs.prepareReconciliation(event.tenantId, runId)
+      : await this.runs.prepare(event.tenantId, runId);
+    if (preparation.kind === 'redundant') {
+      await this.transitionPublished(event, preparation.externalRunId);
+      return;
+    }
     if (preparation.kind === 'deferred') {
       await this.transitionDeferred(event, preparation.reasonCode, preparation.availableAt);
       return;
@@ -241,27 +269,13 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
       return;
     }
 
-    if (preparation.run.controlledModelConnectivityProbe !== true) {
-      const availability = await this.operationalReadiness.inspectAgents(event.tenantId, [
-        preparation.run.agentId,
-      ]);
-      if (availability.get(preparation.run.agentId)?.status !== 'AVAILABLE') {
-        await this.runs.completeFailed(
-          event.tenantId,
-          runId,
-          'AGENT_OPERATIONAL_NOT_READY',
-          'Verified model availability is not ready for this Agent Run.',
-        );
-        await this.transitionFailed(event, 'AGENT_OPERATIONAL_NOT_READY');
-        return;
-      }
-    }
-
     const controller = new AbortController();
     this.activeControllers.add(controller);
+    const heartbeat = this.startLeaseHeartbeat(event, this.workerId, controller);
     try {
       await this.executePrepared(event, preparation.run, controller.signal);
     } finally {
+      await heartbeat.stop();
       this.activeControllers.delete(controller);
     }
   }
@@ -456,6 +470,13 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
       await this.transitionFailed(event, error.code);
       return;
     }
+    // Runtime create is idempotent on the durable Agent Run id. A transport
+    // failure before attachment can therefore retry the same create safely
+    // instead of freezing the conversation in an unreconcilable UNKNOWN.
+    if (externalRunId === null) {
+      await this.transitionDeferred(event, error.code);
+      return;
+    }
     // A known external id is safe to reconcile without ever creating another
     // provider task. Transient transport failures and shutdown aborts therefore
     // retain RUNNING + PENDING. A non-recoverable ambiguity such as Runtime 404
@@ -464,7 +485,14 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
       await this.transitionDeferred(event, error.code);
       return;
     }
-    await this.runs.completeUnknown(event.tenantId, runId, safeCode(error.code));
+    await this.runs.completeUnknown(
+      event.tenantId,
+      runId,
+      safeCode(error.code),
+      undefined,
+      'terminal_only',
+      externalRunId === null ? undefined : new Date(Date.now() + this.unknownReconciliationDelayMs),
+    );
     await this.transitionUnknown(event, error.code);
   }
 
@@ -627,6 +655,50 @@ export class AgentRunWorker implements OnApplicationBootstrap, OnApplicationShut
   private logLostLease(eventId: string): void {
     this.logger.warn(`Ignored stale Agent Run transition for event ${eventId}; its lease changed.`);
   }
+
+  private startLeaseHeartbeat(
+    event: ClaimedAgentRunEvent,
+    workerId: string,
+    controller: AbortController,
+  ): { readonly stop: () => Promise<void> } {
+    const intervalMs = Math.max(1_000, Math.floor(this.claimTtlMs / 3));
+    let stopped = false;
+    let timer: NodeJS.Timeout | undefined;
+    let renewal: Promise<void> = Promise.resolve();
+
+    const schedule = (): void => {
+      if (stopped || controller.signal.aborted) return;
+      timer = setTimeout(() => {
+        renewal = renewal
+          .then(async () => {
+            if (stopped || controller.signal.aborted) return;
+            const renewed = await this.queue.renewLease({
+              eventId: event.id,
+              workerId,
+              claimTtlMs: this.claimTtlMs,
+            });
+            if (!renewed) throw new Error('Agent Run worker lease was lost.');
+          })
+          .catch((error: unknown) => {
+            if (!controller.signal.aborted) {
+              this.logger.error(`Agent Run lease renewal failed (${errorKind(error)}).`);
+              controller.abort(new Error('Agent Run worker lease was lost.'));
+            }
+          })
+          .finally(schedule);
+      }, intervalMs);
+      timer.unref();
+    };
+
+    schedule();
+    return {
+      stop: async () => {
+        stopped = true;
+        if (timer !== undefined) clearTimeout(timer);
+        await renewal;
+      },
+    };
+  }
 }
 
 function usageFromRuntime(result: RuntimeRunResult): AgentRunUsage | undefined {
@@ -682,8 +754,11 @@ function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
 export function validateGroundedOutput(
   content: string,
   run: PreparedAgentRun,
-): { readonly content: string; readonly citations: readonly AgentRunKnowledgeSource[] } {
-  const sources = run.knowledgeSources ?? [];
+): { readonly content: string; readonly citations: readonly AgentRunEvidenceSource[] } {
+  const sources: AgentRunEvidenceSource[] = [
+    ...(run.knowledgeSources ?? []),
+    ...(run.collaborationContext?.sources ?? []),
+  ];
   const contentWithoutModelCitationNumbers = stripModelCitationNumbers(content);
   if (run.knowledgeGroundingRequired !== true) {
     const sanitized = stripRawSourceMarkers(contentWithoutModelCitationNumbers).trim();
@@ -694,40 +769,57 @@ export function validateGroundedOutput(
   }
   if (sources.length === 0) return noGroundedAnswer();
 
-  const sourceByChunkId = new Map<string, AgentRunKnowledgeSource>();
+  const sourceById = new Map<string, AgentRunEvidenceSource>();
   for (const source of sources) {
-    const normalizedId = source.chunkId.toLowerCase();
-    if (!sourceByChunkId.has(normalizedId)) sourceByChunkId.set(normalizedId, source);
+    const normalizedId = evidenceSourceId(source).toLowerCase();
+    if (!sourceById.has(normalizedId)) sourceById.set(normalizedId, source);
   }
 
-  const citations: AgentRunKnowledgeSource[] = [];
-  const citationNumberByChunkId = new Map<string, number>();
-  const blocks = splitGroundingBlocks(contentWithoutModelCitationNumbers);
-  if (blocks.length === 0) return groundedFailure(run, sources);
+  const citations: AgentRunEvidenceSource[] = [];
+  const citationNumberBySourceId = new Map<string, number>();
+  const rawBlocks = splitGroundingBlocks(contentWithoutModelCitationNumbers);
+  const blocks = rawBlocks.filter(
+    (block, index) => !isUncitedFramingBlock(block, index, rawBlocks.length),
+  );
+  if (blocks.length === 0) return noGroundedAnswer();
   const normalizedBlocks: string[] = [];
 
   for (const block of blocks) {
     const units = extractGroundedClaimUnits(block);
-    if (units === undefined) return groundedFailure(run, sources);
+    if (units === undefined) continue;
+    const blockSourceIds = units.flatMap((unit) =>
+      [...unit.markerSuffix.matchAll(RAW_SOURCE_PATTERN_GLOBAL)].flatMap((marker) => {
+        const sourceId = marker[1]?.toLowerCase();
+        return sourceId === undefined ? [] : [sourceId];
+      }),
+    );
+    if (
+      blockSourceIds.length === 0 ||
+      blockSourceIds.some((sourceId) => !sourceById.has(sourceId))
+    ) {
+      continue;
+    }
+    const newSourceIds = new Set(
+      blockSourceIds.filter((sourceId) => !citationNumberBySourceId.has(sourceId)),
+    );
+    if (citations.length + newSourceIds.size > MAX_VISIBLE_CITATIONS) continue;
     const normalizedUnits: string[] = [];
 
     for (const unit of units) {
       const markerMatches = [...unit.markerSuffix.matchAll(RAW_SOURCE_PATTERN_GLOBAL)];
-      if (markerMatches.length === 0) return groundedFailure(run, sources);
       const visibleMarkers: string[] = [];
       for (const marker of markerMatches) {
         const rawChunkId = marker[1];
-        if (rawChunkId === undefined) return groundedFailure(run, sources);
-        const chunkId = rawChunkId.toLowerCase();
-        const source = sourceByChunkId.get(chunkId);
-        if (source === undefined) return groundedFailure(run, sources);
+        if (rawChunkId === undefined) continue;
+        const sourceId = rawChunkId.toLowerCase();
+        const source = sourceById.get(sourceId);
+        if (source === undefined) continue;
 
-        let citationNumber = citationNumberByChunkId.get(chunkId);
+        let citationNumber = citationNumberBySourceId.get(sourceId);
         if (citationNumber === undefined) {
-          if (citations.length >= MAX_VISIBLE_CITATIONS) return groundedFailure(run, sources);
           citations.push(source);
           citationNumber = citations.length;
-          citationNumberByChunkId.set(chunkId, citationNumber);
+          citationNumberBySourceId.set(sourceId, citationNumber);
         }
         visibleMarkers.push(`[来源${citationNumber}]`);
       }
@@ -736,33 +828,12 @@ export function validateGroundedOutput(
     normalizedBlocks.push(normalizedUnits.join(' '));
   }
 
+  if (normalizedBlocks.length === 0) return noGroundedAnswer();
   return { content: normalizedBlocks.join('\n\n'), citations };
 }
 
-function groundedFailure(
-  run: PreparedAgentRun,
-  sources: readonly AgentRunKnowledgeSource[],
-): { readonly content: string; readonly citations: readonly AgentRunKnowledgeSource[] } {
-  if (run.knowledgeEvidenceFallbackEnabled !== true || sources.length === 0) {
-    return noGroundedAnswer();
-  }
-  const citations = sources
-    .filter((source) => source.excerpt.trim().length > 0)
-    .slice(0, Math.min(3, MAX_VISIBLE_CITATIONS));
-  if (citations.length === 0) return noGroundedAnswer();
-  const evidence = citations.map(
-    (source, index) => `${index + 1}. ${source.excerpt.trim()} [来源${index + 1}]`,
-  );
-  return {
-    content:
-      '模型暂未生成可完整核验的归纳回答。以下是本次权限范围内检索到的相关原文，可先据此判断：\n\n' +
-      evidence.join('\n\n'),
-    citations,
-  };
-}
-
 const KNOWLEDGE_GROUNDING_NO_ANSWER =
-  '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。';
+  '当前没有找到你可使用的可靠依据。你可以补充问题背景，或直接联系相关负责人确认。';
 const MAX_VISIBLE_CITATIONS = 12;
 const RAW_SOURCE_PATTERN = /\[\s*SOURCE\s*:\s*([^\]\s]+)\s*\]/iu;
 const RAW_SOURCE_PATTERN_GLOBAL = /\[\s*SOURCE\s*:\s*([^\]\s]+)\s*\]/giu;
@@ -794,11 +865,24 @@ function hasSubstantiveClaim(content: string): boolean {
   return content.replace(/[\s#>*_`~|+\-=:[\](){}.,，。；;：!?！？]/gu, '').length > 0;
 }
 
+function isUncitedFramingBlock(block: string, index: number, blockCount: number): boolean {
+  if (RAW_SOURCE_PATTERN.test(block) || block.length > 240) return false;
+  const plain = block.replace(/[*_#>`~]/gu, '').trim();
+  if (index === 0) {
+    return /^(?:知道|可以|好的|根据现有资料|结合现有资料).{0,80}(?:如下|以下|几个方面|几点)/u.test(
+      plain,
+    );
+  }
+  return (
+    index === blockCount - 1 &&
+    /^(?:概括来说|总的来说|总体而言|总体来说|综上(?:所述)?|总结来说)[，,:：]?/u.test(plain)
+  );
+}
+
 function extractGroundedClaimUnits(
   block: string,
 ): readonly { readonly claim: string; readonly markerSuffix: string }[] | undefined {
   const units: { claim: string; markerSuffix: string }[] = [];
-  const isCodeFence = /^(?:```|~~~)/u.test(block.trimStart());
   let cursor = 0;
 
   for (const markerGroup of block.matchAll(TRUSTED_SOURCE_GROUP_PATTERN_GLOBAL)) {
@@ -806,11 +890,7 @@ function extractGroundedClaimUnits(
     const markerSuffix = markerGroup[0];
     if (markerIndex === undefined || markerSuffix === undefined) return undefined;
     const claim = block.slice(cursor, markerIndex).trim();
-    if (
-      !hasSubstantiveClaim(claim) ||
-      RAW_SOURCE_PATTERN.test(claim) ||
-      (!isCodeFence && containsMultipleIndependentSentences(claim))
-    ) {
+    if (!hasSubstantiveClaim(claim) || RAW_SOURCE_PATTERN.test(claim)) {
       return undefined;
     }
     units.push({ claim, markerSuffix });
@@ -821,19 +901,11 @@ function extractGroundedClaimUnits(
   return units;
 }
 
-function containsMultipleIndependentSentences(content: string): boolean {
-  const withoutLinks = content.replace(/https?:\/\/\S+/giu, '');
-  const chineseBoundaries = withoutLinks.match(/[。！？；]/gu)?.length ?? 0;
-  const englishBoundaries = withoutLinks.match(/[.!?;](?=\s|$)/gu)?.length ?? 0;
-  return chineseBoundaries + englishBoundaries > 1;
-}
-
 /**
  * Split Markdown into presentation blocks. Blank-line paragraphs are separate;
  * list/table items and headings are also independent. Validation then splits
- * each prose block into independently cited claim units. Fenced code remains
- * one unit and may place its source marker on the first line after the closing
- * fence.
+ * each prose block by citation groups. One valid source group may support the
+ * complete paragraph or item; fenced code may place it after the closing fence.
  */
 function splitGroundingBlocks(content: string): string[] {
   const lines = content.replace(/\r\n?/gu, '\n').split('\n');
@@ -894,7 +966,11 @@ function splitGroundingBlocks(content: string): string[] {
 
 function noGroundedAnswer(): {
   readonly content: string;
-  readonly citations: readonly AgentRunKnowledgeSource[];
+  readonly citations: readonly AgentRunEvidenceSource[];
 } {
   return { content: KNOWLEDGE_GROUNDING_NO_ANSWER, citations: [] };
+}
+
+function evidenceSourceId(source: AgentRunEvidenceSource): string {
+  return 'chunkId' in source ? source.chunkId : source.sourceId;
 }

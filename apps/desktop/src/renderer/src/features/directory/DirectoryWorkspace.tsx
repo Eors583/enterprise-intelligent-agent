@@ -589,7 +589,7 @@ export function DirectoryWorkspace({
               )
             ) : isMyActive ? (
               mySection === 'manual' ? (
-                <PersonalManualWorkspace />
+                <PersonalManualWorkspace members={payload.members} />
               ) : mySection === 'roles' ? (
                 <RoleWorkspace
                   assignment={selectedRoleAssignment}
@@ -714,29 +714,28 @@ function OrganizationTreePanel({
         {isExpanded && (
           <div className="organization-node-content" role="group">
             {members.map((member) => (
-              <button
-                type="button"
+              <div
                 key={member.id}
                 className={
                   member.id === selectedMemberId ? 'tree-member-row selected' : 'tree-member-row'
                 }
                 style={{ '--tree-depth': depth } as React.CSSProperties}
-                aria-current={member.id === selectedMemberId ? 'true' : undefined}
-                onClick={(event) => {
-                  if ((event.target as HTMLElement).closest('[data-agent-action="true"]')) {
-                    onContactAgent(member);
-                    return;
-                  }
-                  onSelectMember(member.id);
-                }}
               >
-                <Avatar name={member.name} status={member.status} size="small" />
-                <span className="member-row-copy">
-                  <strong>{member.name}</strong>
-                  <small>{member.title || '未设置职位'}</small>
-                </span>
+                <button
+                  type="button"
+                  className="tree-member-main"
+                  aria-current={member.id === selectedMemberId ? 'true' : undefined}
+                  onClick={() => onSelectMember(member.id)}
+                >
+                  <Avatar name={member.name} status={member.status} size="small" />
+                  <span className="member-row-copy">
+                    <strong>{member.name}</strong>
+                    <small>{member.title || '未设置职位'}</small>
+                  </span>
+                </button>
                 {member.agent && member.agent.status !== 'disabled' ? (
-                  <span
+                  <button
+                    type="button"
                     className={
                       member.capabilities.canContactAgent
                         ? 'tree-member-ai'
@@ -752,16 +751,15 @@ function OrganizationTreePanel({
                         ? `与 ${member.agent.name} 对话`
                         : `${member.agent.name}：${agentOperationalDescription(member.agent)}`
                     }
-                    {...(member.capabilities.canContactAgent
-                      ? { 'data-agent-action': 'true' }
-                      : {})}
+                    disabled={!member.capabilities.canContactAgent}
+                    onClick={() => onContactAgent(member)}
                   >
                     AI
-                  </span>
+                  </button>
                 ) : (
                   <span className="tree-member-ai placeholder" aria-hidden="true" />
                 )}
-              </button>
+              </div>
             ))}
             {children.map((child) => renderDepartment(child, depth + 1))}
             {!members.length && !children.length && (
@@ -989,7 +987,6 @@ export function unifiedSearchResults(
       member.agent &&
       member.capabilities.canContactAgent &&
       member.agent.status === 'online' &&
-      member.agent.operationalAvailability.status === 'AVAILABLE' &&
       includes(member.agent.name, member.agent.summary, member.name)
     ) {
       results.push({

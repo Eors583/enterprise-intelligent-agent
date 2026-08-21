@@ -2,7 +2,10 @@ export const DEFAULT_AGENT_RUN_MAX_INPUT_TOKENS = 16_000;
 export const DEFAULT_AGENT_RUN_MAX_OUTPUT_TOKENS = 4_000;
 export const DEFAULT_AGENT_RUN_RESERVED_TOKENS =
   DEFAULT_AGENT_RUN_MAX_INPUT_TOKENS + DEFAULT_AGENT_RUN_MAX_OUTPUT_TOKENS;
-export const AGENT_RUN_CONCURRENCY_HOLD_STATUSES = ['DISPATCHING', 'RUNNING', 'UNKNOWN'] as const;
+// UNKNOWN is reconciliation/accounting evidence, not local executable work.
+// Counting it as a Worker slot lets a provider outage permanently deny service
+// to unrelated users; provider-side uncertainty is governed separately.
+export const AGENT_RUN_CONCURRENCY_HOLD_STATUSES = ['DISPATCHING', 'RUNNING'] as const;
 
 export interface AgentRunQuotaSnapshot {
   readonly concurrencyLimit: number;

@@ -519,7 +519,7 @@ type CatalogRow = Prisma.AiModelCatalogVersionGetPayload<Record<string, never>>;
 type PolicyRow = Prisma.AiModelRoutePolicyVersionGetPayload<Record<string, never>>;
 type Transaction = Prisma.TransactionClient;
 
-function governedTransition(
+export function governedTransition(
   current: {
     readonly status: AiGovernanceStatus;
     readonly revision: number;
@@ -539,7 +539,7 @@ function governedTransition(
     };
   }
   if (request.action === 'PUBLISH' && current.status === 'IN_REVIEW') {
-    if (current.submittedByUserId === principal.userId) {
+    if (current.submittedByUserId === principal.userId && principal.role !== 'OWNER') {
       throw new ConflictException('Maker-checker requires a different publisher.');
     }
     return {

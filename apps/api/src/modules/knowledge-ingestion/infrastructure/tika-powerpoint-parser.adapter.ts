@@ -4,6 +4,7 @@ import {
   type DocumentParserOptions,
   type DocumentParsingInput,
   type ParsedKnowledgeDocument,
+  type SupportedDocumentMimeType,
 } from './document-parser.adapter.js';
 
 export const TIKA_POWERPOINT_PARSER_NAME = 'apache-tika-v3';
@@ -16,7 +17,10 @@ export interface TikaPowerPointParserOptions extends DocumentParserOptions {
 }
 
 const POWERPOINT_MIME_TYPE = 'application/vnd.ms-powerpoint';
+const POWERPOINT_OPEN_XML_MIME_TYPE =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation';
 const OLE2_SIGNATURE = Buffer.from([0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]);
+const ZIP_SIGNATURE = Buffer.from([0x50, 0x4b, 0x03, 0x04]);
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAXIMUM_RESPONSE_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAXIMUM_SOURCE_BYTES = 2_147_483_647;
@@ -53,18 +57,20 @@ export class TikaPowerPointParserAdapter implements KnowledgeDocumentParser {
   }
 
   async parse(input: DocumentParsingInput): Promise<ParsedKnowledgeDocument> {
-    if (input.mimeType !== POWERPOINT_MIME_TYPE) {
+    if (![POWERPOINT_MIME_TYPE, POWERPOINT_OPEN_XML_MIME_TYPE].includes(input.mimeType)) {
       throw new DocumentParsingError('UNSUPPORTED_MIME_TYPE');
     }
+    const mimeType = input.mimeType as SupportedDocumentMimeType;
     if (!Buffer.isBuffer(input.bytes) || input.bytes.byteLength === 0) {
       throw new DocumentParsingError('DOCUMENT_EMPTY');
     }
     if (input.bytes.byteLength > this.maximumSourceBytes) {
       throw new DocumentParsingError('DOCUMENT_TOO_LARGE');
     }
+    const signature = mimeType === POWERPOINT_MIME_TYPE ? OLE2_SIGNATURE : ZIP_SIGNATURE;
     if (
-      input.bytes.byteLength < OLE2_SIGNATURE.byteLength ||
-      !input.bytes.subarray(0, OLE2_SIGNATURE.byteLength).equals(OLE2_SIGNATURE)
+      input.bytes.byteLength < signature.byteLength ||
+      !input.bytes.subarray(0, signature.byteLength).equals(signature)
     ) {
       throw new DocumentParsingError('INVALID_FILE_SIGNATURE');
     }
@@ -81,7 +87,7 @@ export class TikaPowerPointParserAdapter implements KnowledgeDocumentParser {
         method: 'PUT',
         headers: {
           Accept: 'text/plain; charset=utf-8',
-          'Content-Type': POWERPOINT_MIME_TYPE,
+          'Content-Type': mimeType,
         },
         body: new Uint8Array(input.bytes),
         redirect: 'error',
@@ -101,7 +107,7 @@ export class TikaPowerPointParserAdapter implements KnowledgeDocumentParser {
       return {
         text,
         metadata: {
-          mimeType: POWERPOINT_MIME_TYPE,
+          mimeType,
           sourceType: 'TEXT',
           parser: TIKA_POWERPOINT_PARSER_NAME,
           byteLength: input.bytes.byteLength,
@@ -110,7 +116,7 @@ export class TikaPowerPointParserAdapter implements KnowledgeDocumentParser {
         structuredContent: {
           schemaVersion: 'enterprise-knowledge-document/v1',
           kind: 'legacy-powerpoint',
-          mimeType: POWERPOINT_MIME_TYPE,
+          mimeType,
           parser: TIKA_POWERPOINT_PARSER_NAME,
           text,
         },

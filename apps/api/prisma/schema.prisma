@@ -204,6 +204,26 @@ enum KnowledgeSourceSyncRunStatus {
   FAILED
 }
 
+enum KnowledgeProvider {
+  LEXIANG
+}
+
+enum KnowledgeProviderConnectionStatus {
+  PENDING
+  ACTIVE
+  UNAVAILABLE
+  DISABLED
+}
+
+enum KnowledgeExternalSpaceStatus {
+  PROVISIONING
+  ACTIVE
+  SYNC_FAILED
+  DELETING
+  DELETE_FAILED
+  DELETED
+}
+
 enum KnowledgeParseReviewStatus {
   NOT_REQUIRED
   PENDING
@@ -830,52 +850,57 @@ model Tenant {
   createdAt                  DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                  DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  users                       User[]
-  memberProfiles              MemberProfile[]
-  organizations               Organization[]
-  orgUnits                    OrgUnit[]
-  employments                 Employment[]
-  positions                   Position[]
-  managerLinks                ManagerRelation[]
-  agentTemplates              AgentTemplate[]
-  agentVersions               AgentVersion[]
-  agentInstances              AgentInstance[]
-  roleAssignments             RoleAssignment[]
-  agentRuns                   AgentRun[]
-  aiRuntimeRuns               AiRuntimeRun[]
-  conversations               Conversation[]
-  conversationParticipants    ConversationParticipant[]
-  conversationUserStates      ConversationUserState[]
-  messages                    Message[]
-  answerFeedbacks             AnswerFeedback[]
-  outboxEvents                OutboxEvent[]
-  outboxEventDeliveries       OutboxEventDelivery[]
-  auditEvents                 AuditEvent[]
-  passwordCredentials         PasswordCredential[]
-  authSessions                AuthSession[]
-  authActionTokens            AuthActionToken[]
-  knowledgeBases              KnowledgeBase[]
-  knowledgeFolders            KnowledgeFolder[]
-  knowledgeDocuments          KnowledgeDocument[]
-  knowledgeDocumentVersions   KnowledgeDocumentVersion[]
-  knowledgeParentChunks       KnowledgeParentChunk[]
-  knowledgeChunks             KnowledgeChunk[]
-  knowledgeChunkEmbeddings    KnowledgeChunkEmbedding[]
-  knowledgeEmbeddingIndexes   KnowledgeEmbeddingIndexVersion[]
-  knowledgeIngestionJobs      KnowledgeIngestionJob[]
-  knowledgeBaseOrgUnits       KnowledgeBaseOrgUnit[]
-  knowledgeBaseMembers        KnowledgeBaseMember[]
-  knowledgeEntities           KnowledgeEntity[]
-  knowledgeEntityMentions     KnowledgeEntityMention[]
-  knowledgeRelations          KnowledgeRelation[]
-  knowledgeRelationEvidence   KnowledgeRelationEvidence[]
-  directoryIntegrations       DirectoryIntegration[]
-  directoryUserBindings       DirectoryUserBinding[]
-  directoryOrgUnitBindings    DirectoryOrgUnitBinding[]
-  directoryEmploymentBindings DirectoryEmploymentBinding[]
-  directorySyncPreviews       DirectorySyncPreview[]
-  directorySyncPreviewItems   DirectorySyncPreviewItem[]
-  directorySyncRuns           DirectorySyncRun[]
+  users                         User[]
+  memberProfiles                MemberProfile[]
+  workAvailabilities            WorkAvailability[]
+  organizations                 Organization[]
+  orgUnits                      OrgUnit[]
+  employments                   Employment[]
+  positions                     Position[]
+  managerLinks                  ManagerRelation[]
+  agentTemplates                AgentTemplate[]
+  agentVersions                 AgentVersion[]
+  agentInstances                AgentInstance[]
+  roleAssignments               RoleAssignment[]
+  agentRuns                     AgentRun[]
+  aiRuntimeRuns                 AiRuntimeRun[]
+  conversations                 Conversation[]
+  conversationParticipants      ConversationParticipant[]
+  conversationUserStates        ConversationUserState[]
+  messages                      Message[]
+  answerFeedbacks               AnswerFeedback[]
+  outboxEvents                  OutboxEvent[]
+  outboxEventDeliveries         OutboxEventDelivery[]
+  auditEvents                   AuditEvent[]
+  passwordCredentials           PasswordCredential[]
+  authSessions                  AuthSession[]
+  authActionTokens              AuthActionToken[]
+  knowledgeBases                KnowledgeBase[]
+  knowledgeFolders              KnowledgeFolder[]
+  knowledgeDocuments            KnowledgeDocument[]
+  knowledgeDocumentVersions     KnowledgeDocumentVersion[]
+  knowledgeParentChunks         KnowledgeParentChunk[]
+  knowledgeChunks               KnowledgeChunk[]
+  knowledgeChunkEmbeddings      KnowledgeChunkEmbedding[]
+  knowledgeEmbeddingIndexes     KnowledgeEmbeddingIndexVersion[]
+  knowledgeIngestionJobs        KnowledgeIngestionJob[]
+  knowledgeBaseOrgUnits         KnowledgeBaseOrgUnit[]
+  knowledgeBaseMembers          KnowledgeBaseMember[]
+  knowledgeEntities             KnowledgeEntity[]
+  knowledgeEntityMentions       KnowledgeEntityMention[]
+  knowledgeRelations            KnowledgeRelation[]
+  knowledgeRelationEvidence     KnowledgeRelationEvidence[]
+  knowledgeProviderConnections  KnowledgeProviderConnection[]
+  knowledgeProviderUserBindings KnowledgeProviderUserBinding[]
+  knowledgeExternalSpaces       KnowledgeExternalSpaceBinding[]
+  knowledgeExternalEntries      KnowledgeExternalEntryBinding[]
+  directoryIntegrations         DirectoryIntegration[]
+  directoryUserBindings         DirectoryUserBinding[]
+  directoryOrgUnitBindings      DirectoryOrgUnitBinding[]
+  directoryEmploymentBindings   DirectoryEmploymentBinding[]
+  directorySyncPreviews         DirectorySyncPreview[]
+  directorySyncPreviewItems     DirectorySyncPreviewItem[]
+  directorySyncRuns             DirectorySyncRun[]
 
   @@map("tenants")
 }
@@ -910,6 +935,8 @@ model User {
   tenant                            Tenant                           @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   employments                       Employment[]
   memberProfile                     MemberProfile?
+  workAvailability                  WorkAvailability?                @relation("WorkAvailabilityOwner")
+  emergencyAvailabilityContacts     WorkAvailability[]               @relation("WorkAvailabilityEmergencyContact")
   ownedAgents                       AgentInstance[]                  @relation("AgentOwner")
   createdAgents                     AgentInstance[]                  @relation("AgentCreator")
   createdConversations              Conversation[]                   @relation("ConversationCreator")
@@ -927,6 +954,7 @@ model User {
   reviewedKnowledgeDocumentVersions KnowledgeDocumentVersion[]       @relation("KnowledgeDocumentVersionReviewer")
   createdKnowledgeEmbeddingIndexes  KnowledgeEmbeddingIndexVersion[] @relation("KnowledgeEmbeddingIndexCreator")
   accessibleKnowledgeBases          KnowledgeBaseMember[]
+  knowledgeProviderBindings         KnowledgeProviderUserBinding[]
   requestedAgentRuns                AgentRun[]                       @relation("AgentRunRequester")
   directoryBindings                 DirectoryUserBinding[]
   answerFeedbacks                   AnswerFeedback[]
@@ -1162,12 +1190,128 @@ model KnowledgeBase {
   embeddingIndexVersions       KnowledgeEmbeddingIndexVersion[] @relation("KnowledgeBaseEmbeddingIndexVersions")
   activeEmbeddingIndexVersion  KnowledgeEmbeddingIndexVersion?  @relation("KnowledgeBaseActiveEmbeddingIndex", fields: [tenantId, id, activeEmbeddingIndexVersionId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
   pendingEmbeddingIndexVersion KnowledgeEmbeddingIndexVersion?  @relation("KnowledgeBasePendingEmbeddingIndex", fields: [tenantId, id, pendingEmbeddingIndexVersionId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
+  externalSpaceBinding         KnowledgeExternalSpaceBinding?
+  externalEntryBindings        KnowledgeExternalEntryBinding[]
 
   @@unique([tenantId, id])
   @@unique([tenantId, key])
   @@index([tenantId, status, name])
   @@index([tenantId, spaceType, spaceTargetId, name], map: "knowledge_bases_space_tree_idx")
   @@map("knowledge_bases")
+}
+
+model KnowledgeProviderConnection {
+  id                   String                            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId             String                            @map("tenant_id") @db.Uuid
+  provider             KnowledgeProvider
+  status               KnowledgeProviderConnectionStatus @default(PENDING)
+  appKey               String                            @map("app_key") @db.VarChar(200)
+  teamId               String?                           @map("team_id") @db.VarChar(200)
+  operatorStaffId      String?                           @map("operator_staff_id") @db.VarChar(200)
+  credentialCiphertext String?                           @map("credential_ciphertext") @db.Text
+  lastHealthAt         DateTime?                         @map("last_health_at") @db.Timestamptz(6)
+  lastHealthCode       String?                           @map("last_health_code") @db.VarChar(120)
+  version              Int                               @default(1)
+  createdAt            DateTime                          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime                          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant                          @relation(fields: [tenantId], references: [id], onDelete: Restrict, map: "knowledge_provider_connections_tenant_id_fkey")
+  spaceBindings KnowledgeExternalSpaceBinding[]
+  userBindings  KnowledgeProviderUserBinding[]
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, provider])
+  @@index([tenantId, status, updatedAt(sort: Desc)], map: "knowledge_provider_connections_status_idx")
+  @@map("knowledge_provider_connections")
+}
+
+model KnowledgeProviderUserBinding {
+  id              String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId        String            @map("tenant_id") @db.Uuid
+  connectionId    String            @map("connection_id") @db.Uuid
+  provider        KnowledgeProvider
+  userId          String            @map("user_id") @db.Uuid
+  externalStaffId String            @map("external_staff_id") @db.VarChar(200)
+  status          String            @default("ACTIVE") @db.VarChar(24)
+  createdAt       DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant     Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Restrict, map: "knowledge_provider_user_bindings_tenant_fkey")
+  connection KnowledgeProviderConnection @relation(fields: [tenantId, connectionId], references: [tenantId, id], onDelete: Restrict, map: "knowledge_provider_user_bindings_connection_fkey")
+  user       User                        @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Restrict, map: "knowledge_provider_user_bindings_user_fkey")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, connectionId, userId], map: "knowledge_provider_user_bindings_user_key")
+  @@unique([tenantId, connectionId, externalStaffId], map: "knowledge_provider_user_bindings_staff_key")
+  @@index([tenantId, provider, status, userId], map: "knowledge_provider_user_bindings_lookup_idx")
+  @@map("knowledge_provider_user_bindings")
+}
+
+model KnowledgeExternalSpaceBinding {
+  id                  String                       @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId            String                       @map("tenant_id") @db.Uuid
+  knowledgeBaseId     String                       @map("knowledge_base_id") @db.Uuid
+  connectionId        String                       @map("connection_id") @db.Uuid
+  provider            KnowledgeProvider
+  status              KnowledgeExternalSpaceStatus @default(PROVISIONING)
+  externalTeamId      String                       @map("external_team_id") @db.VarChar(200)
+  externalSpaceId     String?                      @map("external_space_id") @db.VarChar(200)
+  externalRootEntryId String?                      @map("external_root_entry_id") @db.VarChar(200)
+  remoteName          String?                      @map("remote_name") @db.VarChar(200)
+  remoteDescription   String?                      @map("remote_description") @db.Text
+  remoteLogo          String?                      @map("remote_logo") @db.VarChar(1000)
+  visibleType         Int?                         @map("visible_type")
+  managerInheritType  String?                      @map("manager_inherit_type") @db.VarChar(24)
+  memberInheritType   String?                      @map("member_inherit_type") @db.VarChar(24)
+  lastSyncedAt        DateTime?                    @map("last_synced_at") @db.Timestamptz(6)
+  lastErrorCode       String?                      @map("last_error_code") @db.VarChar(120)
+  version             Int                          @default(1)
+  createdAt           DateTime                     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt           DateTime                     @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant                          @relation(fields: [tenantId], references: [id], onDelete: Restrict, map: "knowledge_external_space_bindings_tenant_fkey")
+  knowledgeBase KnowledgeBase                   @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict, map: "knowledge_external_space_bindings_knowledge_base_fkey")
+  connection    KnowledgeProviderConnection     @relation(fields: [tenantId, connectionId], references: [tenantId, id], onDelete: Restrict, map: "knowledge_external_space_bindings_connection_fkey")
+  entryBindings KnowledgeExternalEntryBinding[] @relation("KnowledgeExternalEntrySpace")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, knowledgeBaseId], map: "knowledge_external_space_bindings_knowledge_base_key")
+  @@unique([tenantId, provider, externalSpaceId], map: "knowledge_external_space_bindings_external_space_key")
+  @@unique([tenantId, knowledgeBaseId, provider, externalSpaceId], map: "knowledge_external_space_bindings_entry_scope_key")
+  @@index([tenantId, connectionId, status], map: "knowledge_external_space_bindings_connection_status_idx")
+  @@map("knowledge_external_space_bindings")
+}
+
+model KnowledgeExternalEntryBinding {
+  id                    String            @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  tenantId              String            @map("tenant_id") @db.Uuid
+  knowledgeBaseId       String            @map("knowledge_base_id") @db.Uuid
+  provider              KnowledgeProvider
+  externalSpaceId       String            @map("external_space_id") @db.VarChar(200)
+  externalEntryId       String            @map("external_entry_id") @db.VarChar(200)
+  externalParentEntryId String?           @map("external_parent_entry_id") @db.VarChar(200)
+  entryType             String            @map("entry_type") @db.VarChar(64)
+  folderId              String?           @map("folder_id") @db.Uuid
+  documentId            String?           @map("document_id") @db.Uuid
+  remoteName            String            @map("remote_name") @db.VarChar(300)
+  remoteCreatedAt       DateTime?         @map("remote_created_at") @db.Timestamptz(6)
+  remoteUpdatedAt       DateTime?         @map("remote_updated_at") @db.Timestamptz(6)
+  lastSyncedAt          DateTime          @default(now()) @map("last_synced_at") @db.Timestamptz(6)
+  createdAt             DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime          @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant        Tenant                        @relation(fields: [tenantId], references: [id], onDelete: Restrict, map: "knowledge_external_entry_bindings_tenant_fkey")
+  knowledgeBase KnowledgeBase                 @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict, map: "knowledge_external_entry_bindings_knowledge_base_fkey")
+  spaceBinding  KnowledgeExternalSpaceBinding @relation("KnowledgeExternalEntrySpace", fields: [tenantId, knowledgeBaseId, provider, externalSpaceId], references: [tenantId, knowledgeBaseId, provider, externalSpaceId], onDelete: Restrict, map: "knowledge_external_entry_bindings_space_fkey")
+  folder        KnowledgeFolder?              @relation(fields: [tenantId, knowledgeBaseId, folderId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_external_entry_bindings_folder_fkey")
+  document      KnowledgeDocument?            @relation(fields: [tenantId, knowledgeBaseId, documentId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_external_entry_bindings_document_fkey")
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, provider, externalSpaceId, externalEntryId], map: "knowledge_external_entry_bindings_remote_key")
+  @@unique([tenantId, knowledgeBaseId, folderId], map: "knowledge_external_entry_bindings_folder_key")
+  @@unique([tenantId, knowledgeBaseId, documentId], map: "knowledge_external_entry_bindings_document_key")
+  @@index([tenantId, knowledgeBaseId, externalParentEntryId], map: "knowledge_external_entry_bindings_parent_idx")
+  @@map("knowledge_external_entry_bindings")
 }
 
 model KnowledgeFolder {
@@ -1181,12 +1325,13 @@ model KnowledgeFolder {
   createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant        Tenant              @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  knowledgeBase KnowledgeBase       @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Cascade)
-  createdBy     User                @relation("KnowledgeFolderCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
-  parent        KnowledgeFolder?    @relation("KnowledgeFolderTree", fields: [tenantId, knowledgeBaseId, parentId], references: [tenantId, knowledgeBaseId, id], onDelete: Cascade, onUpdate: NoAction)
-  children      KnowledgeFolder[]   @relation("KnowledgeFolderTree")
-  documents     KnowledgeDocument[]
+  tenant               Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  knowledgeBase        KnowledgeBase                  @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Cascade)
+  createdBy            User                           @relation("KnowledgeFolderCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
+  parent               KnowledgeFolder?               @relation("KnowledgeFolderTree", fields: [tenantId, knowledgeBaseId, parentId], references: [tenantId, knowledgeBaseId, id], onDelete: Cascade, onUpdate: NoAction)
+  children             KnowledgeFolder[]              @relation("KnowledgeFolderTree")
+  documents            KnowledgeDocument[]
+  externalEntryBinding KnowledgeExternalEntryBinding?
 
   @@unique([tenantId, id])
   @@unique([tenantId, knowledgeBaseId, id], map: "knowledge_folders_scope_identity_key")
@@ -1279,16 +1424,17 @@ model KnowledgeDocument {
   createdAt        DateTime                @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt        DateTime                @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  tenant           Tenant                      @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  knowledgeBase    KnowledgeBase               @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict)
-  folder           KnowledgeFolder?            @relation(fields: [tenantId, knowledgeBaseId, folderId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
-  createdBy        User                        @relation("KnowledgeDocumentCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
-  currentVersion   KnowledgeDocumentVersion?   @relation("KnowledgeDocumentCurrentVersion", fields: [tenantId, knowledgeBaseId, id, currentVersionId], references: [tenantId, knowledgeBaseId, documentId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_documents_current_version_fkey")
-  versions         KnowledgeDocumentVersion[]  @relation("KnowledgeDocumentVersionHistory")
-  parentChunks     KnowledgeParentChunk[]
-  chunks           KnowledgeChunk[]
-  entityMentions   KnowledgeEntityMention[]
-  relationEvidence KnowledgeRelationEvidence[]
+  tenant               Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  knowledgeBase        KnowledgeBase                  @relation(fields: [tenantId, knowledgeBaseId], references: [tenantId, id], onDelete: Restrict)
+  folder               KnowledgeFolder?               @relation(fields: [tenantId, knowledgeBaseId, folderId], references: [tenantId, knowledgeBaseId, id], onDelete: Restrict, onUpdate: NoAction)
+  createdBy            User                           @relation("KnowledgeDocumentCreator", fields: [tenantId, createdById], references: [tenantId, id], onDelete: Restrict)
+  currentVersion       KnowledgeDocumentVersion?      @relation("KnowledgeDocumentCurrentVersion", fields: [tenantId, knowledgeBaseId, id, currentVersionId], references: [tenantId, knowledgeBaseId, documentId, id], onDelete: Restrict, onUpdate: NoAction, map: "knowledge_documents_current_version_fkey")
+  versions             KnowledgeDocumentVersion[]     @relation("KnowledgeDocumentVersionHistory")
+  parentChunks         KnowledgeParentChunk[]
+  chunks               KnowledgeChunk[]
+  entityMentions       KnowledgeEntityMention[]
+  relationEvidence     KnowledgeRelationEvidence[]
+  externalEntryBinding KnowledgeExternalEntryBinding?
 
   @@unique([tenantId, id])
   @@unique([tenantId, knowledgeBaseId, id], map: "knowledge_documents_scope_identity_key")
@@ -1765,24 +1911,29 @@ model Employment {
 }
 
 model MemberProfile {
-  id                      String   @id @default(uuid()) @db.Uuid
-  tenantId                String   @map("tenant_id") @db.Uuid
-  userId                  String   @map("user_id") @db.Uuid
-  personalSummary         String?  @map("personal_summary") @db.Text
-  educationBackground     String?  @map("education_background") @db.Text
-  careerOverview          String?  @map("career_overview") @db.Text
-  jobResponsibilities     String?  @map("job_responsibilities") @db.Text
-  communicationPreference String?  @map("communication_preference") @db.Text
-  collaborationHabits     String?  @map("collaboration_habits") @db.Text
-  routineSchedule         String?  @map("routine_schedule") @db.Text
-  contactInformation      String?  @map("contact_information") @db.Text
-  coreSkills              String?  @map("core_skills") @db.Text
-  availableResources      String?  @map("available_resources") @db.Text
-  hobbies                 String?  @db.Text
-  clubs                   String?  @db.Text
-  faqs                    Json     @default("[]")
-  createdAt               DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt               DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                          String   @id @default(uuid()) @db.Uuid
+  tenantId                    String   @map("tenant_id") @db.Uuid
+  userId                      String   @map("user_id") @db.Uuid
+  personalSummary             String?  @map("personal_summary") @db.Text
+  educationBackground         String?  @map("education_background") @db.Text
+  careerOverview              String?  @map("career_overview") @db.Text
+  jobResponsibilities         String?  @map("job_responsibilities") @db.Text
+  communicationPreference     String?  @map("communication_preference") @db.Text
+  collaborationHabits         String?  @map("collaboration_habits") @db.Text
+  routineSchedule             String?  @map("routine_schedule") @db.Text
+  contactInformation          String?  @map("contact_information") @db.Text
+  coreSkills                  String?  @map("core_skills") @db.Text
+  availableResources          String?  @map("available_resources") @db.Text
+  hobbies                     String?  @db.Text
+  clubs                       String?  @db.Text
+  faqs                        Json     @default("[]")
+  disclosurePolicy            Json     @default("{\"IDENTITY\":\"SELF_ONLY\",\"RESPONSIBILITIES\":\"SELF_ONLY\",\"COLLABORATION\":\"SELF_ONLY\",\"RESOURCES\":\"SELF_ONLY\",\"INTERESTS\":\"SELF_ONLY\",\"FAQ\":\"SELF_ONLY\"}") @map("disclosure_policy")
+  manualSharingEnabled        Boolean  @default(false) @map("manual_sharing_enabled")
+  availabilitySharingEnabled  Boolean  @default(false) @map("availability_sharing_enabled")
+  privateRiskRemindersEnabled Boolean  @default(true) @map("private_risk_reminders_enabled")
+  policyRevision              Int      @default(1) @map("policy_revision")
+  createdAt                   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                   DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   user   User   @relation(fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
@@ -1791,6 +1942,31 @@ model MemberProfile {
   @@unique([tenantId, userId])
   @@index([tenantId, updatedAt])
   @@map("member_profiles")
+}
+
+model WorkAvailability {
+  id                     String    @id @default(uuid()) @db.Uuid
+  tenantId               String    @map("tenant_id") @db.Uuid
+  userId                 String    @map("user_id") @db.Uuid
+  status                 String    @db.VarChar(32)
+  startsAt               DateTime  @map("starts_at") @db.Timestamptz(6)
+  endsAt                 DateTime? @map("ends_at") @db.Timestamptz(6)
+  summary                String?   @db.VarChar(500)
+  expectedResponse       String?   @map("expected_response") @db.VarChar(200)
+  emergencyContactUserId String?   @map("emergency_contact_user_id") @db.Uuid
+  disclosureScope        String    @default("SELF_ONLY") @map("disclosure_scope") @db.VarChar(32)
+  revision               Int       @default(1)
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt              DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  tenant           Tenant @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  user             User   @relation("WorkAvailabilityOwner", fields: [tenantId, userId], references: [tenantId, id], onDelete: Cascade)
+  emergencyContact User?  @relation("WorkAvailabilityEmergencyContact", fields: [tenantId, emergencyContactUserId], references: [tenantId, id], onDelete: Restrict)
+
+  @@unique([tenantId, id])
+  @@unique([tenantId, userId])
+  @@index([tenantId, endsAt, updatedAt(sort: Desc)])
+  @@map("work_availabilities")
 }
 
 model DirectoryIntegration {
@@ -2276,6 +2452,7 @@ model Message {
   id                 String                      @id @default(uuid()) @db.Uuid
   tenantId           String                      @map("tenant_id") @db.Uuid
   conversationId     String                      @map("conversation_id") @db.Uuid
+  sequence           BigInt                      @default(autoincrement())
   senderType         ConversationParticipantType @map("sender_type")
   senderUserId       String?                     @map("sender_user_id") @db.Uuid
   senderAgentId      String?                     @map("sender_agent_id") @db.Uuid
@@ -2298,6 +2475,7 @@ model Message {
 
   @@unique([tenantId, id])
   @@unique([tenantId, conversationId, id])
+  @@unique([tenantId, conversationId, sequence])
   @@unique([tenantId, conversationId, senderKey, clientMessageId])
   @@index([tenantId, conversationId, createdAt, id])
   @@map("messages")
@@ -2326,55 +2504,59 @@ model AnswerFeedback {
 }
 
 model AgentRun {
-  id                        String                @id @default(uuid()) @db.Uuid
-  tenantId                  String                @map("tenant_id") @db.Uuid
-  taskId                    String?               @map("task_id") @db.Uuid
-  conversationId            String                @map("conversation_id") @db.Uuid
-  inputMessageId            String                @map("input_message_id") @db.Uuid
-  outputMessageId           String?               @map("output_message_id") @db.Uuid
-  requesterUserId           String                @map("requester_user_id") @db.Uuid
-  agentId                   String                @map("agent_id") @db.Uuid
-  agentVersionId            String                @map("agent_version_id") @db.Uuid
-  parentRunId               String?               @map("parent_run_id") @db.Uuid
-  retryOfRunId              String?               @map("retry_of_run_id") @db.Uuid
-  trigger                   AgentRunTrigger       @default(USER_MESSAGE)
-  turnIndex                 Int                   @default(1) @map("turn_index")
-  turnLimit                 Int                   @default(1) @map("turn_limit")
-  status                    AgentRunStatus        @default(QUEUED)
-  provider                  String                @default("ai-runtime") @db.VarChar(80)
-  externalRunId             String?               @map("external_run_id") @db.Uuid
-  idempotencyKey            String                @map("idempotency_key") @db.VarChar(200)
-  policySnapshot            Json                  @map("policy_snapshot")
-  memoryContextSnapshot     Json?                 @map("memory_context_snapshot")
-  modelRoutePolicyVersionId String?               @map("model_route_policy_version_id") @db.Uuid
-  modelRouteSnapshot        Json?                 @map("model_route_snapshot")
-  attempts                  Int                   @default(0)
-  version                   Int                   @default(1)
-  errorCode                 String?               @map("error_code") @db.VarChar(120)
-  errorMessage              String?               @map("error_message") @db.Text
-  runtimeProvider           String?               @map("runtime_provider") @db.VarChar(80)
-  runtimeModel              String?               @map("runtime_model") @db.VarChar(256)
-  inputTokens               Int                   @default(0) @map("input_tokens")
-  outputTokens              Int                   @default(0) @map("output_tokens")
-  totalTokens               Int                   @default(0) @map("total_tokens")
-  tokenEvidence             AgentRunTokenEvidence @default(UNREPORTED) @map("token_evidence")
-  quotaChargedTokens        Int                   @default(0) @map("quota_charged_tokens")
-  quotaSettledAt            DateTime?             @map("quota_settled_at") @db.Timestamptz(6)
-  toolCalls                 Int                   @default(0) @map("tool_calls")
-  costMicros                BigInt                @default(0) @map("cost_micros")
-  latencyMs                 Int?                  @map("latency_ms")
-  groundedCitationCount     Int                   @default(0) @map("grounded_citation_count")
-  reservedTokens            Int                   @default(0) @map("reserved_tokens")
-  cancellationRequestedAt   DateTime?             @map("cancellation_requested_at") @db.Timestamptz(6)
-  cancellationReason        String?               @map("cancellation_reason") @db.VarChar(120)
-  cancellationConfirmedAt   DateTime?             @map("cancellation_confirmed_at") @db.Timestamptz(6)
-  usageRecordedAt           DateTime?             @map("usage_recorded_at") @db.Timestamptz(6)
-  costRecordedAt            DateTime?             @map("cost_recorded_at") @db.Timestamptz(6)
-  dispatchStartedAt         DateTime?             @map("dispatch_started_at") @db.Timestamptz(6)
-  startedAt                 DateTime?             @map("started_at") @db.Timestamptz(6)
-  finishedAt                DateTime?             @map("finished_at") @db.Timestamptz(6)
-  createdAt                 DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt                 DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id                           String                @id @default(uuid()) @db.Uuid
+  tenantId                     String                @map("tenant_id") @db.Uuid
+  taskId                       String?               @map("task_id") @db.Uuid
+  conversationId               String                @map("conversation_id") @db.Uuid
+  conversationSequence         BigInt                @default(autoincrement()) @map("conversation_sequence")
+  inputMessageId               String                @map("input_message_id") @db.Uuid
+  outputMessageId              String?               @map("output_message_id") @db.Uuid
+  requesterUserId              String                @map("requester_user_id") @db.Uuid
+  agentId                      String                @map("agent_id") @db.Uuid
+  agentVersionId               String                @map("agent_version_id") @db.Uuid
+  parentRunId                  String?               @map("parent_run_id") @db.Uuid
+  retryOfRunId                 String?               @map("retry_of_run_id") @db.Uuid
+  supersededByRunId            String?               @map("superseded_by_run_id") @db.Uuid
+  supersededAt                 DateTime?             @map("superseded_at") @db.Timestamptz(6)
+  trigger                      AgentRunTrigger       @default(USER_MESSAGE)
+  turnIndex                    Int                   @default(1) @map("turn_index")
+  turnLimit                    Int                   @default(1) @map("turn_limit")
+  status                       AgentRunStatus        @default(QUEUED)
+  provider                     String                @default("ai-runtime") @db.VarChar(80)
+  externalRunId                String?               @map("external_run_id") @db.Uuid
+  idempotencyKey               String                @map("idempotency_key") @db.VarChar(200)
+  policySnapshot               Json                  @map("policy_snapshot")
+  memoryContextSnapshot        Json?                 @map("memory_context_snapshot")
+  collaborationContextSnapshot Json?                 @map("collaboration_context_snapshot")
+  modelRoutePolicyVersionId    String?               @map("model_route_policy_version_id") @db.Uuid
+  modelRouteSnapshot           Json?                 @map("model_route_snapshot")
+  attempts                     Int                   @default(0)
+  version                      Int                   @default(1)
+  errorCode                    String?               @map("error_code") @db.VarChar(120)
+  errorMessage                 String?               @map("error_message") @db.Text
+  runtimeProvider              String?               @map("runtime_provider") @db.VarChar(80)
+  runtimeModel                 String?               @map("runtime_model") @db.VarChar(256)
+  inputTokens                  Int                   @default(0) @map("input_tokens")
+  outputTokens                 Int                   @default(0) @map("output_tokens")
+  totalTokens                  Int                   @default(0) @map("total_tokens")
+  tokenEvidence                AgentRunTokenEvidence @default(UNREPORTED) @map("token_evidence")
+  quotaChargedTokens           Int                   @default(0) @map("quota_charged_tokens")
+  quotaSettledAt               DateTime?             @map("quota_settled_at") @db.Timestamptz(6)
+  toolCalls                    Int                   @default(0) @map("tool_calls")
+  costMicros                   BigInt                @default(0) @map("cost_micros")
+  latencyMs                    Int?                  @map("latency_ms")
+  groundedCitationCount        Int                   @default(0) @map("grounded_citation_count")
+  reservedTokens               Int                   @default(0) @map("reserved_tokens")
+  cancellationRequestedAt      DateTime?             @map("cancellation_requested_at") @db.Timestamptz(6)
+  cancellationReason           String?               @map("cancellation_reason") @db.VarChar(120)
+  cancellationConfirmedAt      DateTime?             @map("cancellation_confirmed_at") @db.Timestamptz(6)
+  usageRecordedAt              DateTime?             @map("usage_recorded_at") @db.Timestamptz(6)
+  costRecordedAt               DateTime?             @map("cost_recorded_at") @db.Timestamptz(6)
+  dispatchStartedAt            DateTime?             @map("dispatch_started_at") @db.Timestamptz(6)
+  startedAt                    DateTime?             @map("started_at") @db.Timestamptz(6)
+  finishedAt                   DateTime?             @map("finished_at") @db.Timestamptz(6)
+  createdAt                    DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt                    DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   tenant            Tenant                    @relation(fields: [tenantId], references: [id], onDelete: Restrict)
   conversation      Conversation              @relation(fields: [tenantId, conversationId], references: [tenantId, id], onDelete: Restrict)
@@ -2387,6 +2569,8 @@ model AgentRun {
   childRuns         AgentRun[]                @relation("AgentRunRelayChain")
   retryOf           AgentRun?                 @relation("AgentRunRetries", fields: [tenantId, retryOfRunId], references: [tenantId, id], onDelete: Restrict)
   retries           AgentRun[]                @relation("AgentRunRetries")
+  supersededBy      AgentRun?                 @relation("AgentRunSupersession", fields: [tenantId, supersededByRunId], references: [tenantId, id], onDelete: Restrict)
+  supersededRuns    AgentRun[]                @relation("AgentRunSupersession")
   streamEvents      AgentRunStreamEvent[]
   connectivityProbe AiModelConnectivityProbe?
 
@@ -2401,7 +2585,8 @@ model AgentRun {
   @@index([tenantId, finishedAt])
   @@index([tenantId, runtimeProvider, runtimeModel, finishedAt], map: "agent_runs_tenant_runtime_model_finished_at_idx")
   @@index([tenantId, conversationId, turnIndex])
-  @@index([tenantId, conversationId, status, createdAt, id])
+  @@index([tenantId, conversationId, status, conversationSequence, turnIndex, id], map: "agent_runs_tenant_conversation_status_sequence_idx")
+  @@index([tenantId, supersededByRunId], map: "agent_runs_tenant_superseded_by_idx")
   @@index([tenantId, modelRoutePolicyVersionId, createdAt], map: "agent_runs_model_route_policy_idx")
   @@map("agent_runs")
 }

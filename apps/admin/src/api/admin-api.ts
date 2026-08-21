@@ -70,6 +70,14 @@ import {
   transitionKnowledgeGraphCorrectionRequestSchema,
   transitionKnowledgeGraphCorrectionBatchRequestSchema,
   knowledgeGraphCorrectionBatchResultSchema,
+  createLexiangConnectionRequestSchema,
+  discoverLexiangConnectionRequestSchema,
+  knowledgeProviderConnectionResponseSchema,
+  knowledgeProviderHealthCheckResponseSchema,
+  lexiangConnectionDiscoveryResponseSchema,
+  lexiangSpaceSyncResponseSchema,
+  bindLexiangUserRequestSchema,
+  knowledgeProviderUserBindingsResponseSchema,
   transitionKnowledgeOntologyVersionRequestSchema,
   browserAuthSessionResponseSchema,
   browserLoginResultSchema,
@@ -197,6 +205,14 @@ import {
   type TransitionKnowledgeGraphCorrectionRequest,
   type TransitionKnowledgeGraphCorrectionBatchRequest,
   type KnowledgeGraphCorrectionBatchResult,
+  type CreateLexiangConnectionRequest,
+  type DiscoverLexiangConnectionRequest,
+  type KnowledgeProviderConnectionResponse,
+  type BindLexiangUserRequest,
+  type KnowledgeProviderUserBindingsResponse,
+  type KnowledgeProviderHealthCheckResponse,
+  type LexiangConnectionDiscoveryResponse,
+  type LexiangSpaceSyncResponse,
   type TransitionKnowledgeOntologyVersionRequest,
   type LoginRequest,
   type MfaLoginVerifyRequest,
@@ -435,6 +451,80 @@ export function bindFeishuOrganization(
     body: bindFeishuOrganizationRequestSchema.parse(input),
     schema: feishuOrganizationSyncStatusSchema,
   });
+}
+
+export function getLexiangKnowledgeConnection(
+  signal?: AbortSignal,
+): Promise<KnowledgeProviderConnectionResponse> {
+  return request('/admin/integrations/knowledge/lexiang/connection', {
+    schema: knowledgeProviderConnectionResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function connectLexiangKnowledge(
+  input: CreateLexiangConnectionRequest,
+): Promise<KnowledgeProviderConnectionResponse> {
+  return request('/admin/integrations/knowledge/lexiang/connection', {
+    method: 'PUT',
+    body: createLexiangConnectionRequestSchema.parse(input),
+    schema: knowledgeProviderConnectionResponseSchema,
+  });
+}
+
+export function discoverLexiangKnowledgeConnection(
+  input: DiscoverLexiangConnectionRequest,
+): Promise<LexiangConnectionDiscoveryResponse> {
+  return request('/admin/integrations/knowledge/lexiang/discovery', {
+    method: 'POST',
+    body: discoverLexiangConnectionRequestSchema.parse(input),
+    schema: lexiangConnectionDiscoveryResponseSchema,
+  });
+}
+
+export function checkLexiangKnowledgeHealth(): Promise<KnowledgeProviderHealthCheckResponse> {
+  return request('/admin/integrations/knowledge/lexiang/health-check', {
+    method: 'POST',
+    schema: knowledgeProviderHealthCheckResponseSchema,
+  });
+}
+
+export function disableLexiangKnowledge(): Promise<KnowledgeProviderConnectionResponse> {
+  return request('/admin/integrations/knowledge/lexiang/connection', {
+    method: 'DELETE',
+    schema: knowledgeProviderConnectionResponseSchema,
+  });
+}
+
+export function getLexiangUserBindings(
+  signal?: AbortSignal,
+): Promise<KnowledgeProviderUserBindingsResponse> {
+  return request('/admin/integrations/knowledge/lexiang/user-bindings', {
+    schema: knowledgeProviderUserBindingsResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function bindLexiangUser(
+  input: BindLexiangUserRequest,
+): Promise<KnowledgeProviderUserBindingsResponse> {
+  return request('/admin/integrations/knowledge/lexiang/user-bindings', {
+    method: 'PUT',
+    body: bindLexiangUserRequestSchema.parse(input),
+    schema: knowledgeProviderUserBindingsResponseSchema,
+  });
+}
+
+export function disableLexiangUserBinding(
+  userId: string,
+): Promise<KnowledgeProviderUserBindingsResponse> {
+  return request(
+    `/admin/integrations/knowledge/lexiang/user-bindings/${encodeURIComponent(userId)}`,
+    {
+      method: 'DELETE',
+      schema: knowledgeProviderUserBindingsResponseSchema,
+    },
+  );
 }
 
 export function updateOrganization(input: UpdateOrganizationRequest): Promise<unknown> {
@@ -1122,6 +1212,27 @@ export function updateKnowledgeBase(
   });
 }
 
+export function deleteKnowledgeBase(id: string, expectedVersion: number): Promise<KnowledgeBase> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(id)}?expectedVersion=${encodeURIComponent(expectedVersion)}`,
+    { method: 'DELETE', schema: knowledgeBaseSchema },
+  );
+}
+
+export function syncExternalKnowledgeBase(id: string): Promise<KnowledgeBase> {
+  return request(`/admin/knowledge-bases/${encodeURIComponent(id)}/external-sync`, {
+    method: 'POST',
+    schema: knowledgeBaseSchema,
+  });
+}
+
+export function syncLexiangKnowledgeBases(): Promise<LexiangSpaceSyncResponse> {
+  return request('/admin/knowledge-bases/lexiang-sync', {
+    method: 'POST',
+    schema: lexiangSpaceSyncResponseSchema,
+  });
+}
+
 export function updateKnowledgeDocumentAccess(
   knowledgeBaseId: string,
   documentId: string,
@@ -1285,6 +1396,16 @@ export function ensureKnowledgeFolders(
     body: ensureKnowledgeFoldersRequestSchema.parse(input),
     schema: knowledgeFolderListResponseSchema,
   });
+}
+
+export function deleteKnowledgeFolder(
+  knowledgeBaseId: string,
+  folderId: string,
+): Promise<KnowledgeFolderListResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/folders/${encodeURIComponent(folderId)}`,
+    { method: 'DELETE', schema: knowledgeFolderListResponseSchema },
+  );
 }
 
 export function inspectKnowledgeUpload(

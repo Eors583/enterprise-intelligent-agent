@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 
-import type { AiDataClassification, AiSafetyDecision } from '@enterprise/contracts';
+import type {
+  AiDataClassification,
+  AiSafetyDecision,
+  EmployeeCollaborationSource,
+} from '@enterprise/contracts';
 
 import type {
   AgentRunContextMessage,
@@ -17,12 +21,13 @@ const GENERIC_SECRET_PATTERN =
 const EMAIL_PATTERN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/giu;
 const PHONE_PATTERN = /(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)/gu;
 const INJECTION_PATTERN =
-  /(?:ignore|disregard|override)\s+(?:all\s+)?(?:(?:previous|prior)(?:\s+system)?|system)\s+(?:instructions?|prompts?)/iu;
+  /(?:ignore|disregard|override)\s+(?:all\s+)?(?:(?:previous|prior)(?:\s+system)?|system)\s+(?:instructions?|prompts?)|(?:忽略|无视|覆盖|绕过)[^。！？\n]{0,16}(?:指令|提示词|规则)/iu;
 
 export interface InputSafetyResult {
   readonly messages: readonly AgentRunContextMessage[];
   readonly knowledgeSources: readonly AgentRunKnowledgeSource[];
   readonly memoryContexts: readonly AgentRunMemoryContext[];
+  readonly collaborationSources: readonly EmployeeCollaborationSource[];
   readonly decision: AiSafetyDecision;
 }
 
@@ -35,15 +40,23 @@ export function evaluateAndMinimizeRunInput(input: {
   readonly messages: readonly AgentRunContextMessage[];
   readonly knowledgeSources: readonly AgentRunKnowledgeSource[];
   readonly memoryContexts?: readonly AgentRunMemoryContext[];
+  readonly collaborationSources?: readonly EmployeeCollaborationSource[];
   readonly modelPolicyClassification?: AiDataClassification;
 }): InputSafetyResult {
   const memoryContexts = input.memoryContexts ?? [];
-  const rawCanonical = canonicalInput(input.messages, input.knowledgeSources, memoryContexts);
+  const collaborationSources = input.collaborationSources ?? [];
+  const rawCanonical = canonicalInput(
+    input.messages,
+    input.knowledgeSources,
+    memoryContexts,
+    collaborationSources,
+  );
   if (PRIVATE_KEY_PATTERN.test(rawCanonical)) {
     return {
       messages: input.messages,
       knowledgeSources: input.knowledgeSources,
       memoryContexts,
+      collaborationSources,
       decision: decisionFor({
         direction: 'INPUT',
         classification: 'RESTRICTED',
@@ -67,7 +80,16 @@ export function evaluateAndMinimizeRunInput(input: {
     ...memory,
     summary: minimizeSensitiveText(memory.summary),
   }));
-  const minimizedCanonical = canonicalInput(minimizedMessages, minimizedSources, minimizedMemories);
+  const minimizedCollaborationSources = collaborationSources.map((source) => ({
+    ...source,
+    content: minimizeSensitiveText(source.content),
+  }));
+  const minimizedCanonical = canonicalInput(
+    minimizedMessages,
+    minimizedSources,
+    minimizedMemories,
+    minimizedCollaborationSources,
+  );
   const redacted = minimizedCanonical !== rawCanonical;
   const detectedClassification: AiDataClassification = redacted ? 'CONFIDENTIAL' : 'INTERNAL';
   const effectiveClassification = maximumAiDataClassification(
@@ -82,14 +104,18 @@ export function evaluateAndMinimizeRunInput(input: {
   const memoryInjectionRisk = memoryContexts.some((memory) =>
     INJECTION_PATTERN.test(memory.summary),
   );
+  const collaborationInjectionRisk = collaborationSources.some((source) =>
+    INJECTION_PATTERN.test(source.content),
+  );
   const reasonCodes = [
     ...(redacted ? ['FIELD_LEVEL_MINIMIZATION_APPLIED'] : []),
     ...(knowledgeInjectionRisk ? ['UNTRUSTED_KNOWLEDGE_INSTRUCTION_DETECTED'] : []),
     ...(memoryInjectionRisk ? ['UNTRUSTED_MEMORY_INSTRUCTION_DETECTED'] : []),
+    ...(collaborationInjectionRisk ? ['UNTRUSTED_COLLABORATION_INSTRUCTION_DETECTED'] : []),
     ...(effectiveClassification !== detectedClassification
       ? ['CONTEXT_CLASSIFICATION_ENFORCED']
       : []),
-    ...(!redacted && !knowledgeInjectionRisk && !memoryInjectionRisk
+    ...(!redacted && !knowledgeInjectionRisk && !memoryInjectionRisk && !collaborationInjectionRisk
       ? ['NO_SENSITIVE_PATTERN_DETECTED']
       : []),
   ];
@@ -97,6 +123,7 @@ export function evaluateAndMinimizeRunInput(input: {
     messages: minimizedMessages,
     knowledgeSources: minimizedSources,
     memoryContexts: minimizedMemories,
+    collaborationSources: minimizedCollaborationSources,
     decision: decisionFor({
       direction: 'INPUT',
       classification: effectiveClassification,
@@ -142,6 +169,7 @@ function canonicalInput(
   messages: readonly AgentRunContextMessage[],
   sources: readonly AgentRunKnowledgeSource[],
   memories: readonly AgentRunMemoryContext[],
+  collaborationSources: readonly EmployeeCollaborationSource[],
 ): string {
   return JSON.stringify({
     messages: messages.map(({ senderType, senderId, text }) => ({ senderType, senderId, text })),
@@ -161,6 +189,15 @@ function canonicalInput(
       summary,
       sensitivity,
     })),
+    collaborationSources: collaborationSources.map(
+      ({ sourceId, sourceType, sourceVersion, content, contentHash }) => ({
+        sourceId,
+        sourceType,
+        sourceVersion,
+        content,
+        contentHash,
+      }),
+    ),
   });
 }
 

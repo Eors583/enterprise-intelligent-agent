@@ -14,6 +14,42 @@ const EMPTY_STATE: DesktopAuthState = {
 describe('desktop MFA login', () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it('uses the active account tenant as the real add-account form value', async () => {
+    const authState: DesktopAuthState = {
+      accounts: [
+        {
+          sessionId: '10000000-0000-7000-8000-000000000001',
+          tenantId: '10000000-0000-7000-8000-000000000002',
+          tenantSlug: 'future-collaboration',
+          tenantName: '未来协作科技',
+          userId: '10000000-0000-7000-8000-000000000003',
+          email: 'owner@example.test',
+          displayName: '测试账号',
+          role: 'OWNER',
+          passwordChangeRequired: false,
+          accessExpiresAt: '2031-01-01T00:05:00.000Z',
+          refreshExpiresAt: '2031-01-02T00:05:00.000Z',
+        },
+      ],
+      activeSessionId: '10000000-0000-7000-8000-000000000001',
+      persistentStorageAvailable: true,
+    };
+    const dom = await renderInTestDom(
+      createElement(AuthScreen, {
+        authState,
+        modal: true,
+        onAuthenticated: vi.fn(),
+      }),
+    );
+    try {
+      const tenant = dom.container.querySelector('[name="tenantSlug"]');
+      expect(tenant).toBeInstanceOf(HTMLInputElement);
+      expect((tenant as HTMLInputElement).value).toBe('future-collaboration');
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
   it('renders TOTP and recovery-code choices and verifies before authenticating', async () => {
     const challenge = {
       kind: 'MFA_REQUIRED' as const,

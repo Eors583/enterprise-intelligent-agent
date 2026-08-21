@@ -56,6 +56,43 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
       eventType === AGENT_RUN_REQUESTED_EVENT_TYPE
         ? OUTBOX_LANE.agentRunExecution
         : OUTBOX_LANE.agentRunCancellation;
+    const queueHeadJoin =
+      eventType === AGENT_RUN_REQUESTED_EVENT_TYPE
+        ? Prisma.sql`
+          LEFT JOIN public."agent_runs" AS run
+            ON run."tenant_id" = event."tenant_id"
+           AND run."id" = event."aggregate_id"
+        `
+        : Prisma.empty;
+    const queueHeadPredicate =
+      eventType === AGENT_RUN_REQUESTED_EVENT_TYPE
+        ? Prisma.sql`
+          AND (
+            run."id" IS NULL
+            OR run."status" <> 'QUEUED'::public."AgentRunStatus"
+            OR NOT EXISTS (
+              SELECT 1
+              FROM public."agent_runs" AS earlier
+              WHERE earlier."tenant_id" = run."tenant_id"
+                AND earlier."conversation_id" = run."conversation_id"
+                AND (
+                  earlier."conversation_sequence" < run."conversation_sequence"
+                  OR (
+                    earlier."conversation_sequence" = run."conversation_sequence"
+                    AND earlier."turn_index" < run."turn_index"
+                  )
+                )
+                AND earlier."status" IN (
+                  'QUEUED'::public."AgentRunStatus",
+                  'DISPATCHING'::public."AgentRunStatus",
+                  'RUNNING'::public."AgentRunStatus",
+                  'UNKNOWN'::public."AgentRunStatus"
+                )
+                AND earlier."superseded_by_run_id" IS NULL
+            )
+          )
+        `
+        : Prisma.empty;
     return this.withWorkerRole(async (transaction) => {
       const rows = await transaction.$queryRaw<ClaimedRow[]>(Prisma.sql`
         WITH candidates AS MATERIALIZED (
@@ -64,6 +101,7 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
           JOIN public."outbox_events" AS event
             ON event."tenant_id" = delivery."tenant_id"
            AND event."id" = delivery."event_id"
+          ${queueHeadJoin}
           WHERE delivery."consumer_key" = ${OUTBOX_CONSUMER.agentRun}
             AND delivery."lane" = ${lane}
             AND event."event_type" = ${eventType}
@@ -73,6 +111,7 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
               delivery."locked_until" IS NULL
               OR delivery."locked_until" <= clock_timestamp()
             )
+            ${queueHeadPredicate}
           ORDER BY delivery."available_at", delivery."created_at", delivery."id"
           LIMIT ${input.batchSize}
           FOR UPDATE OF delivery SKIP LOCKED
@@ -118,6 +157,28 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
         leaseExpiresAt: row.locked_until,
         createdAt: row.created_at,
       }));
+    });
+  }
+
+  renewLease(input: {
+    readonly eventId: string;
+    readonly workerId: string;
+    readonly claimTtlMs: number;
+  }): Promise<boolean> {
+    return this.withWorkerRole(async (transaction) => {
+      const updated = await transaction.$executeRaw(Prisma.sql`
+        UPDATE public."outbox_event_deliveries"
+        SET
+          "locked_until" =
+            clock_timestamp() + ${input.claimTtlMs} * INTERVAL '1 millisecond',
+          "updated_at" = clock_timestamp()
+        WHERE "event_id" = ${input.eventId}::uuid
+          AND "consumer_key" = ${OUTBOX_CONSUMER.agentRun}
+          AND "status" = 'PENDING'::"OutboxEventStatus"
+          AND "locked_by" = ${input.workerId}
+          AND "locked_until" > clock_timestamp()
+      `);
+      return updated === 1;
     });
   }
 

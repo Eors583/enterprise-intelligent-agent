@@ -91,7 +91,7 @@ export class BootstrapService {
                 },
           capabilities: {
             canContactHuman: member.status === 'active' && member.id !== user.id,
-            canContactAgent: operationalAvailability?.status === 'AVAILABLE',
+            canContactAgent: member.status === 'active' && agent?.status === 'online',
           },
         };
       }),

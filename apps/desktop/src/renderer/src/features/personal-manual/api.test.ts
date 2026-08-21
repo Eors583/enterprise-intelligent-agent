@@ -1,7 +1,15 @@
-import type { PersonalManualSelfProfile } from '@enterprise/contracts';
+import type {
+  PersonalManualSelfProfile,
+  WorkAvailabilitySelfResponse,
+} from '@enterprise/contracts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { getMyPersonalManual, updateMyPersonalManual } from './api';
+import {
+  getMyPersonalManual,
+  getMyWorkAvailability,
+  updateMyPersonalManual,
+  updateMyWorkAvailability,
+} from './api';
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -24,7 +32,12 @@ describe('personal manual self-service API', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await updateMyPersonalManual(
-      { expectedUpdatedAt: profile.updatedAt, manual: profile.manual },
+      {
+        expectedUpdatedAt: profile.updatedAt,
+        manual: profile.manual,
+        disclosurePolicy: profile.disclosurePolicy,
+        collaborationSettings: profile.collaborationSettings,
+      },
       'http://127.0.0.1:3000',
     );
 
@@ -33,6 +46,45 @@ describe('personal manual self-service API', () => {
     expect(JSON.parse(String(request.body))).toEqual({
       expectedUpdatedAt: profile.updatedAt,
       manual: profile.manual,
+      disclosurePolicy: profile.disclosurePolicy,
+      collaborationSettings: profile.collaborationSettings,
+    });
+  });
+
+  it('loads and updates the current member work availability', async () => {
+    const availability = availabilityFixture();
+    const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse(availability)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(getMyWorkAvailability(undefined, 'http://127.0.0.1:3000')).resolves.toEqual(
+      availability,
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      'http://127.0.0.1:3000/api/v1/workbench/people/me/work-availability',
+      expect.objectContaining({ method: 'GET', credentials: 'include' }),
+    );
+
+    await updateMyWorkAvailability(
+      {
+        status: 'FOCUSING',
+        startsAt: availability.availability!.startsAt,
+        endsAt: availability.availability!.endsAt,
+        summary: '集中处理方案，紧急事项请联系代理人。',
+        expectedResponse: '今天 17:00 前',
+        emergencyContactUserId: availability.availability!.emergencyContact!.id,
+        disclosureScope: 'SHARED_WORK',
+        expectedRevision: availability.availability!.revision,
+      },
+      'http://127.0.0.1:3000',
+    );
+
+    const request = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(request.method).toBe('PUT');
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      status: 'FOCUSING',
+      disclosureScope: 'SHARED_WORK',
+      expectedRevision: 1,
     });
   });
 });
@@ -67,7 +119,46 @@ function profileFixture(): PersonalManualSelfProfile {
       clubs: null,
       faqs: [],
     },
+    disclosurePolicy: privatePolicy(),
+    collaborationSettings: {
+      manualSharingEnabled: false,
+      availabilitySharingEnabled: false,
+      privateRiskRemindersEnabled: true,
+    },
+    policyRevision: 1,
     updatedAt: '2026-08-11T01:00:00.000Z',
+  };
+}
+
+function privatePolicy(): PersonalManualSelfProfile['disclosurePolicy'] {
+  return {
+    IDENTITY: 'SELF_ONLY',
+    RESPONSIBILITIES: 'SELF_ONLY',
+    COLLABORATION: 'SELF_ONLY',
+    RESOURCES: 'SELF_ONLY',
+    INTERESTS: 'SELF_ONLY',
+    FAQ: 'SELF_ONLY',
+  };
+}
+
+function availabilityFixture(): WorkAvailabilitySelfResponse {
+  return {
+    availability: {
+      id: '00000000-0000-4000-8000-000000000010',
+      status: 'FOCUSING',
+      startsAt: '2026-08-13T01:00:00.000Z',
+      endsAt: '2026-08-13T09:00:00.000Z',
+      summary: '集中处理产品方案。',
+      expectedResponse: '今天 17:00 前',
+      emergencyContact: {
+        id: '00000000-0000-4000-8000-000000000011',
+        displayName: '陈晨',
+      },
+      disclosureScope: 'SHARED_WORK',
+      revision: 1,
+      updatedAt: '2026-08-13T01:00:00.000Z',
+      expired: false,
+    },
   };
 }
 

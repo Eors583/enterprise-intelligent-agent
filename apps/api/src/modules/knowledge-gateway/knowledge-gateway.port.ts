@@ -50,7 +50,7 @@ export interface KnowledgeRelationshipEvidence {
 export type KnowledgeRetrievalMode = 'LEXICAL' | 'HYBRID';
 export type KnowledgeReranker = 'LEXICAL' | 'WEIGHTED_SCORE' | 'CROSS_ENCODER';
 export type KnowledgeRetrievalDiagnosticStage =
-  'ROUTER' | 'LEXICAL' | 'VECTOR' | 'SQL' | 'RELATIONSHIP' | 'BUSINESS_API' | 'RERANK';
+  'ROUTER' | 'LEXICAL' | 'VECTOR' | 'SQL' | 'RELATIONSHIP' | 'BUSINESS_API' | 'EXTERNAL' | 'RERANK';
 
 export interface KnowledgeRetrievalDiagnostic {
   readonly stage: KnowledgeRetrievalDiagnosticStage;
@@ -72,6 +72,8 @@ export interface KnowledgeRetrievalResult {
   readonly pageEnd: number | null;
   readonly sheetName: string | null;
   readonly content: string;
+  readonly sourceProvider?: 'LOCAL' | 'LEXIANG';
+  readonly sourceUri?: string | null;
   readonly sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB';
   readonly classification: AiDataClassification;
   readonly governanceHash: string;
@@ -114,6 +116,14 @@ export interface KnowledgeRetrievalAuthorizationContext {
   readonly taskContext?: AuthorizationTaskContext;
 }
 
+/** Safe, transport-neutral signal that an authorized retrieval did not complete. */
+export class KnowledgeRetrievalUnavailableError extends Error {
+  constructor(readonly code: string) {
+    super(code);
+    this.name = 'KnowledgeRetrievalUnavailableError';
+  }
+}
+
 export interface KnowledgeSearchInput {
   readonly tenantId: string;
   readonly userId: string;
@@ -135,6 +145,8 @@ export interface KnowledgeEvidenceRecheckInput {
   readonly chunks: readonly {
     readonly chunkId: string;
     readonly documentVersionId: string;
+    readonly knowledgeBaseId?: string;
+    readonly sourceProvider?: 'LOCAL' | 'LEXIANG';
     readonly classification: AiDataClassification;
     readonly governanceHash: string;
     readonly contentHash: string;

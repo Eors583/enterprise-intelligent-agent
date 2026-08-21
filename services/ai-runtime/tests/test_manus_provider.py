@@ -213,6 +213,7 @@ def test_manus_creates_private_isolated_task_and_polls_until_stopped() -> None:
     ]
     create_request = captured[0]
     assert create_request.headers["x-manus-api-key"] == "dummy-manus-key"
+    assert set(create_request.extensions["timeout"].values()) == {None}
     payload = json.loads(create_request.content)
     assert payload["interactive_mode"] is False
     assert payload["hide_in_task_list"] is True
@@ -226,6 +227,10 @@ def test_manus_creates_private_isolated_task_and_polls_until_stopped() -> None:
     assert "agent-default-main_task" not in create_request.content.decode()
     assert payload["message"]["content"][0]["type"] == "text"
     message_envelope = payload["message"]["content"][0]["text"]
+    assert "the final object whose role is user is the current request" in message_envelope
+    assert "Return only the assistant answer" in message_envelope
+    assert "BEGIN_ENTERPRISE_CHAT_TRANSCRIPT" in message_envelope
+    assert "END_ENTERPRISE_CHAT_TRANSCRIPT" in message_envelope
     assert '"role":"system"' in message_envelope
     assert '"role":"user"' in message_envelope
     assert captured[1].url.params["task_id"] == "task-isolated-1"
@@ -775,6 +780,43 @@ def test_manus_maps_http_errors(status_code: int, expected_error: type[Exception
     asyncio.run(provider.aclose())
 
 
+@pytest.mark.parametrize(
+    ("provider_code", "expected_code"),
+    [
+        ("invalid_argument", "MANUS_TASK_CREATE_INVALID_ARGUMENT"),
+        ("not_found", "MANUS_TASK_CREATE_TARGET_NOT_FOUND"),
+        ("failed_precondition", "MANUS_TASK_CREATE_PRECONDITION_FAILED"),
+    ],
+)
+def test_manus_preserves_safe_task_create_failure_stage(
+    provider_code: str,
+    expected_code: str,
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "ok": False,
+                "request_id": "provider-request",
+                "error": {"code": provider_code, "message": "private diagnostics"},
+            },
+        )
+
+    async def scenario() -> None:
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        with pytest.raises(ProviderRequestError) as raised:
+            await provider.complete(completion_request())
+        assert raised.value.code == expected_code
+        assert "private diagnostics" not in str(raised.value)
+        await provider.aclose()
+
+    asyncio.run(scenario())
+
+
 def test_manus_never_logs_key_or_full_provider_response(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -963,16 +1005,20 @@ def test_manus_invalid_json_does_not_survive_as_exception_cause() -> None:
     asyncio.run(provider.aclose())
 
 
-def test_manus_timeout_best_effort_stops_remote_task() -> None:
-    stopped: list[str] = []
+def test_manus_waits_for_terminal_state_beyond_the_legacy_run_timeout() -> None:
+    reads = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
         if request.url.path == "/v2/task.create":
             return httpx.Response(
                 200,
                 json={"ok": True, "request_id": "create", "task_id": "task-timeout"},
             )
         if request.url.path == "/v2/task.listMessages":
+            reads += 1
+            if reads > 1:
+                return httpx.Response(200, json=success_body("task-timeout"))
             return httpx.Response(
                 200,
                 json={
@@ -990,9 +1036,6 @@ def test_manus_timeout_best_effort_stops_remote_task() -> None:
                     "has_more": False,
                 },
             )
-        if request.url.path == "/v2/task.stop":
-            stopped.append(json.loads(request.content)["task_id"])
-            return httpx.Response(200, json={"ok": True, "request_id": "stop"})
         raise AssertionError(f"unexpected Manus path {request.url.path}")
 
     async def scenario() -> None:
@@ -1002,15 +1045,54 @@ def test_manus_timeout_best_effort_stops_remote_task() -> None:
             poll_interval_seconds=0.1,
             max_wait_seconds=1,
             client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            sleep=lambda _delay: asyncio.sleep(0),
         )
         request = replace(completion_request(), timeout_ms=20)
-        with pytest.raises(ProviderTimeoutError) as raised:
-            await provider.complete(request)
-        assert raised.value.__cause__ is None
+        result = await provider.complete(request)
+        assert result.output.content == "Project summary"
         await provider.aclose()
 
     asyncio.run(scenario())
-    assert stopped == ["task-timeout"]
+    assert reads == 2
+
+
+def test_manus_keeps_polling_after_transient_task_read_failure() -> None:
+    reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal reads
+        if request.url.path == "/v2/task.create":
+            return httpx.Response(
+                200,
+                json={"ok": True, "request_id": "create", "task_id": "task-recovered"},
+            )
+        if request.url.path == "/v2/task.listMessages":
+            reads += 1
+            if reads == 1:
+                return httpx.Response(503, json={"error": "temporarily unavailable"})
+            return httpx.Response(200, json=success_body("task-recovered"))
+        raise AssertionError(f"unexpected Manus path {request.url.path}")
+
+    async def scenario() -> tuple[str, list[float]]:
+        sleeps: list[float] = []
+
+        async def no_wait(delay: float) -> None:
+            sleeps.append(delay)
+
+        provider = ManusProvider(
+            base_url="https://api.manus.ai",
+            api_key="dummy-manus-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+            sleep=no_wait,
+        )
+        result = await provider.complete(completion_request())
+        await provider.aclose()
+        return result.output.content, sleeps
+
+    content, sleeps = asyncio.run(scenario())
+    assert content == "Project summary"
+    assert reads == 2
+    assert sleeps == [2.0]
 
 
 def test_manus_cancellation_best_effort_stops_remote_task() -> None:

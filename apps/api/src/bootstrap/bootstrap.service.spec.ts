@@ -37,7 +37,7 @@ describe('BootstrapService employee navigation', () => {
     ]);
   });
 
-  it('does not advertise an online configuration as contactable without verified runtime evidence', async () => {
+  it('keeps an online Agent contactable while reporting unverified model availability', async () => {
     const service = new BootstrapService(
       { current: { tenantId: 'tenant', userId: 'user' } } as never,
       {
@@ -96,6 +96,6 @@ describe('BootstrapService employee navigation', () => {
 
     expect(response.members[0]?.agent?.status).toBe('online');
     expect(response.members[0]?.agent?.operationalAvailability.status).toBe('NOT_READY');
-    expect(response.members[0]?.capabilities.canContactAgent).toBe(false);
+    expect(response.members[0]?.capabilities.canContactAgent).toBe(true);
   });
 });

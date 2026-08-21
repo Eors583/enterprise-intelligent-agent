@@ -17,6 +17,7 @@ const ROUTE_MODULES = [
   'ai-model-routing/AiModelRoutingPage',
   'ai-evaluation/AiEvaluationPage',
   'knowledge/KnowledgePage',
+  'knowledge-integrations/KnowledgeIntegrationsPage',
 ] as const;
 
 describe('admin shell route code splitting', () => {

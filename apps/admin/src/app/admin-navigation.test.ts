@@ -46,6 +46,9 @@ describe('admin information architecture', () => {
     expect(parseAdminRoute('#role-blueprints', 'OWNER')).toBe('role-blueprints');
     expect(primaryNavigationForRoute('role-blueprints')).toBe('agent-center');
     expect(primaryNavigationForRoute('ai-model-routing')).toBe('agent-center');
+    expect(parseAdminRoute('#knowledge-integrations', 'ADMIN')).toBe('knowledge-integrations');
+    expect(primaryNavigationForRoute('knowledge-integrations')).toBe('knowledge-center');
+    expect(isAdminRouteAllowed('knowledge-integrations', 'KNOWLEDGE_ADMIN')).toBe(false);
   });
 
   it('hides marketing by default while preserving its administrator compatibility route', () => {

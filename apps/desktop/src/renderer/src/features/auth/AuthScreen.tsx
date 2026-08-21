@@ -26,6 +26,9 @@ export function AuthScreen({
   const [mfaChallenge, setMfaChallenge] = useState<MfaLoginChallengeResponse | null>(null);
   const tenantSlugInput = useRef<HTMLInputElement>(null);
   const [oidcProviders, setOidcProviders] = useState<OidcPublicProviderListResponse['items']>([]);
+  const activeTenantSlug =
+    authState.accounts.find((account) => account.sessionId === authState.activeSessionId)
+      ?.tenantSlug ?? '';
 
   const submit = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -244,12 +247,14 @@ export function AuthScreen({
               <label>
                 <span>企业标识</span>
                 <input
+                  key={mode}
                   name="tenantSlug"
                   ref={tenantSlugInput}
                   required
                   minLength={mode === 'register' ? 3 : 1}
                   maxLength={80}
                   pattern={mode === 'register' ? '[a-z0-9]+(?:-[a-z0-9]+)*' : undefined}
+                  defaultValue={mode === 'login' ? activeTenantSlug : ''}
                   placeholder="future-collaboration"
                   autoCapitalize="none"
                   onChange={() => setOidcProviders([])}

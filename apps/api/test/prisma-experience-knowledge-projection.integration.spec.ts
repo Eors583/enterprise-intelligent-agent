@@ -248,10 +248,12 @@ async function seedGovernedProjectionFixtures(): Promise<void> {
     `);
     await transaction.$executeRaw(Prisma.sql`
       INSERT INTO public."knowledge_bases" (
-        "id", "tenant_id", "key", "name", "status", "created_by_id"
+        "id", "tenant_id", "key", "name", "status",
+        "space_target_id", "space_target_name", "created_by_id"
       ) VALUES (
         ${knowledgeBaseId}::uuid, ${tenantId}::uuid,
         'experience-projection', 'Experience Projection', 'ACTIVE',
+        ${tenantId}::uuid, 'Experience Projection Tenant',
         ${makerId}::uuid
       )
     `);

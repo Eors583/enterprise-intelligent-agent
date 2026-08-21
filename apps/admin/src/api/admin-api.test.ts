@@ -19,6 +19,10 @@ import {
   knowledgeGraphRebuildResponseSchema,
   knowledgeGraphOverviewSchema,
   knowledgeGraphResponseSchema,
+  knowledgeProviderConnectionResponseSchema,
+  knowledgeProviderHealthCheckResponseSchema,
+  knowledgeProviderUserBindingsResponseSchema,
+  lexiangSpaceSyncResponseSchema,
 } from '@enterprise/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,9 +35,13 @@ vi.mock('./client', () => ({ request: requestMock, requestBlob: requestBlobMock 
 
 import {
   applyFeishuDirectoryPreview,
+  checkLexiangKnowledgeHealth,
   archiveKnowledgeDocument,
   changePassword,
   createKnowledgeBase,
+  connectLexiangKnowledge,
+  discoverLexiangKnowledgeConnection,
+  deleteKnowledgeBase,
   createFeishuDirectoryPreview,
   getFeishuOrganizationSyncStatus,
   getKnowledgeDocument,
@@ -46,12 +54,19 @@ import {
   getKnowledgeBaseReadiness,
   getKnowledgeGraph,
   getKnowledgeGraphOverview,
+  getLexiangKnowledgeConnection,
   publishKnowledgeDocumentVersion,
   rebuildKnowledgeDocumentGraph,
   rollbackKnowledgeDocumentVersion,
   uploadKnowledgeDocument,
   uploadKnowledgeDocumentVersion,
   updateKnowledgeDocumentAccess,
+  syncExternalKnowledgeBase,
+  syncLexiangKnowledgeBases,
+  disableLexiangKnowledge,
+  getLexiangUserBindings,
+  bindLexiangUser,
+  disableLexiangUserBinding,
 } from './admin-api';
 
 const syncStatus = {
@@ -75,6 +90,108 @@ describe('admin API', () => {
     requestMock.mockReset();
     requestMock.mockResolvedValue(syncStatus);
     requestBlobMock.mockReset();
+  });
+
+  it('uses the sanitized Lexiang connection and health-check contracts', async () => {
+    await getLexiangKnowledgeConnection();
+    await connectLexiangKnowledge({
+      appKey: 'lexiang-app',
+      appSecret: 'new-secret-value',
+      teamId: 'team-1',
+      operatorStaffId: 'staff-1',
+    });
+    await discoverLexiangKnowledgeConnection({
+      appKey: 'lexiang-app',
+      appSecret: 'new-secret-value',
+    });
+    await checkLexiangKnowledgeHealth();
+    await disableLexiangKnowledge();
+
+    expect(requestMock).toHaveBeenNthCalledWith(
+      1,
+      '/admin/integrations/knowledge/lexiang/connection',
+      { schema: knowledgeProviderConnectionResponseSchema },
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      2,
+      '/admin/integrations/knowledge/lexiang/connection',
+      expect.objectContaining({
+        method: 'PUT',
+        body: {
+          appKey: 'lexiang-app',
+          appSecret: 'new-secret-value',
+          teamId: 'team-1',
+          operatorStaffId: 'staff-1',
+        },
+        schema: knowledgeProviderConnectionResponseSchema,
+      }),
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      3,
+      '/admin/integrations/knowledge/lexiang/discovery',
+      expect.objectContaining({
+        method: 'POST',
+        body: { appKey: 'lexiang-app', appSecret: 'new-secret-value' },
+      }),
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      4,
+      '/admin/integrations/knowledge/lexiang/health-check',
+      { method: 'POST', schema: knowledgeProviderHealthCheckResponseSchema },
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      5,
+      '/admin/integrations/knowledge/lexiang/connection',
+      { method: 'DELETE', schema: knowledgeProviderConnectionResponseSchema },
+    );
+  });
+
+  it('uses admin-only endpoints for trusted Lexiang member identities', async () => {
+    const userId = '00000000-0000-7000-8000-000000000101';
+    await getLexiangUserBindings();
+    await bindLexiangUser({ userId, externalStaffId: 'staff-101' });
+    await disableLexiangUserBinding(userId);
+
+    expect(requestMock).toHaveBeenNthCalledWith(
+      1,
+      '/admin/integrations/knowledge/lexiang/user-bindings',
+      { schema: knowledgeProviderUserBindingsResponseSchema },
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      2,
+      '/admin/integrations/knowledge/lexiang/user-bindings',
+      expect.objectContaining({
+        method: 'PUT',
+        body: { userId, externalStaffId: 'staff-101' },
+        schema: knowledgeProviderUserBindingsResponseSchema,
+      }),
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      3,
+      `/admin/integrations/knowledge/lexiang/user-bindings/${userId}`,
+      { method: 'DELETE', schema: knowledgeProviderUserBindingsResponseSchema },
+    );
+  });
+
+  it('uses dedicated delete and external synchronization endpoints for knowledge bases', async () => {
+    await deleteKnowledgeBase('knowledge/base', 7);
+    await syncExternalKnowledgeBase('knowledge/base');
+    await syncLexiangKnowledgeBases();
+
+    expect(requestMock).toHaveBeenNthCalledWith(
+      1,
+      '/admin/knowledge-bases/knowledge%2Fbase?expectedVersion=7',
+      { method: 'DELETE', schema: knowledgeBaseSchema },
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(
+      2,
+      '/admin/knowledge-bases/knowledge%2Fbase/external-sync',
+      { method: 'POST', schema: knowledgeBaseSchema },
+    );
+    expect(requestMock).toHaveBeenNthCalledWith(3, '/admin/knowledge-bases/lexiang-sync', {
+      method: 'POST',
+      schema: lexiangSpaceSyncResponseSchema,
+    });
   });
 
   it('updates document access through the stable document endpoint', async () => {

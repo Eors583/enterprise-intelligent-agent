@@ -15,7 +15,6 @@ import { PrismaService } from '../../../../database/prisma.service.js';
 import { hasRoleAgentAssignmentMarker } from '../../../agent-control/domain/role-agent-assignment.policy.js';
 import { buildAgentRunPolicySnapshot } from '../../../agent-run/domain/agent-run-policy-snapshot.js';
 import {
-  ActiveAgentRunConflictError,
   AgentUnavailableForRunError,
   type ConversationListOptions,
   type ConversationMessagePage,
@@ -343,7 +342,7 @@ export class PrismaConversationRepository extends ConversationRepository {
           ? null
           : await transaction.message.findFirst({
               where: { tenantId, conversationId, id: page.before },
-              select: { id: true, createdAt: true },
+              select: { id: true, sequence: true },
             });
       if (page.before !== undefined && cursor === null) return null;
 
@@ -354,13 +353,10 @@ export class PrismaConversationRepository extends ConversationRepository {
           ...(cursor === null
             ? {}
             : {
-                OR: [
-                  { createdAt: { lt: cursor.createdAt } },
-                  { createdAt: cursor.createdAt, id: { lt: cursor.id } },
-                ],
+                sequence: { lt: cursor.sequence },
               }),
         },
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        orderBy: [{ sequence: 'desc' }],
         take: page.limit + 1,
       });
       const hasMore = newestFirst.length > page.limit;
@@ -387,7 +383,12 @@ export class PrismaConversationRepository extends ConversationRepository {
             take: 1,
           },
         },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        orderBy: [
+          { conversationSequence: 'asc' },
+          { turnIndex: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
       });
       return {
         items: messages.map(mapMessage),
@@ -748,30 +749,14 @@ export class PrismaConversationRepository extends ConversationRepository {
         return mapMessage(existing);
       }
 
-      const activeAgentParticipant = await transaction.conversationParticipant.findFirst({
-        where: {
-          tenantId: input.tenantId,
-          conversationId: input.conversationId,
-          type: 'AGENT',
-          leftAt: null,
-        },
-        select: { id: true },
-      });
-      if (activeAgentParticipant !== null && input.responseTarget?.type !== 'human') {
-        const relayLockKey = `${input.tenantId}:${input.conversationId}:agent-run`;
-        await transaction.$queryRaw`
-          SELECT pg_advisory_xact_lock(hashtextextended(${relayLockKey}, 0))::text AS lock_token
-        `;
-        const activeRun = await transaction.agentRun.findFirst({
-          where: {
-            tenantId: input.tenantId,
-            conversationId: input.conversationId,
-            status: { in: ['QUEUED', 'DISPATCHING', 'RUNNING', 'UNKNOWN'] },
-          },
-          select: { id: true },
-        });
-        if (activeRun !== null) throw new ActiveAgentRunConflictError();
-      }
+      // Allocate the message and its initial Run while holding the same durable
+      // conversation lock used by terminal Run writes. Every question is
+      // accepted; the lock only establishes a database order and never waits
+      // for model execution.
+      const conversationLockKey = `${input.tenantId}:${input.conversationId}:agent-run`;
+      await transaction.$queryRaw`
+        SELECT pg_advisory_xact_lock(hashtextextended(${conversationLockKey}, 0))::text AS lock_token
+      `;
 
       if (input.responseTarget !== undefined) {
         const responseParticipant = await transaction.conversationParticipant.findFirst({
@@ -902,6 +887,7 @@ function mapConversationRun(run: {
     'QUEUED' | 'DISPATCHING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED';
   readonly errorCode: string | null;
   readonly errorMessage: string | null;
+  readonly supersededByRunId: string | null;
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly finishedAt: Date | null;
@@ -916,6 +902,7 @@ function mapConversationRun(run: {
     status: run.status,
     errorCode: run.errorCode,
     errorMessage: run.errorMessage,
+    supersededByRunId: run.supersededByRunId,
     retryable: run.status === 'FAILED' || run.status === 'CANCELLED',
     createdAt: run.createdAt.toISOString(),
     startedAt: run.startedAt?.toISOString() ?? null,
@@ -1171,6 +1158,20 @@ async function enqueueInitialAgentRun(
       }),
     },
   });
+  const superseded = await transaction.agentRun.updateMany({
+    where: {
+      tenantId: input.tenantId,
+      conversationId: conversation.id,
+      status: 'UNKNOWN',
+      supersededByRunId: null,
+      id: { not: runId },
+    },
+    data: {
+      supersededByRunId: runId,
+      supersededAt: now,
+      version: { increment: 1 },
+    },
+  });
   await transaction.outboxEvent.create({
     data: {
       tenantId: input.tenantId,
@@ -1194,6 +1195,7 @@ async function enqueueInitialAgentRun(
         agentId: agent.id,
         turnIndex: 1,
         turnLimit,
+        supersededUnknownRunCount: superseded.count,
       },
     },
   });

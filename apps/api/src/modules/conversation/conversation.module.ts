@@ -4,7 +4,6 @@ import { ConfigService } from '@nestjs/config';
 import type { EnvironmentVariables } from '../../config/environment.js';
 import { AgentControlModule } from '../agent-control/agent-control.module.js';
 import { AgentRunModule } from '../agent-run/agent-run.module.js';
-import { AgentOperationalReadinessModule } from '../ai-safety-model-routing/agent-operational-readiness.module.js';
 import { AuthorizationModule } from '../authorization/authorization.module.js';
 import { IdentityModule } from '../identity/identity.module.js';
 import { AnswerFeedbackController } from './answer-feedback.controller.js';
@@ -18,13 +17,7 @@ import { PrismaConversationRepository } from './infrastructure/prisma/prisma-con
 import { PrismaAnswerFeedbackEvaluationRepository } from './infrastructure/prisma/prisma-answer-feedback-evaluation.repository.js';
 
 @Module({
-  imports: [
-    IdentityModule,
-    AgentControlModule,
-    AgentRunModule,
-    AuthorizationModule,
-    AgentOperationalReadinessModule,
-  ],
+  imports: [IdentityModule, AgentControlModule, AgentRunModule, AuthorizationModule],
   controllers: [AnswerFeedbackController, ConversationController],
   providers: [
     AnswerFeedbackService,

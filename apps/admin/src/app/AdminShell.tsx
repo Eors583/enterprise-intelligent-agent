@@ -11,6 +11,7 @@ import {
   normalizeAdminRoute,
   parseAdminRoute,
   primaryNavigationForRoute,
+  isAdminRouteAllowed,
   type AdminPageId,
   type AdminPrimaryId,
   type AdminRouteId,
@@ -87,6 +88,11 @@ const KnowledgePage = lazy(() =>
     default: module.KnowledgePage,
   })),
 );
+const KnowledgeIntegrationsPage = lazy(() =>
+  import('@/features/knowledge-integrations/KnowledgeIntegrationsPage').then((module) => ({
+    default: module.KnowledgeIntegrationsPage,
+  })),
+);
 
 export function AdminShell({ session }: { session: BrowserAuthSessionResponse }): ReactNode {
   const [route, setRoute] = useState<AdminRouteId>(() =>
@@ -101,7 +107,11 @@ export function AdminShell({ session }: { session: BrowserAuthSessionResponse })
   const page = normalizeAdminRoute(route);
   const activePrimary = primaryNavigationForRoute(route);
   const secondaryNavigation =
-    activePrimary === null ? [] : (ADMIN_SECONDARY_NAVIGATION[activePrimary] ?? []);
+    activePrimary === null
+      ? []
+      : (ADMIN_SECONDARY_NAVIGATION[activePrimary] ?? []).filter((item) =>
+          isAdminRouteAllowed(item.id, session.account.role),
+        );
 
   useEffect(() => {
     const nextHash = `#${route}`;
@@ -250,6 +260,7 @@ export function AdminShell({ session }: { session: BrowserAuthSessionResponse })
                 currentUserName={session.account.displayName}
               />
             ) : null}
+            {page === 'knowledge-integrations' ? <KnowledgeIntegrationsPage /> : null}
           </Suspense>
         </div>
       </main>

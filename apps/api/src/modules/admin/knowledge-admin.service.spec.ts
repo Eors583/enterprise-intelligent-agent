@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { AdminPrismaService } from '../../database/admin-prisma.service.js';
 import type { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
+import type { KnowledgeProviderSpaceService } from '../knowledge-provider/application/knowledge-provider-space.service.js';
 import type { KnowledgeAiRuntimeClient } from '../knowledge-semantic/knowledge-ai-runtime.client.js';
 import type { AdminAccessService } from './admin-access.service.js';
 import { KnowledgeAdminService } from './knowledge-admin.service.js';
@@ -18,6 +19,192 @@ const DOCUMENT_VERSION_ID = '00000000-0000-7000-8000-000000000007';
 const DATABASE_NOW = new Date('2026-07-29T05:00:00.000Z');
 
 describe('KnowledgeAdminService', () => {
+  it('imports unlinked Lexiang spaces as administrator-only drafts and refreshes linked spaces', async () => {
+    const remoteSpaces = [
+      {
+        id: 'remote-new',
+        teamId: 'team-1',
+        rootEntryId: 'root-new',
+        name: '历史知识库',
+        description: '从乐享发现',
+        logo: null,
+        visibleType: 0,
+        managerInheritType: 'none',
+        memberInheritType: 'none',
+      },
+      {
+        id: 'remote-linked',
+        teamId: 'team-1',
+        rootEntryId: 'root-linked',
+        name: '已绑定知识库',
+        description: null,
+        logo: null,
+        visibleType: 1,
+        managerInheritType: 'viewer',
+        memberInheritType: 'viewer',
+      },
+    ];
+    const bindExisting = vi
+      .fn()
+      .mockResolvedValueOnce({ status: 'ACTIVE' })
+      .mockResolvedValueOnce({ status: 'SYNC_FAILED' });
+    const syncEntries = vi
+      .fn()
+      .mockResolvedValueOnce({
+        entriesDiscovered: 3,
+        foldersSynchronized: 1,
+        documentsDiscovered: 2,
+        documentsImported: 2,
+        documentsUpdated: 0,
+        documentsArchived: 0,
+      })
+      .mockResolvedValueOnce({
+        entriesDiscovered: 5,
+        foldersSynchronized: 2,
+        documentsDiscovered: 3,
+        documentsImported: 0,
+        documentsUpdated: 3,
+        documentsArchived: 1,
+      });
+    const service = createService({
+      provider: {
+        listRemote: vi.fn().mockResolvedValue(remoteSpaces),
+        linkedKnowledgeBaseIds: vi
+          .fn()
+          .mockResolvedValue(new Map([['remote-linked', KNOWLEDGE_BASE_ID]])),
+        bindExisting,
+        syncEntries,
+      },
+    });
+    const create = vi
+      .spyOn(service, 'create')
+      .mockResolvedValue({ id: '00000000-0000-7000-8000-000000000099' } as never);
+
+    await expect(service.syncLexiangSpaces()).resolves.toEqual({
+      discovered: 2,
+      imported: 1,
+      updated: 1,
+      requiresPrivacyReview: 1,
+      entriesDiscovered: 8,
+      foldersSynchronized: 3,
+      documentsDiscovered: 5,
+      documentsImported: 2,
+      documentsUpdated: 3,
+      documentsArchived: 1,
+    });
+    expect(create).toHaveBeenCalledWith({
+      name: '历史知识库',
+      description: '从乐享发现',
+      status: 'DRAFT',
+      orgUnitIds: [],
+      memberUserIds: [ADMIN_ID],
+      storageProvider: 'LOCAL',
+    });
+    expect(bindExisting).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ tenantId: TENANT_ID, userId: ADMIN_ID }),
+      '00000000-0000-7000-8000-000000000099',
+      remoteSpaces[0],
+    );
+    expect(bindExisting).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ tenantId: TENANT_ID, userId: ADMIN_ID }),
+      KNOWLEDGE_BASE_ID,
+      remoteSpaces[1],
+    );
+    expect(syncEntries).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns a clear gateway failure when the Lexiang catalog cannot be read', async () => {
+    const service = createService({
+      provider: { listRemote: vi.fn().mockRejectedValue(new Error('invalid cursor page')) },
+    });
+
+    await expect(service.syncLexiangSpaces()).rejects.toThrow(
+      '乐享知识库目录读取失败，请检查连接状态后重试。',
+    );
+  });
+
+  it('keeps the local knowledge base unchanged when managed remote deletion fails', async () => {
+    const updateMany = vi.fn();
+    const remoteDelete = vi.fn().mockRejectedValue(new Error('remote delete failed'));
+    const service = createService({
+      transaction: {
+        knowledgeBase: {
+          findFirst: vi.fn().mockResolvedValue({
+            id: KNOWLEDGE_BASE_ID,
+            name: '乐享知识库',
+            version: 3,
+          }),
+          updateMany,
+        },
+      },
+      provider: { delete: remoteDelete },
+    });
+
+    await expect(service.delete(KNOWLEDGE_BASE_ID, 3)).rejects.toThrow('remote delete failed');
+
+    expect(remoteDelete).toHaveBeenCalledOnce();
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it('deletes an empty knowledge folder tree and returns the remaining folders', async () => {
+    const folderId = '00000000-0000-7000-8000-000000000010';
+    const childId = '00000000-0000-7000-8000-000000000011';
+    const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
+    const service = createService({
+      transaction: {
+        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+        knowledgeFolder: {
+          findMany: vi
+            .fn()
+            .mockResolvedValueOnce([
+              { id: folderId, parentId: null },
+              { id: childId, parentId: folderId },
+            ])
+            .mockResolvedValueOnce([]),
+          deleteMany,
+        },
+        knowledgeDocument: { findMany: vi.fn().mockResolvedValue([]) },
+        auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      },
+    });
+
+    await expect(service.deleteFolder(KNOWLEDGE_BASE_ID, folderId)).resolves.toEqual({ items: [] });
+    expect(deleteMany).toHaveBeenCalledWith({
+      where: { tenantId: TENANT_ID, knowledgeBaseId: KNOWLEDGE_BASE_ID, id: folderId },
+    });
+  });
+
+  it('archives documents before deleting their folder tree', async () => {
+    const folderId = '00000000-0000-7000-8000-000000000010';
+    const deleteMany = vi.fn();
+    const updateMany = vi.fn().mockResolvedValue({ count: 1 });
+    const service = createService({
+      transaction: {
+        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+        knowledgeFolder: {
+          findMany: vi
+            .fn()
+            .mockResolvedValueOnce([{ id: folderId, parentId: null }])
+            .mockResolvedValueOnce([]),
+          deleteMany,
+        },
+        knowledgeDocument: {
+          findMany: vi.fn().mockResolvedValue([{ id: DOCUMENT_ID }]),
+          updateMany,
+        },
+        auditEvent: { create: vi.fn().mockResolvedValue({}) },
+      },
+    });
+
+    await service.deleteFolder(KNOWLEDGE_BASE_ID, folderId);
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { tenantId: TENANT_ID, id: { in: [DOCUMENT_ID] } },
+      data: { status: 'ARCHIVED', folderId: null },
+    });
+  });
+
   it('creates a BUILDING embedding index version from the currently served Runtime profile', async () => {
     const createdAt = new Date('2026-08-06T00:00:00.000Z');
     const pendingId = '00000000-0000-7000-8000-000000000088';
@@ -434,6 +621,67 @@ describe('KnowledgeAdminService', () => {
       }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(ingestion.uploadFileVersion).not.toHaveBeenCalled();
+  });
+
+  it('delegates a managed Lexiang file upload without creating a local content version', async () => {
+    const remoteUpload = vi.fn().mockResolvedValue(DOCUMENT_ID);
+    const localUpload = vi.fn();
+    const provision = vi.fn();
+    const service = createService({
+      transaction: {
+        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+      },
+      ingestion: { upload: localUpload },
+      provider: {
+        isManaged: vi.fn().mockResolvedValue(true),
+        uploadFile: remoteUpload,
+        provision,
+      },
+    });
+    vi.spyOn(service, 'getDocument').mockResolvedValue(documentResponse('DRAFT'));
+    const input = {
+      title: '报销制度',
+      bytes: Buffer.from('document bytes'),
+      mimeType: 'application/pdf',
+      fileName: '报销制度.pdf',
+      folderId: null,
+    };
+
+    await expect(service.uploadDocument(KNOWLEDGE_BASE_ID, input)).resolves.toMatchObject({
+      id: DOCUMENT_ID,
+    });
+    expect(remoteUpload).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT_ID, userId: ADMIN_ID }),
+      KNOWLEDGE_BASE_ID,
+      input,
+    );
+    expect(localUpload).not.toHaveBeenCalled();
+    expect(provision).not.toHaveBeenCalled();
+  });
+
+  it('creates requested folder paths in Lexiang and returns the synchronized local shadows', async () => {
+    const ensureRemoteFolders = vi.fn().mockResolvedValue(undefined);
+    const findMany = vi.fn().mockResolvedValue([]);
+    const service = createService({
+      transaction: {
+        knowledgeBase: { findFirst: vi.fn().mockResolvedValue({ id: KNOWLEDGE_BASE_ID }) },
+        knowledgeFolder: { findMany },
+      },
+      provider: {
+        isManaged: vi.fn().mockResolvedValue(true),
+        ensureFolders: ensureRemoteFolders,
+      },
+    });
+
+    await expect(
+      service.ensureFolders(KNOWLEDGE_BASE_ID, { paths: ['制度/财务', '制度'] }),
+    ).resolves.toEqual({ items: [] });
+    expect(ensureRemoteFolders).toHaveBeenCalledWith(
+      expect.objectContaining({ tenantId: TENANT_ID, userId: ADMIN_ID }),
+      KNOWLEDGE_BASE_ID,
+      ['制度', '制度/财务'],
+    );
+    expect(findMany).toHaveBeenCalledOnce();
   });
 
   it('detects an exact file duplicate by server-side SHA-256 metadata', async () => {
@@ -1634,11 +1882,13 @@ function createService(input: {
   ingestion?: Record<string, unknown>;
   retrieval?: Record<string, unknown>;
   semantic?: Record<string, unknown>;
+  provider?: Record<string, unknown>;
 }): KnowledgeAdminService {
   const transaction = {
     tenant: {
       findFirst: vi.fn().mockResolvedValue({ id: TENANT_ID, name: 'Example Tenant' }),
     },
+    knowledgeExternalEntryBinding: { findFirst: vi.fn().mockResolvedValue(null) },
     ...(input.transaction ?? {}),
   };
   const prisma = {
@@ -1677,6 +1927,25 @@ function createService(input: {
         rerank: { status: 'disabled', provider: 'disabled', model: null },
       }),
     }) as unknown as KnowledgeAiRuntimeClient,
+    {
+      assertLexiangReady: vi.fn().mockResolvedValue(undefined),
+      isManaged: vi.fn().mockResolvedValue(false),
+      ensureFolders: vi.fn().mockResolvedValue(undefined),
+      uploadFile: vi.fn().mockResolvedValue('00000000-0000-7000-8000-000000000099'),
+      list: vi.fn().mockResolvedValue(new Map()),
+      provision: vi.fn().mockResolvedValue(null),
+      syncEntries: vi.fn().mockResolvedValue({
+        entriesDiscovered: 0,
+        foldersSynchronized: 0,
+        documentsDiscovered: 0,
+        documentsImported: 0,
+        documentsUpdated: 0,
+        documentsArchived: 0,
+      }),
+      rename: vi.fn().mockResolvedValue(null),
+      delete: vi.fn().mockResolvedValue(undefined),
+      ...(input.provider ?? {}),
+    } as unknown as KnowledgeProviderSpaceService,
   );
 }
 

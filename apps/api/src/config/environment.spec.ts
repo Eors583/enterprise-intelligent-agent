@@ -52,6 +52,7 @@ describe('validateEnvironment', () => {
       IM_PROVIDER: 'local',
       IM_OUTBOX_MAX_ATTEMPTS: 8,
       AGENT_RUN_WORKER_CONCURRENCY: 4,
+      AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS: 300_000,
       TENCENT_IM_API_BASE_URL: 'https://console.tim.qq.com',
       TENCENT_IM_HTTP_TIMEOUT_MS: 5_000,
       KNOWLEDGE_OBJECT_STORE_DRIVER: 'local',
@@ -475,6 +476,23 @@ describe('validateEnvironment', () => {
         KNOWLEDGE_PERSISTENT_WRITES_ENABLED: 'true',
       }),
     ).toThrow('KNOWLEDGE_PERSISTENT_WRITES_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
+  });
+
+  it('disables local writes and the ingestion worker with the local backend switch', () => {
+    expect(
+      validateEnvironment({
+        NODE_ENV: 'test',
+        REPOSITORY_DRIVER: 'prisma',
+        DATABASE_URL: 'postgresql://api@localhost/example',
+        KNOWLEDGE_LOCAL_BACKEND_ENABLED: 'false',
+        KNOWLEDGE_PERSISTENT_WRITES_ENABLED: 'true',
+        KNOWLEDGE_INGESTION_WORKER_ENABLED: 'true',
+      }),
+    ).toMatchObject({
+      KNOWLEDGE_LOCAL_BACKEND_ENABLED: false,
+      KNOWLEDGE_PERSISTENT_WRITES_ENABLED: false,
+      KNOWLEDGE_INGESTION_WORKER_ENABLED: false,
+    });
   });
 
   it('never permits the local provider for an enabled production worker', () => {

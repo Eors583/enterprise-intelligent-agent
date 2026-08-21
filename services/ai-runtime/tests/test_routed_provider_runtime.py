@@ -290,6 +290,25 @@ def test_generated_secret_material_is_blocked_without_returning_raw_content() ->
     assert "private" not in str(raised.value.safety_decision.model_dump())
 
 
+def test_unauthorized_representative_commitment_is_blocked() -> None:
+    provider = StubProvider(
+        {
+            "model-a": result("我代表员工承诺周五交付全部结果。"),
+            "model-b": result(),
+        }
+    )
+    runtime = RoutedProviderRuntime(provider, catalog=catalog(), require_route=True)
+
+    with pytest.raises(RoutedExecutionError) as raised:
+        asyncio.run(runtime.execute(run(model_route=route()), "request-1"))
+
+    assert raised.value.code == "AI_SAFETY_OUTPUT_BLOCKED"
+    assert raised.value.safety_decision.action == "BLOCK"
+    assert raised.value.safety_decision.reason_codes == [
+        "GENERATED_UNAUTHORIZED_REPRESENTATIVE_ACTION"
+    ]
+
+
 def test_trusted_route_stream_releases_safe_content_before_provider_terminal() -> None:
     prefix = "safe-" * 120
     provider = StreamingStubProvider(
@@ -320,6 +339,35 @@ def test_trusted_route_stream_releases_safe_content_before_provider_terminal() -
     assert emitted == prefix + "answer"
     assert remaining[-1].mode == "live"
     assert remaining[-1].result.output.content == emitted
+
+
+def test_stream_releases_a_short_completed_sentence_without_waiting_for_terminal() -> None:
+    first_sentence = "这是已经通过输出安全检查的第一句。"
+    complete = first_sentence + "这是第二句。"
+    provider = StreamingStubProvider(
+        {
+            "model-a": [
+                ProviderStreamDelta(content=first_sentence),
+                ProviderStreamDelta(content="这是第二句。"),
+                ProviderStreamTerminal(result=result(complete), mode="live"),
+            ],
+            "model-b": [],
+        }
+    )
+    runtime = RoutedProviderRuntime(provider, catalog=catalog(), require_route=True)
+
+    async def exercise() -> tuple[object, list[object]]:
+        stream = runtime.stream(run(model_route=route()), "request-1")
+        first = await anext(stream)
+        return first, [event async for event in stream]
+
+    first, remaining = asyncio.run(exercise())
+    assert isinstance(first, RuntimeStreamDelta)
+    assert first.content == first_sentence
+    assert isinstance(remaining[-1], RuntimeStreamTerminal)
+    assert first.content + "".join(
+        event.content for event in remaining if isinstance(event, RuntimeStreamDelta)
+    ) == complete
 
 
 def test_stream_blocks_cross_delta_secret_without_leaking_secret_prefix() -> None:
@@ -355,6 +403,37 @@ def test_stream_blocks_cross_delta_secret_without_leaking_secret_prefix() -> Non
     assert error.safety_decision.action == "BLOCK"
     assert error.model_attempts[0].outcome == "UNKNOWN"
     assert error.retryable is False
+
+
+def test_stream_blocks_cross_delta_representative_action_before_it_is_released() -> None:
+    safe_prefix = "以下是未发送的草稿。" * 80
+    raw = safe_prefix + "我代表员工承诺周五交付。"
+    provider = StreamingStubProvider(
+        {
+            "model-a": [
+                ProviderStreamDelta(content=safe_prefix + "我代表员工承诺"),
+                ProviderStreamDelta(content="周五交付。"),
+                ProviderStreamTerminal(result=result(raw), mode="live"),
+            ],
+            "model-b": [],
+        }
+    )
+    runtime = RoutedProviderRuntime(provider, catalog=catalog(), require_route=True)
+
+    async def exercise() -> tuple[str, RoutedExecutionError]:
+        emitted: list[str] = []
+        with pytest.raises(RoutedExecutionError) as raised:
+            async for event in runtime.stream(run(model_route=route()), "request-1"):
+                if isinstance(event, RuntimeStreamDelta):
+                    emitted.append(event.content)
+        return "".join(emitted), raised.value
+
+    emitted, error = asyncio.run(exercise())
+    assert "我代表员工承诺周五交付" not in emitted
+    assert error.code == "AI_SAFETY_OUTPUT_BLOCKED"
+    assert error.safety_decision.reason_codes == [
+        "GENERATED_UNAUTHORIZED_REPRESENTATIVE_ACTION"
+    ]
 
 
 def test_stream_redacts_cross_delta_pii_and_terminal_matches_emitted_content() -> None:

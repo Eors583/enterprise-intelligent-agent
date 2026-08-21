@@ -6,7 +6,9 @@ import { renderInTestDom } from '../../test/dom-test-utils';
 
 const apiMocks = vi.hoisted(() => ({
   getMyPersonalManual: vi.fn(),
+  getMyWorkAvailability: vi.fn(),
   updateMyPersonalManual: vi.fn(),
+  updateMyWorkAvailability: vi.fn(),
 }));
 
 vi.mock('./api', () => apiMocks);
@@ -15,7 +17,10 @@ import { PersonalManualWorkspace } from './PersonalManualWorkspace';
 
 beforeEach(() => {
   apiMocks.getMyPersonalManual.mockReset();
+  apiMocks.getMyWorkAvailability.mockReset();
+  apiMocks.getMyWorkAvailability.mockResolvedValue({ availability: null });
   apiMocks.updateMyPersonalManual.mockReset();
+  apiMocks.updateMyWorkAvailability.mockReset();
 });
 
 describe('PersonalManualWorkspace DOM acceptance', () => {
@@ -37,6 +42,32 @@ describe('PersonalManualWorkspace DOM acceptance', () => {
       expect(dom.container.textContent).toContain('我有哪些兴趣爱好？');
       expect(dom.container.textContent).toContain('您可能会问这些问题');
       expect(dom.container.textContent).toContain('填写完成度17%');
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('replaces a failed decorative avatar without exposing broken-image text', async () => {
+    const profile = profileFixture();
+    apiMocks.getMyPersonalManual.mockResolvedValue({
+      ...profile,
+      user: { ...profile.user, avatarUrl: 'https://invalid.example/avatar.svg' },
+    });
+
+    const dom = await renderInTestDom(createElement(PersonalManualWorkspace));
+    try {
+      await dom.flush();
+
+      const avatar = dom.container.querySelector<HTMLImageElement>('.personal-manual-avatar-image');
+      expect(avatar?.alt).toBe('');
+      expect(avatar?.classList.contains('loaded')).toBe(false);
+      avatar?.dispatchEvent(new Event('error'));
+      await dom.flush();
+
+      expect(avatar?.classList.contains('loaded')).toBe(false);
+      expect(dom.container.querySelector('.personal-manual-avatar-initials')?.textContent).toBe(
+        '林晓',
+      );
     } finally {
       await dom.cleanup();
     }
@@ -65,7 +96,7 @@ describe('PersonalManualWorkspace DOM acceptance', () => {
       await dom.click(removeQuestion);
       expect(dom.container.textContent).toContain('还没有常见问题');
 
-      const form = dom.container.querySelector('form');
+      const form = dom.container.querySelector('.personal-manual-form');
       if (!form) throw new Error('Personal manual form not found.');
       await dom.submit(form as HTMLFormElement);
       await dom.flush();
@@ -76,6 +107,8 @@ describe('PersonalManualWorkspace DOM acceptance', () => {
           jobResponsibilities: '负责产品规划、跨部门协同和版本验收。',
           faqs: [],
         }),
+        disclosurePolicy: profile.disclosurePolicy,
+        collaborationSettings: profile.collaborationSettings,
       });
       expect(dom.container.textContent).toContain('个人使用说明书已保存。');
       expect(dom.container.textContent).toContain('当前内容已保存');
@@ -137,6 +170,20 @@ function profileFixture(): PersonalManualSelfProfile {
       clubs: null,
       faqs: [],
     },
+    disclosurePolicy: {
+      IDENTITY: 'SELF_ONLY',
+      RESPONSIBILITIES: 'SELF_ONLY',
+      COLLABORATION: 'SELF_ONLY',
+      RESOURCES: 'SELF_ONLY',
+      INTERESTS: 'SELF_ONLY',
+      FAQ: 'SELF_ONLY',
+    },
+    collaborationSettings: {
+      manualSharingEnabled: false,
+      availabilitySharingEnabled: false,
+      privateRiskRemindersEnabled: true,
+    },
+    policyRevision: 1,
     updatedAt: '2026-08-11T01:00:00.000Z',
   };
 }

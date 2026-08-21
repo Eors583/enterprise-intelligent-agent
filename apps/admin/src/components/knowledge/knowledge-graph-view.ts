@@ -54,6 +54,7 @@ export function knowledgeRetrievalDiagnosticStageLabel(
     SQL: '表格 SQL',
     RELATIONSHIP: '关系扩展',
     BUSINESS_API: '业务 API',
+    EXTERNAL: '外部知识检索',
     RERANK: '模型重排',
   }[stage];
 }

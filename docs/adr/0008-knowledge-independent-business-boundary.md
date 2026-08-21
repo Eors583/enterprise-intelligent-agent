@@ -48,6 +48,7 @@
 
 - `apps/api/src/modules/knowledge-gateway/`
 - `apps/api/src/modules/knowledge-ingestion/`
+- `apps/api/src/modules/knowledge-provider/`
 - `apps/api/src/modules/knowledge-retrieval/`
 - `apps/api/src/modules/knowledge-search-index/`
 - `apps/api/src/modules/knowledge-semantic/`
@@ -119,6 +120,15 @@ Gateway 当前分为：
 - 知识 Outbox 事件使用共享 Zod 合同在写入前校验。
 - 知识管理契约、数据模型和管理端树使用四类同级知识空间；历史知识库迁移时只补充公司归属，不改变原有可见范围和检索行为。
 - 知识管理 API 支持全公司、指定部门和指定成员访问范围；成员范围由知识边界持久化，检索和引用链路在服务端执行最新范围复核。
+- 外部知识提供方连接由 `knowledge-provider` 边界拥有。管理端只能调用其公共 HTTP API；AppSecret 使用租户、供应商和 AppKey 绑定的 AES-GCM 密文保存，连接状态响应不得返回明文凭据或 access token。
+- 乐享托管知识库的远端身份由 `knowledge-provider` 边界内的 `KnowledgeExternalSpaceBinding` 拥有；绑定只保存稳定远端 ID、同步状态和非敏感展示元数据，不向边界外暴露凭据或供应商内部客户端。
+- 乐享知识节点身份由同一边界内的 `KnowledgeExternalEntryBinding` 拥有；该映射只保存目录对账需要的远端节点、父节点和本地文件夹/文档稳定 ID。管理端通过知识公共 API 查看本地目录投影，其他业务模块不得直接读取映射表或导入乐享客户端。目录投影不包含远端正文，也不能在未经过 `KnowledgeRetrievalGateway` 授权与证据复核时参与智能体检索。
+- 乐享 `operatorStaffId` 是同一知识 provider 边界内的连接级 API 访问身份，不映射 BMS 用户，也不授予 BMS 知识权限。正式检索必须先按当前 BMS 用户、有效任职和知识库范围得到可访问知识库，再把每个授权乐享库转换为明确的单一空间 target；召回后和 Agent Run 派发前继续按本地 ACL 复核。连接访问身份、凭据、空间绑定、本地用户任职或本地 ACL 任一失效时必须 fail closed，禁止省略 target 搜全站或改用 system-bot。
+- 关闭可选本地知识后端只停止本地解析、向量化和本地索引，不得关闭外部 provider 路由。`KnowledgeRetrievalGateway` 仍负责解析本地权威知识库 ACL、显式限定外部空间 target、执行查询外发分类门禁，并在 Agent Run 派发前重新校验请求者身份、知识范围和 provider 绑定。外部 provider 不得被 Agent Run 或前端直接调用。
+- 乐享文件夹和文件写入也由 `knowledge-provider` 边界拥有。管理 API 只传递已通过知识库写权限校验的目录路径与短生命周期文件字节；适配器负责校验外部绑定状态、创建远端目录、申请临时上传参数、限定 HTTPS 腾讯云 COS 目标、写入文件并关联稳定远端节点。COS 临时 URL、安全令牌和文件正文不得持久化或进入审计；本地只保存不含正文、对象存储键、内容版本和切片的目录影子。
+- 乐享托管库在远端固定创建为不可见、团队管理员不继承、团队成员不继承，仅配置的操作成员拥有管理权限；公司/部门/成员访问范围仍以本地 `knowledge_base_org_units` 和 `knowledge_base_members` 为授权事实，并在检索时重新校验。
+- 远端创建与本地事务不共享数据库事务：本地先保持 `DRAFT`，远端创建、详情读取和身份绑定成功后才激活。远端名称携带本地知识库 UUID 管理标记，响应丢失时先分页对账再决定是否创建，避免盲目重试产生重复知识库。
+- 删除采用远端优先的补偿顺序：先删除绑定的乐享知识库，成功或确认 404 后才将本地知识库归档；远端失败时本地记录与权限事实保持不变并记录可重试状态和审计。
 
 ### 生产部署必须继续执行
 

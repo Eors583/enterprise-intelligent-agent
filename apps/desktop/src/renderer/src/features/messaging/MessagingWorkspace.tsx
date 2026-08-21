@@ -9,6 +9,7 @@ import type {
   TextMessageContent,
 } from '@enterprise/contracts';
 import {
+  Fragment,
   useEffect,
   useId,
   useReducer,
@@ -17,6 +18,8 @@ import {
   type FormEvent,
   type ReactNode,
 } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { ApiClientError, getExpectedDesktopSessionId } from '../../shared/api/client';
 import type { AgentCollaborationCandidate } from './agent-collaboration';
 import { getKnowledgeCitationOriginal } from './api';
@@ -443,7 +446,9 @@ function PendingConversationWorkspace({
         <div className="conversation-header-copy">
           <div>
             <h1>{contact.kind === 'agent' ? `询问 ${contact.name} 的智能体` : contact.name}</h1>
-            <span className={contact.kind === 'agent' ? 'identity-badge agent' : 'identity-badge human'}>
+            <span
+              className={contact.kind === 'agent' ? 'identity-badge agent' : 'identity-badge human'}
+            >
               {contact.kind === 'agent' ? 'AI 智能体' : '真人'}
             </span>
           </div>
@@ -455,13 +460,17 @@ function PendingConversationWorkspace({
           <div role="alert">
             <strong>暂时无法发送消息</strong>
             <p>{contact.message ?? '请检查网络后重试。'}</p>
-            <button type="button" onClick={contact.onRetry}>重新连接</button>
+            <button type="button" onClick={contact.onRetry}>
+              重新连接
+            </button>
           </div>
         ) : null}
       </div>
       <div className="pending-conversation-composer">
         <input type="text" placeholder="连接完成后即可发送消息" disabled />
-        <button type="button" disabled>发送</button>
+        <button type="button" disabled>
+          发送
+        </button>
       </div>
     </section>
   );
@@ -497,14 +506,20 @@ export function ConversationWorkspace({
   const [composer, dispatch] = useReducer(composerReducer, initialComposerState);
   const [isManualRefreshing, setIsManualRefreshing] = useState(false);
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+  const [abandoningRunId, setAbandoningRunId] = useState<string | null>(null);
   const [responseTargetKind, setResponseTargetKind] = useState<'human' | 'agent'>('human');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [messageSearchQuery, setMessageSearchQuery] = useState('');
   const retryGateRef = useRef(new RunActionGate());
   const listEndRef = useRef<HTMLDivElement | null>(null);
-  const activeRun = [...(messages.data?.runs ?? [])]
-    .reverse()
-    .find((run) => ['QUEUED', 'DISPATCHING', 'RUNNING', 'UNKNOWN'].includes(run.status));
+  const responseTargets =
+    conversation === null
+      ? { human: undefined, agent: undefined }
+      : conversationResponseTargets(conversation, currentUserId);
+  const isAgentPair = conversation !== null && conversationHasAgentPair(conversation);
+  const conversationRuns = messages.data?.runs ?? [];
+  const blockingUnknownRun = findBlockingUnknownAgentRun(conversationRuns);
+  const activeRun = findAwaitingAgentRun(conversationRuns);
   const runStream = useAgentRunStream(conversationId, activeRun);
 
   useEffect(() => {
@@ -512,27 +527,36 @@ export function ConversationWorkspace({
     sendMessage.reset();
     retryGateRef.current.reset();
     setRetryingRunId(null);
+    setAbandoningRunId(null);
+    runActions.abandon.reset();
     runActions.retry.reset();
   }, [conversationId]);
 
   useEffect(() => {
-    if (conversation === null || conversationHasAgentPair(conversation)) return;
-    const targets = conversationResponseTargets(conversation, currentUserId);
-    if (preferredResponseTargetKind === 'agent' && targets.agent !== undefined) {
+    if (conversation === null || isAgentPair) return;
+    if (preferredResponseTargetKind === 'agent' && responseTargets.agent !== undefined) {
       setResponseTargetKind('agent');
       return;
     }
-    if (preferredResponseTargetKind === 'human' && targets.human !== undefined) {
+    if (preferredResponseTargetKind === 'human' && responseTargets.human !== undefined) {
       setResponseTargetKind('human');
       return;
     }
     setResponseTargetKind(
-      targets.human === undefined && targets.agent !== undefined ? 'agent' : 'human',
+      responseTargets.human === undefined && responseTargets.agent !== undefined
+        ? 'agent'
+        : 'human',
     );
-  }, [conversation, currentUserId, preferredResponseTargetKind]);
+  }, [
+    conversationId,
+    isAgentPair,
+    preferredResponseTargetKind,
+    responseTargets.agent?.id,
+    responseTargets.human?.id,
+  ]);
 
   useEffect(() => {
-    listEndRef.current?.scrollIntoView({ block: 'end' });
+    listEndRef.current?.scrollIntoView?.({ block: 'end' });
   }, [messages.data?.items.length, runStream.content.length]);
 
   if (!conversation && pendingContact !== null) {
@@ -554,22 +578,9 @@ export function ConversationWorkspace({
   const activeConversation = conversation;
 
   const isAgentConversation = conversationHasAgent(activeConversation);
-  const isAgentPair = conversationHasAgentPair(activeConversation);
   const isGroup = activeConversation.type === 'group';
-  const responseTargets = conversationResponseTargets(activeConversation, currentUserId);
   const isSharedMemberAgentConversation =
     !isAgentPair && responseTargets.human !== undefined && responseTargets.agent !== undefined;
-  const latestMessage = messages.data?.items.at(-1);
-  const latestRun = messages.data?.runs.at(-1);
-  const failedRun =
-    latestRun &&
-    latestMessage?.id === latestRun.inputMessageId &&
-    ['FAILED', 'UNKNOWN', 'CANCELLED'].includes(latestRun.status)
-      ? latestRun
-      : undefined;
-  const awaitingAgentReply =
-    isAgentConversation && activeRun !== undefined && !sendMessage.isPending;
-
   function runSend(request: CreateMessageRequest): void {
     dispatch({ type: 'sendStarted' });
     sendMessage.mutate(request, {
@@ -634,15 +645,43 @@ export function ConversationWorkspace({
   }
 
   function retryFailedRun(runId: string): void {
+    if (runActions.retry.isPending || runActions.abandon.isPending) return;
     const token = `${conversationId ?? 'none'}:${runId}`;
     if (!retryGateRef.current.tryStart(token)) return;
 
     runActions.retry.reset();
     setRetryingRunId(runId);
     runActions.retry.mutate(runId, {
-      onSettled: () => {
+      onSettled: (_data, error) => {
         retryGateRef.current.finish(token);
-        setRetryingRunId((current) => (current === runId ? null : current));
+        if (error == null) {
+          setRetryingRunId((current) => (current === runId ? null : current));
+        }
+      },
+    });
+  }
+
+  function abandonUnknownRun(runId: string): void {
+    if (runActions.retry.isPending || runActions.abandon.isPending) return;
+    if (
+      !window.confirm(
+        '结束等待只会解除本地阻塞，不代表远端任务已经取消。远端任务仍可能完成并产生费用。确定继续吗？',
+      )
+    ) {
+      return;
+    }
+    const token = `${conversationId ?? 'none'}:abandon:${runId}`;
+    if (!retryGateRef.current.tryStart(token)) return;
+
+    runActions.abandon.reset();
+    setAbandoningRunId(runId);
+    runActions.abandon.mutate(runId, {
+      onSuccess: () => sendMessage.reset(),
+      onSettled: (_data, error) => {
+        retryGateRef.current.finish(token);
+        if (error == null) {
+          setAbandoningRunId((current) => (current === runId ? null : current));
+        }
       },
     });
   }
@@ -723,7 +762,7 @@ export function ConversationWorkspace({
                 searchMessages.data.items.map((message) => (
                   <article key={message.id}>
                     <strong>{message.sender.name}</strong>
-                    <p>{message.content.text}</p>
+                    <MessageRichText content={message.content.text} />
                     <time dateTime={message.createdAt}>{fullTime(message.createdAt)}</time>
                   </article>
                 ))
@@ -777,69 +816,107 @@ export function ConversationWorkspace({
           </div>
         )}
         {!messages.isPending &&
-          messages.data?.items.map((message) => (
-            <MessageBubble
-              key={message.id}
-              message={message}
-              isCurrentUser={message.sender.type === 'user' && message.sender.id === currentUserId}
-              senderDisplayName={messageSenderDisplayName(message, conversation)}
-              responseTargetName={messageResponseTargetName(message.responseTarget, conversation)}
-            />
-          ))}
+          messages.data?.items.map((message) => {
+            const messageRun = findLatestAgentRunForMessage(conversationRuns, message.id);
+            const isAwaitingRun =
+              messageRun !== undefined &&
+              ['QUEUED', 'DISPATCHING', 'RUNNING'].includes(messageRun.status);
+            const isCurrentRun = isAwaitingRun && messageRun.id === activeRun?.id;
+            const isFailedRun =
+              messageRun !== undefined &&
+              ['FAILED', 'UNKNOWN', 'CANCELLED'].includes(messageRun.status);
+            return (
+              <Fragment key={message.id}>
+                <MessageBubble
+                  message={message}
+                  isCurrentUser={
+                    message.sender.type === 'user' && message.sender.id === currentUserId
+                  }
+                  senderDisplayName={messageSenderDisplayName(message, conversation)}
+                  responseTargetName={messageResponseTargetName(
+                    message.responseTarget,
+                    conversation,
+                  )}
+                />
+                {isCurrentRun && runStream.content.length > 0 ? (
+                  <AgentRunStreamingBubble
+                    agentName={
+                      conversationAgentDisplayName(conversation, messageRun.agentId) ??
+                      messageRun.agentName ??
+                      'AI'
+                    }
+                    content={runStream.content}
+                    phase={runStream.phase}
+                  />
+                ) : null}
+                {isAwaitingRun && (!isCurrentRun || runStream.content.length === 0) ? (
+                  <div
+                    className="sending-indicator agent-thinking"
+                    role="status"
+                    data-stream-mode={messageRun.streamMode ?? 'unknown'}
+                  >
+                    <span />{' '}
+                    {agentRunQueueMessage(
+                      messageRun,
+                      isCurrentRun,
+                      blockingUnknownRun !== undefined,
+                    )}
+                  </div>
+                ) : null}
+                {isAwaitingRun ? (
+                  <div className="agent-run-status-detail">
+                    <span>
+                      {conversationAgentDisplayName(conversation, messageRun.agentId) ??
+                        messageRun.agentName}{' '}
+                      · {agentRunStatusLabel(messageRun.status)}
+                    </span>
+                    <span
+                      className="agent-run-stream-state"
+                      data-stream-state={isCurrentRun ? runStream.phase : 'queued'}
+                    >
+                      {isCurrentRun
+                        ? messageRun.streamMode === 'terminal_only' &&
+                          runStream.content.length === 0
+                          ? '等待供应商终态'
+                          : agentRunStreamPhaseLabel(runStream.phase)
+                        : '正在准备回复'}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={runActions.cancel.isPending}
+                      onClick={() => runActions.cancel.mutate(messageRun.id)}
+                    >
+                      {runActions.cancel.isPending ? '正在停止…' : '停止生成'}
+                    </button>
+                  </div>
+                ) : null}
+                {isFailedRun ? (
+                  <AgentRunFailureNotice
+                    run={messageRun}
+                    isRetrying={retryingRunId === messageRun.id && runActions.retry.isPending}
+                    retryError={
+                      retryingRunId === messageRun.id && runActions.retry.isError
+                        ? runActions.retry.error
+                        : null
+                    }
+                    onRetry={() => retryFailedRun(messageRun.id)}
+                    isAbandoning={abandoningRunId === messageRun.id && runActions.abandon.isPending}
+                    abandonError={
+                      abandoningRunId === messageRun.id && runActions.abandon.isError
+                        ? runActions.abandon.error
+                        : null
+                    }
+                    onAbandon={() => abandonUnknownRun(messageRun.id)}
+                  />
+                ) : null}
+              </Fragment>
+            );
+          })}
         {sendMessage.isPending && (
           <div className="sending-indicator" role="status">
             <span /> 正在等待服务端确认发送…
           </div>
         )}
-        {awaitingAgentReply && runStream.content.length > 0 ? (
-          <AgentRunStreamingBubble
-            agentName={
-              conversationAgentDisplayName(conversation, activeRun?.agentId) ??
-              activeRun?.agentName ??
-              'AI'
-            }
-            content={runStream.content}
-            phase={runStream.phase}
-          />
-        ) : null}
-        {awaitingAgentReply && runStream.content.length === 0 && (
-          <div
-            className="sending-indicator agent-thinking"
-            role="status"
-            data-stream-mode={activeRun.streamMode ?? 'unknown'}
-          >
-            <span /> {agentRunWaitingMessage(activeRun)}
-          </div>
-        )}
-        {awaitingAgentReply ? (
-          <div className="agent-run-status-detail">
-            <span>
-              {conversationAgentDisplayName(conversation, activeRun?.agentId) ??
-                activeRun?.agentName}{' '}
-              · {activeRun?.status}
-            </span>
-            <span className="agent-run-stream-state" data-stream-state={runStream.phase}>
-              {activeRun.streamMode === 'terminal_only' && runStream.content.length === 0
-                ? '等待供应商终态'
-                : agentRunStreamPhaseLabel(runStream.phase)}
-            </span>
-            <button
-              type="button"
-              disabled={runActions.cancel.isPending}
-              onClick={() => activeRun && runActions.cancel.mutate(activeRun.id)}
-            >
-              {runActions.cancel.isPending ? '正在停止…' : '停止生成'}
-            </button>
-          </div>
-        ) : null}
-        {failedRun && latestMessage?.sender.type === 'user' ? (
-          <AgentRunFailureNotice
-            run={failedRun}
-            isRetrying={retryingRunId === failedRun.id || runActions.retry.isPending}
-            retryError={runActions.retry.isError ? runActions.retry.error : null}
-            onRetry={() => retryFailedRun(failedRun.id)}
-          />
-        ) : null}
         <div ref={listEndRef} />
       </div>
 
@@ -945,10 +1022,61 @@ export function agentRunStreamPhaseLabel(
   }[phase];
 }
 
+export function agentRunStatusLabel(
+  status: Pick<ConversationAgentRun, 'status'>['status'],
+): string {
+  return {
+    QUEUED: '正在准备',
+    DISPATCHING: '正在连接',
+    RUNNING: '正在回答',
+    SUCCEEDED: '已完成',
+    FAILED: '未完成',
+    UNKNOWN: '正在确认结果',
+    CANCELLED: '已停止',
+  }[status];
+}
+
+export function findAwaitingAgentRun(
+  runs: readonly ConversationAgentRun[],
+): ConversationAgentRun | undefined {
+  return (
+    runs.find((run) => run.status === 'RUNNING') ??
+    runs.find((run) => run.status === 'DISPATCHING') ??
+    runs.find((run) => run.status === 'QUEUED')
+  );
+}
+
+export function findLatestAgentRunForMessage(
+  runs: readonly ConversationAgentRun[],
+  messageId: string,
+): ConversationAgentRun | undefined {
+  return [...runs].reverse().find((run) => run.inputMessageId === messageId);
+}
+
+export function findBlockingUnknownAgentRun(
+  runs: readonly ConversationAgentRun[],
+): ConversationAgentRun | undefined {
+  return [...runs]
+    .reverse()
+    .find((run) => run.status === 'UNKNOWN' && run.supersededByRunId == null);
+}
+
 export function agentRunWaitingMessage(run: Pick<ConversationAgentRun, 'streamMode'>): string {
   return run.streamMode === 'terminal_only'
     ? '等待供应商终态；当前供应商不提供增量输出，完成后会自动显示回复。'
     : '智能体正在处理，通常需要 10–30 秒；回复生成后会自动显示。';
+}
+
+export function agentRunQueueMessage(
+  run: Pick<ConversationAgentRun, 'status' | 'streamMode'>,
+  isCurrentRun: boolean,
+  hasBlockingUnknown: boolean,
+): string {
+  if (hasBlockingUnknown && run.status === 'QUEUED') {
+    return '问题已接收，系统正在恢复上一条请求；本条会在恢复后自动开始。';
+  }
+  if (!isCurrentRun) return '问题已接收，将在本会话前一条回答完成后自动开始。';
+  return run.status === 'QUEUED' ? '问题已接收，正在准备回答。' : agentRunWaitingMessage(run);
 }
 
 export function AgentRunStreamingBubble({
@@ -972,7 +1100,7 @@ export function AgentRunStreamingBubble({
           <strong>{agentName}</strong>
           <span className="sender-type agent">{agentRunStreamPhaseLabel(phase)}</span>
         </div>
-        <p>{content}</p>
+        <MessageRichText content={content} />
       </div>
     </article>
   );
@@ -1010,13 +1138,13 @@ function MessageBubble({
             <span className="message-response-target">发给 {responseTargetName}</span>
           ) : null}
         </div>
-        <p>{message.content.text}</p>
+        <MessageRichText content={message.content.text} />
         {message.content.citations && message.content.citations.length > 0 ? (
-          <div className="message-citations" aria-label="知识来源">
-            <strong>知识来源</strong>
+          <div className="message-citations" aria-label="回答依据">
+            <strong>回答依据</strong>
             {message.content.citations.map((citation, index) => (
               <MessageCitationCard
-                key={citation.chunkId ?? `legacy:${citation.documentId}:${index}`}
+                key={messageCitationKey(citation, index)}
                 messageId={message.id}
                 citation={citation}
                 index={index}
@@ -1028,6 +1156,43 @@ function MessageBubble({
       </div>
     </article>
   );
+}
+
+export function MessageRichText({ content }: { readonly content: string }): React.JSX.Element {
+  return (
+    <div className="message-rich-text">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        skipHtml
+        components={{
+          a: ({ children, href }) => (
+            <a href={href} title={href} target="_blank" rel="noreferrer noopener">
+              {children}
+            </a>
+          ),
+          img: ({ alt }) => (
+            <span className="message-rich-text-image-placeholder" role="img" aria-label="图片">
+              {alt ? `图片：${alt}` : '图片'}
+            </span>
+          ),
+          table: ({ children }) => (
+            <div className="message-rich-text-table-scroll">
+              <table>{children}</table>
+            </div>
+          ),
+        }}
+      >
+        {normalizeMessageMarkdown(content)}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+export function normalizeMessageMarkdown(content: string): string {
+  return content
+    .replace(/(^|\r?\n)([ \t]*)(\d+)[.)、][ \t]*(?:\r?\n[ \t]*)+(?=\S)/g, '$1$2$3. ')
+    .replace(/(?:\r?\n[ \t]*){3,}/g, '\n\n')
+    .replace(/(\*\*(?:(?!\*\*)[^\r\n])+\*\*)(?=[\p{L}\p{N}])/gu, '$1&#8203;');
 }
 
 interface ConversationResponseTargets {
@@ -1297,7 +1462,7 @@ export function MessageCitationCard({
   );
 
   async function openOriginal(forceReload = false): Promise<void> {
-    if (citation.verificationStatus === 'LEGACY') return;
+    if (citation.verificationStatus !== 'LINEAGE_VERIFIED') return;
     setIsOriginalOpen(true);
     if (original !== null && !forceReload) return;
 
@@ -1356,7 +1521,14 @@ export function MessageCitationCard({
           <span>{citation.title}</span>
         </summary>
         <div className="message-citation-context">
-          {citation.verificationStatus === 'LEGACY' ? (
+          {citation.verificationStatus === 'COLLABORATION_POLICY_VERIFIED' ? (
+            <>
+              <span>生成回答时已按本人披露范围和工作关系核验</span>
+              <span>依据类型：{metadata.sourceType}</span>
+              <span>版本：v{citation.sourceVersion}</span>
+              <time dateTime={citation.updatedAt}>更新：{metadata.updatedAt}</time>
+            </>
+          ) : citation.verificationStatus === 'LEGACY' ? (
             <span>旧引用 · 不可完整核验</span>
           ) : (
             <>
@@ -1377,6 +1549,15 @@ export function MessageCitationCard({
             onClick={() => void openOriginal()}
           >
             查看原文
+          </button>
+        ) : citation.verificationStatus === 'COLLABORATION_POLICY_VERIFIED' ? (
+          <button
+            type="button"
+            className="message-citation-original-action"
+            disabled
+            title="人员协同依据仅显示生成回答时的授权摘要，不开放原始个人资料"
+          >
+            授权摘要
           </button>
         ) : (
           <button
@@ -1502,6 +1683,9 @@ interface AgentRunFailureNoticeProps {
   isRetrying: boolean;
   retryError: unknown;
   onRetry: () => void;
+  isAbandoning?: boolean;
+  abandonError?: unknown;
+  onAbandon?: () => void;
 }
 
 export function AgentRunFailureNotice({
@@ -1509,6 +1693,9 @@ export function AgentRunFailureNotice({
   isRetrying,
   retryError,
   onRetry,
+  isAbandoning = false,
+  abandonError = null,
+  onAbandon,
 }: AgentRunFailureNoticeProps): React.JSX.Element {
   const isResultPendingConfirmation = run.status === 'UNKNOWN';
   const canRetry = run.retryable && !isResultPendingConfirmation;
@@ -1520,7 +1707,7 @@ export function AgentRunFailureNotice({
       </strong>
       <span>
         {isResultPendingConfirmation
-          ? '系统尚未确认远端生成结果。请稍后刷新消息或联系管理员，避免重复执行。'
+          ? '系统没有拿到可确认的远端结果，因此没有保存为正式回复，也不会自动重复调用供应商。你可以先刷新；若一直未恢复，可结束本次等待后重新生成或继续提问。结束等待只解除本地阻塞，远端任务仍可能完成并产生费用。'
           : run.errorCode
             ? agentRunFailureMessage(run.errorCode, run.retryable)
             : (run.errorMessage ?? '生成失败，请稍后重试。')}
@@ -1530,6 +1717,17 @@ export function AgentRunFailureNotice({
           <strong>重新生成请求失败</strong>
           <span>{readableError(retryError)}</span>
         </div>
+      ) : null}
+      {abandonError !== null && isResultPendingConfirmation ? (
+        <div className="agent-run-retry-error">
+          <strong>结束等待失败</strong>
+          <span>{readableError(abandonError)}</span>
+        </div>
+      ) : null}
+      {isResultPendingConfirmation && onAbandon !== undefined ? (
+        <button type="button" disabled={isAbandoning} onClick={onAbandon}>
+          {isAbandoning ? '正在结束等待…' : '结束本次等待'}
+        </button>
       ) : null}
       {canRetry ? (
         <button type="button" disabled={isRetrying} onClick={onRetry}>
@@ -1548,13 +1746,51 @@ export function agentRunFailureMessage(errorCode: string | null, retryable = tru
   }
 
   const messages: Record<string, string> = {
-    AI_RUNTIME_UNAVAILABLE: 'AI Runtime 当前不可用，请确认模型服务已启动。',
-    AI_RUNTIME_TIMEOUT: '模型响应超时，请稍后重试。',
-    AI_RUNTIME_HTTP_401: '模型服务认证失败，请联系管理员检查密钥。',
-    AI_RUNTIME_HTTP_429: '模型服务请求过于频繁，请稍后重试。',
-    PROVIDER_UNAVAILABLE: '当前模型提供方不可用，请稍后重试或联系管理员检查模型配置。',
-    PROVIDER_TIMEOUT: '模型提供方响应超时，请稍后重试。',
-    PROVIDER_AUTHENTICATION_FAILED: '模型提供方认证失败，请联系管理员检查模型密钥。',
+    AI_RUNTIME_UNAVAILABLE:
+      '出错步骤：系统连接 AI Runtime。当前模型运行服务不可用，请确认服务已启动。',
+    AI_RUNTIME_TIMEOUT:
+      '出错步骤：系统等待 AI Runtime。连接未返回可确认结果，系统会保留原运行记录供恢复。',
+    AI_RUNTIME_HTTP_401: '出错步骤：AI Runtime 认证。请管理员检查服务间密钥。',
+    AI_RUNTIME_HTTP_429: '出错步骤：AI Runtime 接入。模型运行服务请求过于频繁，请稍后重试。',
+    PROVIDER_UNAVAILABLE:
+      '出错步骤：模型供应商调用。当前供应商不可用，请稍后重试或联系管理员检查配置。',
+    PROVIDER_TIMEOUT: '出错步骤：模型供应商网络请求。单次连接未返回结果，并非乐享知识检索失败。',
+    PROVIDER_AUTHENTICATION_FAILED: '出错步骤：模型供应商认证。请联系管理员检查模型密钥。',
+    PROVIDER_RATE_LIMITED: '出错步骤：模型供应商限流。请求已被供应商限流，请稍后重新生成。',
+    PROVIDER_REQUEST_REJECTED:
+      '出错步骤：模型任务创建。企业知识检索已完成，但模型供应商拒绝了生成请求；请管理员检查模型、项目和请求参数。',
+    MANUS_TASK_CREATE_INVALID_ARGUMENT:
+      '出错步骤：Manus 模型任务创建。企业知识检索已完成，但 Manus 判定输入参数或上下文不受支持；系统已压缩重复会话，若仍出现请管理员检查模型路由参数。',
+    MANUS_TASK_CREATE_TARGET_NOT_FOUND:
+      '出错步骤：Manus 模型任务创建。企业知识检索已完成，但 Manus 找不到已配置的项目或模型，请管理员检查 Manus 项目和模型路由。',
+    MANUS_TASK_CREATE_PRECONDITION_FAILED:
+      '出错步骤：Manus 模型任务创建。企业知识检索已完成，但当前账号、项目或模型未满足创建条件，请管理员检查 Manus 配置与授权。',
+    MANUS_TASK_CREATE_REJECTED:
+      '出错步骤：Manus 模型任务创建。企业知识检索已完成，但 Manus 明确拒绝了创建请求，请管理员检查模型路由配置。',
+    PROVIDER_TASK_FAILED:
+      '出错步骤：Manus 模型任务执行。任务已经创建，但 Manus 返回执行失败；不是乐享知识检索失败。',
+    PROVIDER_INTERACTION_REQUIRED:
+      '出错步骤：Manus 模型任务执行。供应商要求额外确认或输入，当前企业自动问答无法代替用户确认。',
+    LEXIANG_SEARCH_UNAVAILABLE:
+      '出错步骤：腾讯乐享知识检索。等待和自动重试后仍未完成，本次没有生成无依据回答；若持续失败，请管理员检查乐享连接。',
+    LEXIANG_TOKEN_UNAVAILABLE:
+      '出错步骤：腾讯乐享认证。连接认证暂时不可用，本次没有生成无依据回答；请管理员检查乐享应用凭据。',
+    LEXIANG_FORBIDDEN:
+      '出错步骤：腾讯乐享权限校验。乐享拒绝了知识检索请求，请管理员检查操作成员、知识库权限和应用授权。',
+    LEXIANG_SEARCH_TARGET_UNAVAILABLE:
+      '出错步骤：腾讯乐享检索目标解析。当前知识库没有可用检索目标，请管理员重新同步或检查知识库绑定。',
+    LEXIANG_SEARCH_INVALID_RESPONSE:
+      '出错步骤：腾讯乐享结果解析。乐享返回了无法识别的检索结果，本次没有生成无依据回答。',
+    KNOWLEDGE_PROVIDER_RETRIEVAL_UNAVAILABLE:
+      '企业知识检索服务尚未就绪，本次没有生成无依据回答。请联系管理员检查知识库连接。',
+    INPUT_TOKEN_BUDGET_PREFLIGHT_EXCEEDED:
+      '本次问题携带的会话和知识上下文过长，请缩小问题范围或新建会话后重试。',
+    UNSUPPORTED_RUNTIME_INPUT:
+      '本次问题的模型输入超出当前支持范围，请缩小问题范围或新建会话后重试。',
+    KNOWLEDGE_GROUNDING_VALIDATION_FAILED:
+      '出错步骤：回答来源校验。模型已生成内容，但没有形成可核验的知识引用，未作为正式回答保存。请点击“重新生成”再次尝试。',
+    AI_RUNTIME_RESULT_ABANDONED:
+      '本次未确认的远端结果已由你结束等待，系统未把它当成成功回答。现在可以重新生成或继续提问。',
     AGENT_NOT_ONLINE: '智能体当前未上线。',
     AGENT_VERSION_NOT_PUBLISHED: '智能体尚无已发布版本。',
   };
@@ -1723,6 +1959,23 @@ export function citationDisplayMetadata(citation: MessageCitation): {
   readonly sourceType: string;
   readonly updatedAt: string;
 } {
+  if (citation.verificationStatus === 'COLLABORATION_POLICY_VERIFIED') {
+    return {
+      heading: '员工本人授权摘要',
+      sourceType: {
+        PERSONAL_MANUAL: '个人使用说明书',
+        WORK_AVAILABILITY: '工作状态',
+        TASK_FACT: '任务事实',
+      }[citation.sourceType],
+      updatedAt: new Intl.DateTimeFormat('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(citation.updatedAt)),
+    };
+  }
   if (citation.verificationStatus === 'LEGACY') {
     return {
       heading: '历史记录未保存章节',
@@ -1741,6 +1994,13 @@ export function citationDisplayMetadata(citation: MessageCitation): {
       minute: '2-digit',
     }).format(new Date(citation.updatedAt)),
   };
+}
+
+function messageCitationKey(citation: MessageCitation, index: number): string {
+  if (citation.verificationStatus === 'COLLABORATION_POLICY_VERIFIED') {
+    return citation.sourceId;
+  }
+  return citation.chunkId ?? `legacy:${citation.documentId}:${index}`;
 }
 
 function knowledgeSourceTypeLabel(sourceType: 'TEXT' | 'MARKDOWN' | 'FILE' | 'WEB'): string {

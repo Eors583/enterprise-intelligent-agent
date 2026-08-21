@@ -54,6 +54,10 @@ const BUSINESS_ROUTES: ReadonlyArray<{
     methods: new Set(['GET', 'PUT']),
   },
   {
+    pattern: /^\/api\/v1\/workbench\/people\/me\/work-availability$/,
+    methods: new Set(['GET', 'PUT']),
+  },
+  {
     pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/trace$`),
     methods: new Set(['GET']),
   },
@@ -465,23 +469,39 @@ export class DesktopAuthManager {
       throw new Error('Invalid realtime messaging subscription.');
     }
     const requestGeneration = this.generation;
-    await runImRealtime({
-      signal,
-      emit,
-      loadSession: async () => {
-        this.requireExpectedSession(request.expectedSessionId);
-        if (requestGeneration !== this.generation) throw staleAccountError();
-        const response = await this.apiRequest({
-          path: '/api/v1/im/session',
-          method: 'GET',
-          expectedSessionId: request.expectedSessionId,
+    let reconnectDelayMs = 250;
+    while (!signal.aborted) {
+      try {
+        await runImRealtime({
+          signal,
+          emit,
+          loadSession: async () => {
+            this.requireExpectedSession(request.expectedSessionId);
+            if (requestGeneration !== this.generation) throw staleAccountError();
+            const response = await this.apiRequest({
+              path: '/api/v1/im/session',
+              method: 'GET',
+              expectedSessionId: request.expectedSessionId,
+            });
+            if (response.status < 200 || response.status >= 300) {
+              throw new AuthHttpError(response.status, responseMessage(response.body));
+            }
+            return response.body;
+          },
         });
-        if (response.status < 200 || response.status >= 300) {
-          throw new AuthHttpError(response.status, responseMessage(response.body));
-        }
-        return response.body;
-      },
-    });
+        return;
+      } catch (error) {
+        if (signal.aborted) return;
+        if (isPermanentImRealtimeError(error)) throw error;
+        emit({
+          kind: 'state',
+          state: 'reconnecting',
+          error: 'Realtime messaging connection was interrupted.',
+        });
+        await abortableDelay(reconnectDelayMs, signal);
+        reconnectDelayMs = Math.min(5_000, reconnectDelayMs * 2);
+      }
+    }
   }
 
   private async openAgentRunStreamAttempt(
@@ -796,6 +816,17 @@ function isPermanentAgentRunStreamError(error: unknown): boolean {
       error.message.includes('not contiguous') ||
       error.message.includes('invalid content type') ||
       error.message.includes('safety limit'))
+  );
+}
+
+function isPermanentImRealtimeError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'StaleAccountError') return true;
+  return (
+    error instanceof AuthHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
   );
 }
 

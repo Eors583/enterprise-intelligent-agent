@@ -24,6 +24,13 @@ describe('personal collaboration manual contracts', () => {
         employmentType: 'REGULAR',
       },
       manual: completeManual(),
+      disclosurePolicy: privatePolicy(),
+      collaborationSettings: {
+        manualSharingEnabled: false,
+        availabilitySharingEnabled: false,
+        privateRiskRemindersEnabled: true,
+      },
+      policyRevision: 1,
       updatedAt: '2026-08-11T01:00:00.000Z',
     });
 
@@ -69,4 +76,15 @@ function completeManualBase() {
     clubs: null,
     faqs: [{ question: '什么事情适合直接找我？', answer: '产品优先级和跨部门协作。' }],
   };
+}
+
+function privatePolicy() {
+  return {
+    IDENTITY: 'SELF_ONLY',
+    RESPONSIBILITIES: 'SELF_ONLY',
+    COLLABORATION: 'SELF_ONLY',
+    RESOURCES: 'SELF_ONLY',
+    INTERESTS: 'SELF_ONLY',
+    FAQ: 'SELF_ONLY',
+  } as const;
 }

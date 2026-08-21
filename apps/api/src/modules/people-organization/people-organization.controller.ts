@@ -17,6 +17,7 @@ import {
   transitionCompetencyAppealRequestSchema,
   transitionDevelopmentActionRequestSchema,
   updatePersonalManualRequestSchema,
+  updateWorkAvailabilityRequestSchema,
   type ActivateCompetencyVersionRequest,
   type AnalyzeOrganizationChangeRequest,
   type ApplyOrganizationChangeRequest,
@@ -34,10 +35,12 @@ import {
   type TransitionCompetencyAppealRequest,
   type TransitionDevelopmentActionRequest,
   type UpdatePersonalManualRequest,
+  type UpdateWorkAvailabilityRequest,
 } from '@enterprise/contracts';
 
 import { SchemaValidationPipe } from '../../common/pipes/schema-validation.pipe.js';
 import { PersonalManualSelfService } from './personal-manual-self.service.js';
+import { WorkAvailabilitySelfService } from './work-availability-self.service.js';
 import { PeopleOrganizationService } from './people-organization.service.js';
 
 @Controller('admin/people-organization')
@@ -190,6 +193,8 @@ export class PeopleSelfServiceController {
     private readonly service: PeopleOrganizationService,
     @Inject(PersonalManualSelfService)
     private readonly personalManual: PersonalManualSelfService,
+    @Inject(WorkAvailabilitySelfService)
+    private readonly workAvailability: WorkAvailabilitySelfService,
   ) {}
 
   @Get('me')
@@ -208,6 +213,19 @@ export class PeopleSelfServiceController {
     request: UpdatePersonalManualRequest,
   ) {
     return this.personalManual.update(request);
+  }
+
+  @Get('me/work-availability')
+  workAvailabilityProfile() {
+    return this.workAvailability.get();
+  }
+
+  @Put('me/work-availability')
+  updateWorkAvailability(
+    @Body(new SchemaValidationPipe(updateWorkAvailabilityRequestSchema))
+    request: UpdateWorkAvailabilityRequest,
+  ) {
+    return this.workAvailability.update(request);
   }
 
   @Post('assessments/:assessmentId/confirmations')

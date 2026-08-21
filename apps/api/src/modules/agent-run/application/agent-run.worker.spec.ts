@@ -5,8 +5,10 @@ import { AgentRunQueueRepository } from '../domain/agent-run-queue.repository.js
 import type {
   AgentRunCancellationPreparation,
   AgentRunExternalAttachment,
+  AgentRunEvidenceSource,
   AgentRunKnowledgeSource,
   AgentRunPreparation,
+  AgentRunReconciliationPreparation,
   AgentRunUsage,
   ClaimedAgentRunEvent,
   PreparedAgentRun,
@@ -42,19 +44,115 @@ describe('AgentRunWorker', () => {
     expect(queue.unknown).toHaveLength(0);
   });
 
-  it('fails closed before Runtime dispatch when verified model availability is absent', async () => {
+  it('renews the outbox lease while a provider Run keeps waiting', async () => {
+    vi.useFakeTimers();
+    try {
+      const queue = new FakeQueue([event()]);
+      const runs = new FakeRuns({ kind: 'ready', run: preparedRun() });
+      const runtime = new BlockingExecuteRuntime();
+
+      const processing = createWorker(queue, runs, runtime).runOnce();
+      await runtime.executeStarted;
+      await vi.advanceTimersByTimeAsync(120_000);
+
+      expect(queue.renewed[0]).toMatchObject({
+        eventId: EVENT_ID,
+        claimTtlMs: 360_000,
+      });
+
+      runtime.releaseExecution(succeededResult('answer after waiting'));
+      await expect(processing).resolves.toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('claims immediately when a committed message wakes the co-located worker', async () => {
+    vi.useFakeTimers();
+    const queue = new SequencedQueue([[], []]);
+    const worker = createWorker(
+      queue,
+      new FakeRuns({ kind: 'ready', run: preparedRun() }),
+      new FakeRuntime(),
+    );
+    try {
+      worker.onApplicationBootstrap();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(queue.claimedBatchSizes).toHaveLength(1);
+
+      worker.notifyWorkAvailable();
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(queue.claimedBatchSizes).toHaveLength(2);
+    } finally {
+      await worker.onApplicationShutdown();
+      vi.useRealTimers();
+    }
+  });
+
+  it('dispatches an enabled Agent Run without requiring prior provider success evidence', async () => {
     const queue = new FakeQueue([event()]);
     const runs = new FakeRuns({ kind: 'ready', run: preparedRun() });
     const runtime = new FakeRuntime();
 
-    await createWorker(queue, runs, runtime, 'UNKNOWN').runOnce();
+    await createWorker(queue, runs, runtime).runOnce();
 
-    expect(runtime.calls).toHaveLength(0);
-    expect(runs.failed[0]).toMatchObject({
-      runId: RUN_ID,
-      errorCode: 'AGENT_OPERATIONAL_NOT_READY',
+    expect(runtime.calls).toEqual(['create', 'execute']);
+    expect(runs.succeeded[0]).toMatchObject({ runId: RUN_ID, output: 'answer' });
+    expect(queue.failed).toHaveLength(0);
+  });
+
+  it('publishes a normal no-evidence reply when retrieved candidates cannot support an answer', async () => {
+    const queue = new FakeQueue([event()]);
+    const runs = new FakeRuns({
+      kind: 'ready',
+      run: preparedRun({
+        knowledgeGroundingRequired: true,
+        knowledgeEvidenceFallbackEnabled: true,
+        knowledgeSources: [knowledgeSource()],
+      }),
     });
-    expect(queue.failed[0]).toMatchObject({ errorCode: 'AGENT_OPERATIONAL_NOT_READY' });
+    const runtime = new FakeRuntime({
+      execute: succeededResult('An unsupported model summary without a source marker.'),
+    });
+
+    await createWorker(queue, runs, runtime).runOnce();
+
+    expect(runs.succeeded[0]).toMatchObject({
+      runId: RUN_ID,
+      output: '当前没有找到你可使用的可靠依据。你可以补充问题背景，或直接联系相关负责人确认。',
+      citations: [],
+    });
+    expect(runs.failed).toHaveLength(0);
+    expect(queue.published).toHaveLength(1);
+    expect(queue.failed).toHaveLength(0);
+  });
+
+  it('publishes verified blocks instead of failing the Run for one malformed block', async () => {
+    const source = knowledgeSource();
+    const queue = new FakeQueue([event()]);
+    const runs = new FakeRuns({
+      kind: 'ready',
+      run: preparedRun({
+        knowledgeGroundingRequired: true,
+        knowledgeEvidenceFallbackEnabled: true,
+        knowledgeSources: [source],
+      }),
+    });
+    const runtime = new FakeRuntime({
+      execute: succeededResult(`已核验结论。[SOURCE:${source.chunkId}]\n\n缺少来源的补充包装。`),
+    });
+
+    await createWorker(queue, runs, runtime).runOnce();
+
+    expect(runs.failed).toHaveLength(0);
+    expect(runs.succeeded[0]).toMatchObject({
+      runId: RUN_ID,
+      output: '已核验结论。 [来源1]',
+      citations: [source],
+    });
+    expect(queue.published).toHaveLength(1);
+    expect(queue.failed).toHaveLength(0);
   });
 
   it('reconciles a server-controlled connectivity probe without circular readiness evidence', async () => {
@@ -69,7 +167,7 @@ describe('AgentRunWorker', () => {
     });
     const runtime = new FakeRuntime({ get: succeededResult('MODEL_CONNECTIVITY_OK') });
 
-    await createWorker(queue, runs, runtime, 'UNKNOWN').runOnce();
+    await createWorker(queue, runs, runtime).runOnce();
 
     expect(runtime.calls).toEqual(['get']);
     expect(runs.succeeded[0]).toMatchObject({
@@ -154,6 +252,25 @@ describe('AgentRunWorker', () => {
     expect(JSON.stringify(queue.deferred)).not.toContain('credential-bearing');
   });
 
+  it('retries an unconfirmed idempotent Runtime create instead of freezing UNKNOWN', async () => {
+    const queue = new FakeQueue([event()]);
+    const runs = new FakeRuns({ kind: 'ready', run: preparedRun() });
+    const runtime = new FakeRuntime({
+      create: new AgentRuntimeRequestError(
+        'AI_RUNTIME_UNAVAILABLE',
+        'transport detail must not persist',
+        'unknown',
+      ),
+    });
+
+    await createWorker(queue, runs, runtime).runOnce();
+
+    expect(runtime.calls).toEqual(['create']);
+    expect(runs.attached).toHaveLength(0);
+    expect(runs.unknown).toHaveLength(0);
+    expect(queue.deferred[0]).toMatchObject({ reasonCode: 'AI_RUNTIME_UNAVAILABLE' });
+  });
+
   it('resumes the same attached Runtime Run after a stream disconnect', async () => {
     const queue = new FakeQueue([event()]);
     const runs = new FakeRuns({
@@ -173,6 +290,78 @@ describe('AgentRunWorker', () => {
       reasonCode: 'AI_RUNTIME_STREAM_INTERRUPTED',
     });
     expect(JSON.stringify(queue.deferred)).not.toContain('partial upstream bytes');
+  });
+
+  it('schedules a durable same-id probe when an attached Runtime result becomes UNKNOWN', async () => {
+    const queue = new FakeQueue([event()]);
+    const runs = new FakeRuns({
+      kind: 'ready',
+      run: preparedRun({ externalRunId: EXTERNAL_ID }),
+    });
+    const runtime = new FakeRuntime({
+      get: new AgentRuntimeRequestError(
+        'AI_RUNTIME_HTTP_404',
+        'provider detail must not persist',
+        'unknown',
+      ),
+    });
+    const startedAt = Date.now();
+
+    await createWorker(queue, runs, runtime).runOnce();
+
+    expect(runtime.calls).toEqual(['get']);
+    expect(runs.unknown[0]).toMatchObject({
+      runId: RUN_ID,
+      errorCode: 'AI_RUNTIME_HTTP_404',
+      reconcileAt: expect.any(Date),
+    });
+    expect(runs.unknown[0]!.reconcileAt!.getTime()).toBeGreaterThanOrEqual(startedAt + 300_000);
+    expect(queue.unknown[0]).toMatchObject({ errorCode: 'AI_RUNTIME_HTTP_404' });
+  });
+
+  it('reconciles an UNKNOWN event by querying the original Runtime id without creating a task', async () => {
+    const queue = new FakeQueue([event({ payload: { runId: RUN_ID, reconciliation: true } })]);
+    const runs = new FakeRuns(
+      { kind: 'terminal', status: 'UNKNOWN', externalRunId: EXTERNAL_ID, errorCode: 'OLD' },
+      {
+        reconciliation: {
+          kind: 'ready',
+          run: preparedRun({ externalRunId: EXTERNAL_ID }),
+        },
+      },
+    );
+    const runtime = new FakeRuntime({ get: succeededResult('reconciled answer') });
+
+    await createWorker(queue, runs, runtime).runOnce();
+
+    expect(runs.prepareCalls).toBe(0);
+    expect(runs.prepareReconciliationCalls).toBe(1);
+    expect(runtime.calls).toEqual(['get']);
+    expect(runs.attached).toHaveLength(0);
+    expect(runs.succeeded[0]?.output).toBe('reconciled answer');
+    expect(queue.published).toHaveLength(1);
+  });
+
+  it('does not query Runtime when the user already abandoned a delayed reconciliation', async () => {
+    const queue = new FakeQueue([event({ payload: { runId: RUN_ID, reconciliation: true } })]);
+    const runs = new FakeRuns(
+      { kind: 'terminal', status: 'UNKNOWN', externalRunId: EXTERNAL_ID, errorCode: 'OLD' },
+      {
+        reconciliation: {
+          kind: 'terminal',
+          status: 'FAILED',
+          externalRunId: EXTERNAL_ID,
+          errorCode: 'AI_RUNTIME_RESULT_ABANDONED',
+        },
+      },
+    );
+    const runtime = new FakeRuntime();
+
+    await createWorker(queue, runs, runtime).runOnce();
+
+    expect(runtime.calls).toHaveLength(0);
+    expect(runs.succeeded).toHaveLength(0);
+    expect(queue.failed[0]).toMatchObject({ errorCode: 'AI_RUNTIME_RESULT_ABANDONED' });
   });
 
   it('fails a definitive create rejection and does not attempt attach or execute', async () => {
@@ -356,7 +545,7 @@ describe('AgentRunWorker', () => {
     const queue = new SequencedQueue([[event()], [secondEvent]]);
     const runs = new FakeRuns({ kind: 'ready', run: preparedRun() });
     const runtime = new BlockingExecuteRuntime();
-    const worker = createWorker(queue, runs, runtime, 'AVAILABLE', 2);
+    const worker = createWorker(queue, runs, runtime, 2);
 
     await expect(worker.runAvailableOnce()).resolves.toBe(1);
     await runtime.executeStarted;
@@ -370,6 +559,51 @@ describe('AgentRunWorker', () => {
 });
 
 describe('validateGroundedOutput', () => {
+  it('validates employee collaboration evidence without pretending it is a knowledge chunk', () => {
+    const collaborationSource = {
+      sourceId: '00000000-0000-7000-8000-000000000620',
+      sourceType: 'WORK_AVAILABILITY' as const,
+      sourceVersion: 2,
+      title: '林晓的工作可用状态',
+      content: '状态：出差中\n预计响应：明天下午回复',
+      updatedAt: '2026-08-13T02:00:00.000Z',
+      contentHash: 'c'.repeat(64),
+    };
+    const result = validateGroundedOutput(
+      `林晓当前出差中。[SOURCE:${collaborationSource.sourceId}]`,
+      preparedRun({
+        knowledgeGroundingRequired: true,
+        collaborationContext: {
+          schemaVersion: 1,
+          requesterUserId: '00000000-0000-7000-8000-000000000901',
+          representedEmployeeId: '00000000-0000-7000-8000-000000000902',
+          purpose: 'AVAILABILITY_QUERY',
+          relationship: 'SHARED_WORK',
+          policyRevision: 2,
+          policyHash: 'a'.repeat(64),
+          resolvedAt: '2026-08-13T02:00:00.000Z',
+          sources: [collaborationSource],
+          allowedCapabilities: ['ANSWER_FACTS', 'GIVE_ADVICE', 'DRAFT_ACTION'],
+          deniedCapabilities: [
+            'SEND_MESSAGE',
+            'CHANGE_TASK',
+            'MAKE_COMMITMENT',
+            'ACCEPT',
+            'APPROVE',
+            'ESCALATE',
+          ],
+          snapshotHash: 'b'.repeat(64),
+        },
+      }),
+    );
+
+    expect(result).toEqual({
+      content: '林晓当前出差中。 [来源1]',
+      citations: [collaborationSource],
+    });
+    expect(result.citations[0]).not.toHaveProperty('chunkId');
+  });
+
   it('只保留本次检索到的 chunk，并按正文首次出现顺序转换为来源序号', () => {
     const first = knowledgeSource({
       chunkId: '00000000-0000-7000-8000-000000000611',
@@ -454,41 +688,43 @@ describe('validateGroundedOutput', () => {
     );
 
     expect(result).toEqual({
-      content:
-        '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。',
+      content: '当前没有找到你可使用的可靠依据。你可以补充问题背景，或直接联系相关负责人确认。',
       citations: [],
     });
   });
 
-  it('任一非空段落未引用本次证据时整条回答安全降级', () => {
+  it('丢弃未引用段落并保留已核验段落，不让单个坏段拖垮整篇回答', () => {
     const source = knowledgeSource();
     expect(
       validateGroundedOutput(
         `第一段有依据。[SOURCE:${source.chunkId}]\n\n第二段没有依据。`,
         preparedRun({ knowledgeGroundingRequired: true, knowledgeSources: [source] }),
       ),
-    ).toEqual({
-      content:
-        '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。',
-      citations: [],
-    });
+    ).toEqual({ content: '第一段有依据。 [来源1]', citations: [source] });
   });
 
-  it('列表中的每个条目都必须独立引用本次证据', () => {
+  it('列表中只发布独立通过来源校验的条目', () => {
     const source = knowledgeSource();
     expect(
       validateGroundedOutput(
         `- 已支持的条目。[SOURCE:${source.chunkId}]\n- 未支持的条目。`,
         preparedRun({ knowledgeGroundingRequired: true, knowledgeSources: [source] }),
       ),
-    ).toEqual({
-      content:
-        '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。',
-      citations: [],
-    });
+    ).toEqual({ content: '- 已支持的条目。 [来源1]', citations: [source] });
   });
 
-  it('同一段中的每个独立句子都必须分别引用本次证据', () => {
+  it('丢弃伪造来源段落，同时保留使用本次真实来源的段落', () => {
+    const source = knowledgeSource();
+    expect(
+      validateGroundedOutput(
+        `可信结论。[SOURCE:${source.chunkId}]\n\n` +
+          `伪造结论。[SOURCE:00000000-0000-7000-8000-000000000699]`,
+        preparedRun({ knowledgeGroundingRequired: true, knowledgeSources: [source] }),
+      ),
+    ).toEqual({ content: '可信结论。 [来源1]', citations: [source] });
+  });
+
+  it('允许模型先归纳同一段中的多个事实并在段尾统一引用', () => {
     const source = knowledgeSource();
     expect(
       validateGroundedOutput(
@@ -496,9 +732,28 @@ describe('validateGroundedOutput', () => {
         preparedRun({ knowledgeGroundingRequired: true, knowledgeSources: [source] }),
       ),
     ).toEqual({
-      content:
-        '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。',
-      citations: [],
+      content: '制度要求先审批。额度上限为一万元。 [来源1]',
+      citations: [source],
+    });
+  });
+
+  it('忽略无引用的开场和重复总结，但保留并发布已逐项核验的正文', () => {
+    const source = knowledgeSource();
+    const result = validateGroundedOutput(
+      `知道。根据现有资料，销售管理主要体现在以下几个方面：\n\n` +
+        `1. 销售工作采用全过程管理。[SOURCE:${source.chunkId}]\n\n` +
+        `2. 销售工作强调客户导向。[SOURCE:${source.chunkId}]\n\n` +
+        `概括来说，销售管理是流程与客户导向相结合。`,
+      preparedRun({
+        knowledgeGroundingRequired: true,
+        knowledgeEvidenceFallbackEnabled: true,
+        knowledgeSources: [source],
+      }),
+    );
+
+    expect(result).toEqual({
+      content: '1. 销售工作采用全过程管理。 [来源1]\n\n2. 销售工作强调客户导向。 [来源1]',
+      citations: [source],
     });
   });
 
@@ -526,7 +781,7 @@ describe('validateGroundedOutput', () => {
     });
   });
 
-  it('超过十二个唯一来源时拒绝生成不完整的可见引用集', () => {
+  it('超过十二个唯一来源且没有其他合法段落时安全降级', () => {
     const sources = Array.from({ length: 13 }, (_, index) =>
       knowledgeSource({
         chunkId: `00000000-0000-7000-8000-${String(700 + index).padStart(12, '0')}`,
@@ -539,8 +794,7 @@ describe('validateGroundedOutput', () => {
         preparedRun({ knowledgeGroundingRequired: true, knowledgeSources: sources }),
       ),
     ).toEqual({
-      content:
-        '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。',
+      content: '当前没有找到你可使用的可靠依据。你可以补充问题背景，或直接联系相关负责人确认。',
       citations: [],
     });
   });
@@ -555,14 +809,40 @@ describe('validateGroundedOutput', () => {
     });
   });
 
-  it('未绑定知识库却声称依据企业知识时安全降级', () => {
-    expect(validateGroundedOutput('根据企业知识库规定，答案是 42。', preparedRun())).toEqual({
-      content:
-        '当前企业知识库中没有找到足够可靠的依据。你可以补充关键词，或联系知识管理员完善相关资料。',
+  it('知识型智能体的非企业事实确认语在本次无证据时仍可正常回复', () => {
+    expect(
+      validateGroundedOutput(
+        '模型调用已恢复。',
+        preparedRun({ knowledgeGroundingRequired: false, knowledgeSources: [] }),
+      ),
+    ).toEqual({
+      content: '模型调用已恢复。',
       citations: [],
     });
   });
-  it('falls back to authorized evidence when a model omits verifiable source markers', () => {
+
+  it('会话记忆问题即使预取到知识候选也不强制添加企业知识引用', () => {
+    expect(
+      validateGroundedOutput(
+        '你刚刚问的是：“还是没懂，能用大白话解释吗？”',
+        preparedRun({
+          knowledgeGroundingRequired: false,
+          knowledgeSources: [knowledgeSource()],
+        }),
+      ),
+    ).toEqual({
+      content: '你刚刚问的是：“还是没懂，能用大白话解释吗？”',
+      citations: [],
+    });
+  });
+
+  it('未绑定知识库却声称依据企业知识时安全降级', () => {
+    expect(validateGroundedOutput('根据企业知识库规定，答案是 42。', preparedRun())).toEqual({
+      content: '当前没有找到你可使用的可靠依据。你可以补充问题背景，或直接联系相关负责人确认。',
+      citations: [],
+    });
+  });
+  it('引用校验无可交付内容时正常返回无依据答复且不回显原始片段', () => {
     const source = knowledgeSource({ excerpt: 'The verified acceptance code is 青杉-0727.' });
 
     const result = validateGroundedOutput(
@@ -574,10 +854,12 @@ describe('validateGroundedOutput', () => {
       }),
     );
 
-    expect(result.content).toContain('青杉-0727');
-    expect(result.content).toContain('[来源1]');
+    expect(result.content).toBe(
+      '当前没有找到你可使用的可靠依据。你可以补充问题背景，或直接联系相关负责人确认。',
+    );
+    expect(result.content).not.toContain('青杉-0727');
     expect(result.content).not.toContain('unsupported model summary');
-    expect(result.citations).toEqual([source]);
+    expect(result.citations).toEqual([]);
   });
 });
 
@@ -664,7 +946,6 @@ function createWorker(
   queue: AgentRunQueueRepository,
   runs: AgentRunRepository,
   runtime: AgentRuntimeClient,
-  operationalStatus: 'AVAILABLE' | 'NOT_READY' | 'DEGRADED' | 'UNKNOWN' = 'AVAILABLE',
   concurrency = 1,
 ): AgentRunWorker {
   const values = validateEnvironment({
@@ -679,28 +960,11 @@ function createWorker(
     queue,
     runs,
     runtime,
-    {
-      inspectAgents: (_tenantId: string, agentIds: readonly string[]) =>
-        Promise.resolve(
-          new Map(
-            agentIds.map((agentId) => [
-              agentId,
-              {
-                status: operationalStatus,
-                evidenceStatus:
-                  operationalStatus === 'AVAILABLE' ? 'VERIFIED' : 'INSUFFICIENT_EVIDENCE',
-                reasonCodes:
-                  operationalStatus === 'AVAILABLE' ? [] : ['RUNTIME_READINESS_UNAVAILABLE'],
-                checkedAt: operationalStatus === 'AVAILABLE' ? new Date().toISOString() : null,
-              },
-            ]),
-          ),
-        ),
-    } as never,
   );
 }
 
 class FakeQueue extends AgentRunQueueRepository {
+  renewed: Array<Parameters<AgentRunQueueRepository['renewLease']>[0]> = [];
   published: Array<Parameters<AgentRunQueueRepository['markPublished']>[0]> = [];
   failed: Array<Parameters<AgentRunQueueRepository['markFailed']>[0]> = [];
   unknown: Array<Parameters<AgentRunQueueRepository['markUnknown']>[0]> = [];
@@ -723,6 +987,11 @@ class FakeQueue extends AgentRunQueueRepository {
     _input: Parameters<AgentRunQueueRepository['claimCancellations']>[0],
   ): Promise<readonly ClaimedAgentRunEvent[]> {
     return Promise.resolve(this.cancellationEvents);
+  }
+
+  renewLease(input: Parameters<AgentRunQueueRepository['renewLease']>[0]): Promise<boolean> {
+    this.renewed.push(input);
+    return Promise.resolve(true);
   }
 
   markPublished(input: Parameters<AgentRunQueueRepository['markPublished']>[0]): Promise<boolean> {
@@ -763,6 +1032,7 @@ class SequencedQueue extends FakeQueue {
 
 class FakeRuns extends AgentRunRepository {
   prepareCalls = 0;
+  prepareReconciliationCalls = 0;
   attached: Array<{ tenantId: string; runId: string; externalRunId: string }> = [];
   confirmedCancellations: Array<{
     tenantId: string;
@@ -774,7 +1044,7 @@ class FakeRuns extends AgentRunRepository {
     tenantId: string;
     runId: string;
     output: string;
-    citations: readonly AgentRunKnowledgeSource[];
+    citations: readonly AgentRunEvidenceSource[];
     usage: AgentRunUsage | undefined;
   }> = [];
   failed: Array<{
@@ -789,6 +1059,7 @@ class FakeRuns extends AgentRunRepository {
     runId: string;
     errorCode: string;
     usage: AgentRunUsage | undefined;
+    reconcileAt: Date | undefined;
   }> = [];
 
   private readonly attachment: AgentRunExternalAttachment;
@@ -799,16 +1070,25 @@ class FakeRuns extends AgentRunRepository {
     options: {
       readonly attachment?: AgentRunExternalAttachment;
       readonly cancellation?: AgentRunCancellationPreparation;
+      readonly reconciliation?: AgentRunReconciliationPreparation;
     } = {},
   ) {
     super();
     this.attachment = options.attachment ?? 'attached';
     this.cancellation = options.cancellation ?? { kind: 'complete', externalRunId: null };
+    this.reconciliation = options.reconciliation ?? preparation;
   }
+
+  private readonly reconciliation: AgentRunReconciliationPreparation;
 
   prepare(): Promise<AgentRunPreparation> {
     this.prepareCalls += 1;
     return Promise.resolve(this.preparation);
+  }
+
+  prepareReconciliation(): Promise<AgentRunReconciliationPreparation> {
+    this.prepareReconciliationCalls += 1;
+    return Promise.resolve(this.reconciliation);
   }
 
   attachExternalRun(
@@ -838,9 +1118,9 @@ class FakeRuns extends AgentRunRepository {
     tenantId: string,
     runId: string,
     output: string,
-    citations: readonly AgentRunKnowledgeSource[] = [],
+    citations: readonly AgentRunEvidenceSource[] = [],
     usage?: AgentRunUsage,
-  ): Promise<{ outputMessageId: string; externalRunId: string | null }> {
+  ): Promise<{ outputMessageId: string | null; externalRunId: string | null }> {
     this.succeeded.push({ tenantId, runId, output, citations, usage });
     return Promise.resolve({
       outputMessageId: '00000000-0000-7000-8000-000000000805',
@@ -864,8 +1144,10 @@ class FakeRuns extends AgentRunRepository {
     runId: string,
     errorCode: string,
     usage?: AgentRunUsage,
+    _streamMode?: 'live' | 'terminal_only',
+    reconcileAt?: Date,
   ): Promise<void> {
-    this.unknown.push({ tenantId, runId, errorCode, usage });
+    this.unknown.push({ tenantId, runId, errorCode, usage, reconcileAt });
     return Promise.resolve();
   }
 

@@ -40,6 +40,14 @@ class FragmentedByteStream(httpx.AsyncByteStream):
             yield self._content[offset : offset + self._chunk_size]
 
 
+class SingleChunkByteStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    async def __aiter__(self):
+        yield self._content
+
+
 def completion_request() -> ProviderCompletionRequest:
     return ProviderCompletionRequest(
         messages=(RunMessage(role=MessageRole.USER, content="Hello"),),
@@ -376,6 +384,55 @@ def test_provider_streams_strict_sse_and_requires_trusted_terminal_usage() -> No
     headers = captured["headers"]
     assert isinstance(headers, httpx.Headers)
     assert headers["Accept"] == "text/event-stream"
+
+
+def test_provider_packages_tiny_sse_deltas_from_one_network_chunk() -> None:
+    body = _sse(
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {"content": "秒"}, "finish_reason": None}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {"content": "级"}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 2,
+                "total_tokens": 9,
+            },
+        },
+        "[DONE]",
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=SingleChunkByteStream(body),
+        )
+
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = [event async for event in provider.stream(completion_request())]
+        assert [event.content for event in events if isinstance(event, ProviderStreamDelta)] == [
+            "秒级"
+        ]
+        assert isinstance(events[-1], ProviderStreamTerminal)
+        assert events[-1].result.output.content == "秒级"
+        await provider.aclose()
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

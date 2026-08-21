@@ -12,6 +12,7 @@ import type {
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import {
+  abandonUnknownAgentRun,
   cancelAgentRun,
   changeGroupMembers,
   createDirectConversation,
@@ -270,7 +271,11 @@ export function useAgentRunActions(conversationId: string | null) {
     mutationFn: (runId: string) => retryAgentRun(conversationId!, runId),
     onSuccess: invalidate,
   });
-  return { cancel, retry };
+  const abandon = useMutation({
+    mutationFn: (runId: string) => abandonUnknownAgentRun(conversationId!, runId),
+    onSuccess: invalidate,
+  });
+  return { abandon, cancel, retry };
 }
 
 export type { AgentRunStreamPhase } from './stream-state';

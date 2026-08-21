@@ -1,4 +1,4 @@
-import { createElement } from 'react';
+import { createElement, type ReactNode } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { renderInTestDom } from '../../test/dom-test-utils';
@@ -32,10 +32,17 @@ vi.mock('../messaging/MessagingWorkspace', async () => {
   const { createElement: createMockElement } = await import('react');
   return {
     ConversationWorkspace: () => null,
-    MessagingSidebar: ({ onStartConversation }: { onStartConversation?: () => void }) =>
+    MessagingSidebar: ({
+      onStartConversation,
+      organizationPanel,
+    }: {
+      onStartConversation?: () => void;
+      organizationPanel?: ReactNode;
+    }) =>
       createMockElement(
         'aside',
         { 'data-testid': 'messaging-sidebar' },
+        organizationPanel,
         onStartConversation
           ? createMockElement(
               'button',
@@ -228,6 +235,24 @@ describe('desktop workbench navigation integration', () => {
       );
       expect(dialog?.querySelectorAll('article button')).toHaveLength(2);
       expect(dom.container.textContent).not.toContain('智能体协作');
+    } finally {
+      await dom.cleanup();
+    }
+  });
+
+  it('keeps the member profile and Agent actions as distinct buttons', async () => {
+    hookSpies.createConversation.mockClear();
+    const dom = await renderInTestDom(createElement(DirectoryWorkspace, { payload: PAYLOAD }));
+    try {
+      const agentAction = dom.container.querySelector<HTMLButtonElement>('.tree-member-ai');
+      expect(agentAction?.tagName).toBe('BUTTON');
+      expect(agentAction?.getAttribute('aria-label')).toBe('与 产品决策智能体 对话');
+      if (agentAction) await dom.click(agentAction);
+
+      expect(hookSpies.createConversation).toHaveBeenCalledWith(
+        { type: 'direct', target: { type: 'agent', agentId: 'agent-1' } },
+        expect.any(Object),
+      );
     } finally {
       await dom.cleanup();
     }

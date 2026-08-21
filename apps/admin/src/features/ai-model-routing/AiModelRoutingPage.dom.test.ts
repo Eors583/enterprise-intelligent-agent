@@ -165,6 +165,7 @@ describe('AI model routing governance DOM acceptance', () => {
       expect(dom.container.textContent).toContain('系统不会生成示例模型');
       expect(dom.container.textContent).toContain('真实 Provider 恢复验证');
       expect(dom.container.textContent).toContain('本地 Runtime 探针只证明配置存在');
+      expect(dom.container.textContent).toContain('企业所有者可直接发布');
     } finally {
       await dom.cleanup();
     }

@@ -116,8 +116,8 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'finops_projection_jobs',
     'finops_roi_formula_versions',
     'finops_roi_snapshots',
-    'knowledge_base_org_units',
     'knowledge_base_members',
+    'knowledge_base_org_units',
     'knowledge_bases',
     'knowledge_chunk_embeddings',
     'knowledge_chunks',
@@ -129,6 +129,9 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'knowledge_entity_mentions',
     'knowledge_entity_merges',
     'knowledge_entity_source_identities',
+    'knowledge_external_entry_bindings',
+    'knowledge_external_space_bindings',
+    'knowledge_folders',
     'knowledge_graph_commands',
     'knowledge_graph_conflicts',
     'knowledge_graph_corrections',
@@ -139,6 +142,8 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'knowledge_ontology_predicates',
     'knowledge_ontology_versions',
     'knowledge_parent_chunks',
+    'knowledge_provider_connections',
+    'knowledge_provider_user_bindings',
     'knowledge_relation_evidence',
     'knowledge_relation_governance',
     'knowledge_relations',
@@ -155,6 +160,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'marketing_products',
     'marketing_regions',
     'marketing_targets',
+    'member_profiles',
     'memory_commands',
     'memory_records',
     'memory_source_evidence',
@@ -222,6 +228,12 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     knowledge_bases: ['enterprise_agent_admin', 'enterprise_agent_app'],
     knowledge_documents: ['enterprise_agent_admin', 'enterprise_agent_app'],
     knowledge_ingestion_jobs: ['enterprise_agent_admin', 'enterprise_agent_app'],
+    knowledge_external_entry_bindings: ['enterprise_agent_admin'],
+    knowledge_external_space_bindings: ['enterprise_agent_admin'],
+    knowledge_folders: ['enterprise_agent_admin', 'enterprise_agent_app'],
+    knowledge_provider_connections: ['enterprise_agent_admin'],
+    knowledge_provider_user_bindings: ['enterprise_agent_admin'],
+    member_profiles: ['enterprise_agent_admin', 'enterprise_agent_app'],
     outbox_event_deliveries: [
       'enterprise_agent_admin',
       'enterprise_agent_app',
@@ -283,6 +295,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'tool_reconciliation_attempts',
     'tool_reconciliation_receipts',
     'user_mfa_factors',
+    'work_availabilities',
   ] as const;
 
   const tenantScopedForeignKeys = [
@@ -405,6 +418,18 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'knowledge_documents_current_version_fkey',
     'knowledge_bases_active_embedding_index_version_fkey',
     'knowledge_bases_pending_embedding_index_version_fkey',
+    'knowledge_provider_connections_tenant_id_fkey',
+    'knowledge_provider_user_bindings_tenant_fkey',
+    'knowledge_provider_user_bindings_connection_fkey',
+    'knowledge_provider_user_bindings_user_fkey',
+    'knowledge_external_entry_bindings_tenant_fkey',
+    'knowledge_external_entry_bindings_knowledge_base_fkey',
+    'knowledge_external_entry_bindings_space_fkey',
+    'knowledge_external_entry_bindings_folder_fkey',
+    'knowledge_external_entry_bindings_document_fkey',
+    'knowledge_external_space_bindings_tenant_fkey',
+    'knowledge_external_space_bindings_knowledge_base_fkey',
+    'knowledge_external_space_bindings_connection_fkey',
     'knowledge_document_versions_knowledge_base_fkey',
     'knowledge_document_versions_document_fkey',
     'knowledge_document_versions_created_by_fkey',
@@ -561,6 +586,10 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
     'ai_evaluation_runner_attestations_tenant_fkey',
     'knowledge_parent_chunks_tenant_id_fkey',
     'knowledge_embedding_index_versions_tenant_id_fkey',
+    'knowledge_provider_connections_tenant_id_fkey',
+    'knowledge_provider_user_bindings_tenant_fkey',
+    'knowledge_external_entry_bindings_tenant_fkey',
+    'knowledge_external_space_bindings_tenant_fkey',
   ]);
 
   const processTableAclBaseline = {
@@ -874,7 +903,15 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
 
     expect(baseline).toEqual(
       tenantRlsBaseline.map(({ tableName, tenantColumn, roles }) => {
-        const expression = `(${tenantColumn} = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)`;
+        const tenantExpression = `(${tenantColumn} = (NULLIF(current_setting('app.tenant_id'::text, true), ''::text))::uuid)`;
+        // The global Outbox worker may inspect only six granted ordering
+        // columns on agent_runs so it can reject non-head conversation work at
+        // claim time. Every other role remains tenant-bound, and column ACLs
+        // keep prompts, policies, outputs, and usage invisible to the worker.
+        const expression =
+          tableName === 'agent_runs'
+            ? `(${tenantExpression} OR (CURRENT_USER = 'enterprise_agent_outbox'::name))`
+            : tenantExpression;
         return {
           tableName,
           rowSecurity: true,
@@ -1627,11 +1664,13 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
         'claimed_by',
         'created_at',
         'document_version_id',
+        'failure_attempts',
         'id',
         'lease_expires_at',
         'started_at',
         'status',
         'tenant_id',
+        'updated_at',
       ].map((columnName) => ({ columnName, privilegeType: 'SELECT' })),
       ...[
         'attempts',
@@ -1639,6 +1678,7 @@ describe.runIf(databaseTestsEnabled)('PostgreSQL tenant RLS', () => {
         'claimed_by',
         'error_code',
         'error_message',
+        'failure_attempts',
         'finished_at',
         'lease_expires_at',
         'progress',

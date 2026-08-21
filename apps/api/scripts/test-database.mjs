@@ -81,6 +81,11 @@ const result = spawnSync(
       // asserting the queued state. Disable the AppModule bootstrap worker so
       // it cannot claim the same row first and make those assertions racy.
       KNOWLEDGE_INGESTION_WORKER_ENABLED: 'false',
+      // The product dev environment intentionally disables the retired local
+      // backend. Database acceptance suites explicitly exercise the local
+      // ingestion boundary in a disposable database, so do not inherit that
+      // product runtime flag here.
+      KNOWLEDGE_LOCAL_BACKEND_ENABLED: 'true',
       FINOPS_PROJECTION_WORKER_ENABLED: 'false',
       AUTH_LOGIN_RATE_LIMIT_ENABLED: 'true',
       AUTH_TOKEN_PEPPER: 'database-integration-token-pepper',

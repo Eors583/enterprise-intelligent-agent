@@ -4,6 +4,7 @@ import { AuthorizationModule } from '../authorization/authorization.module.js';
 import { KnowledgeSemanticModule } from '../knowledge-semantic/knowledge-semantic.module.js';
 import { KnowledgeSearchIndexModule } from '../knowledge-search-index/knowledge-search-index.module.js';
 import { KnowledgeObjectStoreModule } from '../knowledge-ingestion/infrastructure/knowledge-object-store.module.js';
+import { KnowledgeProviderModule } from '../knowledge-provider/knowledge-provider.module.js';
 
 import { IdentityModule } from '../identity/identity.module.js';
 import { KnowledgeCitationController } from './knowledge-citation.controller.js';
@@ -20,6 +21,7 @@ import { KnowledgeStructuredQueryService } from './knowledge-structured-query.se
     KnowledgeSemanticModule,
     KnowledgeSearchIndexModule,
     KnowledgeObjectStoreModule,
+    KnowledgeProviderModule,
   ],
   controllers: [KnowledgeCitationController],
   providers: [

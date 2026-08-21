@@ -9,7 +9,7 @@ from enum import StrEnum
 from ipaddress import IPv4Address, IPv6Address, ip_address
 from pathlib import Path
 from socket import inet_aton
-from urllib.parse import SplitResult, parse_qs, urlsplit
+from urllib.parse import SplitResult, parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 from dotenv import dotenv_values
@@ -78,7 +78,7 @@ class RuntimeSettings:
     manus_agent_profile: str = "manus-1.6-lite"
     manus_project_id: str | None = None
     manus_poll_interval_seconds: float = 2.0
-    manus_max_wait_seconds: float = 120.0
+    manus_max_wait_seconds: float = 300.0
     embedding_driver: EmbeddingDriver = EmbeddingDriver.DISABLED
     embedding_base_url: str | None = None
     embedding_api_key: str | None = field(default=None, repr=False)
@@ -438,7 +438,7 @@ class RuntimeSettings:
             ),
             manus_max_wait_seconds=_positive_float(
                 values.get("MANUS_MAX_WAIT_SECONDS"),
-                default=120.0,
+                default=300.0,
                 name="MANUS_MAX_WAIT_SECONDS",
             ),
             embedding_driver=embedding_driver,
@@ -529,6 +529,19 @@ def load_runtime_dotenv(
     for key, value in file_values.items():
         if value is not None and key.startswith(RUNTIME_DOTENV_PREFIXES) and key not in values:
             values[key] = value
+
+    # Local development commonly uses the same PostgreSQL instance as the API.
+    # Reuse its already-local dotenv credential without copying that secret to a
+    # second variable. Production still requires an explicitly injected,
+    # least-privilege AI_RUNTIME_POSTGRES_DSN and never enters this branch.
+    if (
+        values.get("AI_RUNTIME_STORE_DRIVER", "memory").strip().lower()
+        == StoreDriver.POSTGRES.value
+        and _optional(values.get("AI_RUNTIME_POSTGRES_DSN")) is None
+    ):
+        shared_dsn = _optional(file_values.get("DATABASE_URL"))
+        if shared_dsn is not None:
+            values["AI_RUNTIME_POSTGRES_DSN"] = _asyncpg_dsn_from_prisma(shared_dsn)
     return True
 
 
@@ -537,6 +550,18 @@ def _optional(value: str | None) -> str | None:
         return None
     stripped = value.strip()
     return stripped or None
+
+
+def _asyncpg_dsn_from_prisma(value: str) -> str:
+    parsed = urlsplit(value)
+    query = urlencode(
+        [
+            (key, item)
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+            if key != "schema"
+        ]
+    )
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, query, parsed.fragment))
 
 
 def _parse_provider_url(name: str, value: str) -> SplitResult:

@@ -25,9 +25,9 @@ describe('listAgentCollaborationCandidates', () => {
       status: 'online' as const,
       summary: '负责研发方案',
       operationalAvailability: {
-        status: 'AVAILABLE' as const,
-        evidenceStatus: 'VERIFIED' as const,
-        reasonCodes: [],
+        status: 'NOT_READY' as const,
+        evidenceStatus: 'INSUFFICIENT_EVIDENCE' as const,
+        reasonCodes: ['NO_RECENT_SUCCESSFUL_PROVIDER_EVIDENCE'],
         checkedAt: '2026-07-28T01:00:00.000Z',
       },
     };

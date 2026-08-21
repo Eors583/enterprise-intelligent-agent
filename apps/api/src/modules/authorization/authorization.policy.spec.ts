@@ -161,6 +161,20 @@ describe('evaluateAuthorization', () => {
     });
   });
 
+  it('allows a tenant member to open the realtime conversation transport', () => {
+    const decision = evaluateAuthorization(
+      baseInput({ action: 'conversation.realtime.connect', risk: 'MEDIUM' }),
+      { now: NOW },
+    );
+
+    expect(decision).toMatchObject({
+      effect: 'allow',
+      allowed: true,
+      reasonCode: 'ALLOW_WITH_RESOURCE_FILTERS',
+    });
+    expect(decision.obligations).toContainEqual({ type: 'VERIFY_RESOURCE_MEMBERSHIP' });
+  });
+
   it('returns concrete knowledge filters from the active role assignment', () => {
     const decision = evaluateAuthorization(
       baseInput({

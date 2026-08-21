@@ -69,15 +69,32 @@ import { TikaPowerPointParserAdapter } from './infrastructure/tika-powerpoint-pa
           }),
         });
         return {
-          parse: (input) =>
-            input.mimeType === 'application/vnd.ms-powerpoint'
-              ? tikaParser.parse(input)
-              : input.mimeType === 'text/plain' ||
-                  input.mimeType === 'text/markdown' ||
-                  input.mimeType === 'text/html' ||
-                  input.mimeType === 'application/xhtml+xml'
-                ? localParser.parse(input)
-                : doclingParser.parse(input),
+          parse: async (input) => {
+            if (input.mimeType === 'application/vnd.ms-powerpoint') return tikaParser.parse(input);
+            if (
+              input.mimeType === 'text/plain' ||
+              input.mimeType === 'text/markdown' ||
+              input.mimeType === 'text/html' ||
+              input.mimeType === 'application/xhtml+xml'
+            )
+              return localParser.parse(input);
+            try {
+              return await doclingParser.parse(input);
+            } catch (error) {
+              if (
+                input.mimeType !==
+                  'application/vnd.openxmlformats-officedocument.presentationml.presentation' ||
+                !(error instanceof Error) ||
+                ![
+                  'DOCUMENT_PARSER_INVALID_RESPONSE',
+                  'DOCUMENT_PARSER_TIMEOUT',
+                  'DOCUMENT_PARSER_UNAVAILABLE',
+                ].includes(error.message)
+              )
+                throw error;
+              return tikaParser.parse(input);
+            }
+          },
         };
       },
     },

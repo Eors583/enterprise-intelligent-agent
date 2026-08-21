@@ -1,6 +1,7 @@
-import { ForbiddenException, ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException } from '@nestjs/common';
 
 import type { AgentControlService } from '../agent-control/application/agent-control.service.js';
+import type { AgentRunWorker } from '../agent-run/application/agent-run.worker.js';
 import type { AuthorizationService } from '../authorization/authorization.service.js';
 import type { IdentityService } from '../identity/application/identity.service.js';
 import type { IdentityRepository } from '../identity/domain/identity.repository.js';
@@ -30,7 +31,6 @@ describe('ConversationService authorization integration', () => {
       {} as AgentControlService,
       conversations as unknown as ConversationRepository,
       authorization as unknown as AuthorizationService,
-      { inspectAgents: vi.fn() } as never,
     );
 
     await expect(service.list()).rejects.toBeInstanceOf(ForbiddenException);
@@ -44,8 +44,8 @@ describe('ConversationService authorization integration', () => {
 });
 
 describe('ConversationService operational Agent boundary', () => {
-  it('rejects conversation creation when configuration is online but model evidence is not ready', async () => {
-    const conversations = { createDirect: vi.fn() };
+  it('allows an enabled Agent conversation before model availability has been verified', async () => {
+    const conversations = { createDirect: vi.fn().mockResolvedValue({ id: 'conversation-id' }) };
     const service = new ConversationService(
       {
         getCurrentIdentity: vi.fn().mockResolvedValue({
@@ -69,21 +69,6 @@ describe('ConversationService operational Agent boundary', () => {
       } as unknown as AgentControlService,
       conversations as unknown as ConversationRepository,
       { requireCurrent: vi.fn() } as unknown as AuthorizationService,
-      {
-        inspectAgents: vi.fn().mockResolvedValue(
-          new Map([
-            [
-              '00000000-0000-7000-8000-000000000201',
-              {
-                status: 'UNKNOWN',
-                evidenceStatus: 'INSUFFICIENT_EVIDENCE',
-                reasonCodes: ['RUNTIME_READINESS_UNAVAILABLE'],
-                checkedAt: null,
-              },
-            ],
-          ]),
-        ),
-      } as never,
     );
 
     await expect(
@@ -94,8 +79,8 @@ describe('ConversationService operational Agent boundary', () => {
           agentId: '00000000-0000-7000-8000-000000000201',
         },
       }),
-    ).rejects.toBeInstanceOf(ServiceUnavailableException);
-    expect(conversations.createDirect).not.toHaveBeenCalled();
+    ).resolves.toEqual({ id: 'conversation-id' });
+    expect(conversations.createDirect).toHaveBeenCalledOnce();
   });
 
   it('commits an Agent-targeted message without a duplicate Runtime readiness round trip', async () => {
@@ -106,7 +91,7 @@ describe('ConversationService operational Agent boundary', () => {
     const conversations = {
       createUserMessage: vi.fn().mockResolvedValue(createdMessage),
     };
-    const inspectAgents = vi.fn();
+    const agentRuns = { notifyWorkAvailable: vi.fn() };
     const service = new ConversationService(
       {
         getCurrentIdentity: vi.fn().mockResolvedValue({
@@ -117,7 +102,7 @@ describe('ConversationService operational Agent boundary', () => {
       {} as AgentControlService,
       conversations as unknown as ConversationRepository,
       { requireCurrent: vi.fn() } as unknown as AuthorizationService,
-      { inspectAgents } as never,
+      agentRuns as unknown as AgentRunWorker,
     );
 
     await expect(
@@ -128,7 +113,6 @@ describe('ConversationService operational Agent boundary', () => {
       }),
     ).resolves.toBe(createdMessage);
 
-    expect(inspectAgents).not.toHaveBeenCalled();
     expect(conversations.createUserMessage).toHaveBeenCalledWith(
       expect.objectContaining({
         tenantId: TENANT_ID,
@@ -136,6 +120,7 @@ describe('ConversationService operational Agent boundary', () => {
         responseTarget: { type: 'agent', agentId: AGENT_ID },
       }),
     );
+    expect(agentRuns.notifyWorkAvailable).toHaveBeenCalledOnce();
   });
 });
 
@@ -177,7 +162,6 @@ describe('ConversationService shared member and Agent channel', () => {
       } as unknown as AgentControlService,
       conversations as unknown as ConversationRepository,
       { requireCurrent: vi.fn() } as unknown as AuthorizationService,
-      { inspectAgents: vi.fn() } as never,
     );
 
     await service.create({ type: 'direct', target: { type: 'human', userId: TARGET_USER_ID } });
@@ -214,21 +198,6 @@ describe('ConversationService shared member and Agent channel', () => {
       } as unknown as AgentControlService,
       conversations as unknown as ConversationRepository,
       { requireCurrent: vi.fn() } as unknown as AuthorizationService,
-      {
-        inspectAgents: vi.fn().mockResolvedValue(
-          new Map([
-            [
-              AGENT_ID,
-              {
-                status: 'AVAILABLE',
-                evidenceStatus: 'VERIFIED',
-                reasonCodes: [],
-                checkedAt: new Date().toISOString(),
-              },
-            ],
-          ]),
-        ),
-      } as never,
     );
 
     await service.create({ type: 'direct', target: { type: 'agent', agentId: AGENT_ID } });
@@ -314,14 +283,6 @@ describe('ConversationService Agent brainstorming group', () => {
       } as unknown as AgentControlService,
       conversations as unknown as ConversationRepository,
       { requireCurrent: vi.fn() } as unknown as AuthorizationService,
-      {
-        inspectAgents: vi.fn().mockResolvedValue(
-          new Map([
-            [AGENT_ID, { status: 'AVAILABLE' }],
-            [secondAgentId, { status: 'AVAILABLE' }],
-          ]),
-        ),
-      } as never,
     );
 
     await service.create({

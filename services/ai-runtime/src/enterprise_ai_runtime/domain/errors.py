@@ -117,10 +117,14 @@ class ProviderRateLimitError(RuntimeExecutionError):
 
 
 class ProviderRequestError(RuntimeExecutionError):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        code: str = "PROVIDER_REQUEST_REJECTED",
+        message: str = "model provider rejected the request",
+    ) -> None:
         super().__init__(
-            "PROVIDER_REQUEST_REJECTED",
-            "model provider rejected the request",
+            code,
+            message,
             retryable=False,
         )
 

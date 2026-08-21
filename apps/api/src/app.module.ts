@@ -29,6 +29,7 @@ import { IdentityModule } from './modules/identity/identity.module.js';
 import { IdentityGovernanceModule } from './modules/identity-governance/identity-governance.module.js';
 import { ImOutboxModule } from './modules/im-outbox/im-outbox.module.js';
 import { KnowledgeGraphGovernanceModule } from './modules/knowledge-graph-governance/knowledge-graph-governance.module.js';
+import { KnowledgeProviderModule } from './modules/knowledge-provider/knowledge-provider.module.js';
 import { MemoryExperienceModule } from './modules/memory-experience/memory-experience.module.js';
 import { MarketingManagementModule } from './modules/marketing-management/marketing-management.module.js';
 import { ProcessRuntimeModule } from './modules/process-runtime/process-runtime.module.js';
@@ -61,6 +62,7 @@ import { EmployeeInsightsModule } from './modules/employee-insights/employee-ins
     BusinessEventModule,
     CollaborationCorrectionModule,
     KnowledgeGraphGovernanceModule,
+    KnowledgeProviderModule,
     MemoryExperienceModule,
     EmployeeInsightsModule,
     MarketingManagementModule,

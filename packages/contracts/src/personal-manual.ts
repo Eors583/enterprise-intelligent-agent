@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+import {
+  DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS,
+  DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+  employeeAgentCollaborationSettingsSchema,
+  personalManualDisclosurePolicySchema,
+} from './employee-agent-collaboration.js';
+
 const UUID = z.uuid();
 const nullableProfileTextSchema = z.string().trim().max(5_000).nullable();
 
@@ -48,6 +55,9 @@ export const personalManualSelfProfileSchema = z
       })
       .nullable(),
     manual: personalManualContentSchema,
+    disclosurePolicy: personalManualDisclosurePolicySchema,
+    collaborationSettings: employeeAgentCollaborationSettingsSchema,
+    policyRevision: z.number().int().positive(),
     updatedAt: z.iso.datetime().nullable(),
   })
   .strict();
@@ -56,6 +66,12 @@ export const updatePersonalManualRequestSchema = z
   .object({
     expectedUpdatedAt: z.iso.datetime().nullable(),
     manual: personalManualContentSchema,
+    disclosurePolicy: personalManualDisclosurePolicySchema
+      .optional()
+      .default(DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY),
+    collaborationSettings: employeeAgentCollaborationSettingsSchema
+      .optional()
+      .default(DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS),
   })
   .strict();
 

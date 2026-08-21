@@ -26,6 +26,7 @@ const EMPLOYEE_ACTIONS = new Set([
   'conversation.list',
   'conversation.message.create',
   'conversation.read',
+  'conversation.realtime.connect',
   'conversation.search',
   'conversation.state.update',
   'conversation.group.manage',

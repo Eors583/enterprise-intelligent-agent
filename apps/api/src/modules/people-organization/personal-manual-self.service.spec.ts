@@ -1,4 +1,8 @@
 import { ConflictException } from '@nestjs/common';
+import {
+  DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS,
+  DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+} from '@enterprise/contracts';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TenantContext } from '../../common/context/tenant-context.js';
@@ -73,6 +77,8 @@ describe('PersonalManualSelfService', () => {
         coreSkills: '产品设计',
         faqs: [{ question: '什么事情可以找我？', answer: '产品优先级。' }],
       },
+      disclosurePolicy: DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+      collaborationSettings: DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS,
     });
 
     expect(transaction.$queryRaw).toHaveBeenCalledOnce();
@@ -88,7 +94,12 @@ describe('PersonalManualSelfService', () => {
       data: expect.objectContaining({
         actorId: USER_ID,
         action: 'people.personal_manual.updated',
-        metadata: { completedFieldCount: 3, faqCount: 1 },
+        metadata: {
+          completedFieldCount: 3,
+          faqCount: 1,
+          disclosureScopes: DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+          collaborationSettings: DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS,
+        },
       }),
     });
     expect(result.user.id).toBe(USER_ID);
@@ -104,6 +115,8 @@ describe('PersonalManualSelfService', () => {
       service.update({
         expectedUpdatedAt: '2026-08-11T00:00:00.000Z',
         manual: emptyManual(),
+        disclosurePolicy: DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+        collaborationSettings: DEFAULT_EMPLOYEE_AGENT_COLLABORATION_SETTINGS,
       }),
     ).rejects.toBeInstanceOf(ConflictException);
     expect(transaction.memberProfile.updateMany).not.toHaveBeenCalled();
@@ -129,6 +142,11 @@ function profileRecord() {
       id: PROFILE_ID,
       ...emptyManual(),
       personalSummary: '负责企业协作产品。',
+      disclosurePolicy: DEFAULT_PERSONAL_MANUAL_DISCLOSURE_POLICY,
+      manualSharingEnabled: false,
+      availabilitySharingEnabled: false,
+      privateRiskRemindersEnabled: true,
+      policyRevision: 1,
       updatedAt: UPDATED_AT,
     },
   };

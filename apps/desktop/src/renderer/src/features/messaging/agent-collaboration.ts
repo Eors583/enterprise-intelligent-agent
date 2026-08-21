@@ -22,7 +22,6 @@ export function listAgentCollaborationCandidates(
       member.status !== 'active' ||
       !member.capabilities.canContactAgent ||
       agent?.status !== 'online' ||
-      agent.operationalAvailability.status !== 'AVAILABLE' ||
       seen.has(agent.id)
     ) {
       continue;
@@ -39,11 +38,7 @@ export function listAgentCollaborationCandidates(
     });
   }
   for (const agent of departmentAgents) {
-    if (
-      agent.status !== 'online' ||
-      agent.operationalAvailability.status !== 'AVAILABLE' ||
-      seen.has(agent.id)
-    ) {
+    if (agent.status !== 'online' || seen.has(agent.id)) {
       continue;
     }
     seen.add(agent.id);

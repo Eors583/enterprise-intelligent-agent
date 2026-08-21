@@ -4,10 +4,12 @@ import { describe, expect, it, vi } from 'vitest';
 import type { PrismaService } from '../../../../database/prisma.service.js';
 import { AuthorizationDecisionService } from '../../../authorization/authorization-decision.service.js';
 import type { KnowledgeRetrievalGateway } from '../../../knowledge-gateway/knowledge-gateway.port.js';
+import type { EmployeeCollaborationContextPort } from '../../../people-organization/employee-collaboration-context.port.js';
 import {
   exceedsConservativeInputBudget,
   isAgentVersionExecutableForRun,
   PrismaAgentRunRepository,
+  shouldRequireGroundedOutput,
 } from './prisma-agent-run.repository.js';
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000001';
@@ -401,6 +403,7 @@ describe('PrismaAgentRunRepository prepare', () => {
 
   it('resumes a known RUNNING execution for reconciliation without reserving or dispatching again', async () => {
     const externalRunId = '00000000-0000-7000-8000-000000000009';
+    const collaborationSnapshot = collaborationContextSnapshot('b'.repeat(64));
     const run = {
       ...queuedRun(),
       status: 'RUNNING',
@@ -431,13 +434,23 @@ describe('PrismaAgentRunRepository prepare', () => {
           },
         ],
       },
+      collaborationContextSnapshot: collaborationSnapshot,
+      agent: {
+        ...queuedRun().agent,
+        kind: 'MEMBER',
+        ownerUserId: '00000000-0000-7000-8000-000000000012',
+      },
+      inputMessage: {
+        ...queuedRun().inputMessage,
+        content: { type: 'text', text: '今天方便吗？' },
+      },
     } as const;
     const transaction = {
       $queryRaw: vi.fn().mockResolvedValue([]),
       agentRun: {
         findFirst: vi.fn().mockResolvedValue(run),
         count: vi.fn().mockResolvedValue(0),
-        update: vi.fn(),
+        update: vi.fn().mockResolvedValue({}),
         updateMany: vi.fn(),
       },
       conversationParticipant: {
@@ -476,6 +489,13 @@ describe('PrismaAgentRunRepository prepare', () => {
         ]),
       },
       auditEvent: { create: vi.fn() },
+      agentRunStreamEvent: {
+        aggregate: vi.fn().mockResolvedValue({ _max: { sequence: null } }),
+        findFirst: vi.fn().mockResolvedValue(null),
+        findMany: vi.fn().mockResolvedValue([]),
+        create: vi.fn().mockResolvedValue({}),
+      },
+      $executeRaw: vi.fn().mockResolvedValue(1),
     };
     const prisma = {
       withTenant: vi.fn(
@@ -487,10 +507,14 @@ describe('PrismaAgentRunRepository prepare', () => {
       search: vi.fn().mockResolvedValue({ items: [] }),
       areChunksAccessible: vi.fn().mockResolvedValue(true),
     };
+    const employeeCollaboration = {
+      resolve: vi.fn().mockResolvedValue(collaborationSnapshot),
+    };
     const repository = new PrismaAgentRunRepository(
       prisma as unknown as PrismaService,
       retrieval as unknown as KnowledgeRetrievalGateway,
       new AuthorizationDecisionService(),
+      employeeCollaboration as unknown as EmployeeCollaborationContextPort,
     );
 
     await expect(repository.prepare(TENANT_ID, RUN_ID)).resolves.toMatchObject({
@@ -499,6 +523,20 @@ describe('PrismaAgentRunRepository prepare', () => {
     });
     expect(transaction.agentRun.updateMany).not.toHaveBeenCalled();
     expect(transaction.agentRun.update).not.toHaveBeenCalled();
+
+    employeeCollaboration.resolve.mockResolvedValue(collaborationContextSnapshot('c'.repeat(64)));
+    await expect(repository.prepare(TENANT_ID, RUN_ID)).resolves.toMatchObject({
+      kind: 'terminal',
+      status: 'FAILED',
+      errorCode: 'EMPLOYEE_COLLABORATION_ACCESS_CHANGED',
+    });
+    expect(transaction.agentRun.update).toHaveBeenCalledWith({
+      where: { id: RUN_ID },
+      data: expect.objectContaining({
+        status: 'FAILED',
+        errorCode: 'EMPLOYEE_COLLABORATION_ACCESS_CHANGED',
+      }),
+    });
   });
 });
 
@@ -659,6 +697,35 @@ describe('PrismaAgentRunRepository provider-backed cancellation', () => {
   });
 });
 
+describe('shouldRequireGroundedOutput', () => {
+  it('does not turn a knowledge-enabled Agent confirmation into a knowledge claim', () => {
+    expect(
+      shouldRequireGroundedOutput(
+        '[自动验收][修复复测] 请用一句话回复：模型调用已恢复。不要调用工具，不要引用企业事实。',
+        0,
+        'SELF_ASSISTANCE',
+      ),
+    ).toBe(false);
+  });
+
+  it.each([
+    ['请根据公司年假制度回答有几天', undefined],
+    ['周睿今天方便吗？', 'AVAILABILITY_QUERY' as const],
+    ['周睿负责的项目进度怎么样？', 'WORK_PROGRESS_QUERY' as const],
+  ])('keeps evidence-free enterprise facts fail closed: %s', (query, purpose) => {
+    expect(shouldRequireGroundedOutput(query, 0, purpose)).toBe(true);
+  });
+
+  it('requires citations whenever authorized evidence enters the model context', () => {
+    expect(shouldRequireGroundedOutput('请给我一个通用建议', 1)).toBe(true);
+  });
+
+  it('does not turn a conversation-memory question into an enterprise-knowledge claim', () => {
+    expect(shouldRequireGroundedOutput('你知道我刚刚问了什么问题吗', 3)).toBe(false);
+    expect(shouldRequireGroundedOutput('你还记得我们刚才聊了什么吗？', 2)).toBe(false);
+  });
+});
+
 function queuedRun() {
   const createdAt = new Date('2026-07-21T00:00:00.000Z');
   return {
@@ -682,6 +749,8 @@ function queuedRun() {
     version: 0,
     reservedTokens: 0,
     policySnapshot: {},
+    memoryContextSnapshot: null,
+    collaborationContextSnapshot: null,
     errorCode: null,
     errorMessage: null,
     dispatchStartedAt: null,
@@ -701,6 +770,7 @@ function queuedRun() {
       name: 'Policy assistant',
       status: 'ONLINE',
       ownerUserId: null,
+      kind: 'MEMBER',
       settings: { visibility: 'tenant' },
       _count: { roleAssignments: 0 },
     },
@@ -724,8 +794,37 @@ function queuedRun() {
       tenantId: TENANT_ID,
       conversationId: CONVERSATION_ID,
       createdAt,
+      content: { type: 'text', text: 'What is the leave policy?' },
     },
   } as const;
+}
+
+function collaborationContextSnapshot(snapshotHash: string) {
+  return {
+    schemaVersion: 1 as const,
+    requesterUserId: USER_ID,
+    representedEmployeeId: '00000000-0000-7000-8000-000000000012',
+    purpose: 'AVAILABILITY_QUERY' as const,
+    relationship: 'SHARED_WORK' as const,
+    policyRevision: 1,
+    policyHash: 'a'.repeat(64),
+    resolvedAt: '2026-08-13T00:00:00.000Z',
+    sources: [],
+    allowedCapabilities: ['ANSWER_FACTS', 'GIVE_ADVICE', 'DRAFT_ACTION'] as Array<
+      'ANSWER_FACTS' | 'GIVE_ADVICE' | 'DRAFT_ACTION'
+    >,
+    deniedCapabilities: [
+      'SEND_MESSAGE',
+      'CHANGE_TASK',
+      'MAKE_COMMITMENT',
+      'ACCEPT',
+      'APPROVE',
+      'ESCALATE',
+    ] as Array<
+      'SEND_MESSAGE' | 'CHANGE_TASK' | 'MAKE_COMMITMENT' | 'ACCEPT' | 'APPROVE' | 'ESCALATE'
+    >,
+    snapshotHash,
+  };
 }
 
 function cancellationRepository(transaction: Record<string, unknown>) {

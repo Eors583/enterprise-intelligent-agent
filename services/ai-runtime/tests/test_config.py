@@ -278,7 +278,7 @@ def test_manus_driver_requires_key_and_uses_safe_defaults() -> None:
     assert settings.manus_api_base_url == "https://api.manus.ai"
     assert settings.manus_agent_profile == "manus-1.6-lite"
     assert settings.manus_poll_interval_seconds == 2
-    assert settings.manus_max_wait_seconds == 120
+    assert settings.manus_max_wait_seconds == 300
     assert "dummy-manus-key" not in repr(settings)
 
     runtime = build_runtime(settings)
@@ -423,6 +423,27 @@ def test_development_dotenv_loads_without_overriding_injected_values(tmp_path: P
     settings = RuntimeSettings.from_env(environ)
     assert "dummy-file-key" not in repr(settings)
     assert "dummy-process-key" not in repr(settings)
+
+
+def test_development_postgres_store_reuses_local_database_without_prisma_schema_option(
+    tmp_path: Path,
+) -> None:
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        "AI_RUNTIME_STORE_DRIVER=postgres\n"
+        "DATABASE_URL=postgresql://local:secret@127.0.0.1:5432/app?schema=public\n",
+        encoding="utf-8",
+    )
+    environ: dict[str, str] = {}
+
+    assert load_runtime_dotenv(environ=environ, dotenv_path=dotenv_path) is True
+    assert environ["AI_RUNTIME_POSTGRES_DSN"] == (
+        "postgresql://local:secret@127.0.0.1:5432/app"
+    )
+    assert "DATABASE_URL" not in environ
+    settings = RuntimeSettings.from_env(environ)
+    assert settings.store_driver == StoreDriver.POSTGRES
+    assert "secret" not in repr(settings)
 
 
 def test_production_never_loads_dotenv(tmp_path: Path) -> None:

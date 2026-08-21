@@ -2,6 +2,7 @@ import {
   ConflictException,
   Inject,
   Injectable,
+  Logger,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import type {
@@ -40,6 +41,8 @@ interface ProbeSeed {
 
 @Injectable()
 export class AiModelConnectivityProbeService {
+  private readonly logger = new Logger(AiModelConnectivityProbeService.name);
+
   constructor(
     @Inject(PrismaService) private readonly prisma: PrismaService,
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
@@ -64,11 +67,15 @@ export class AiModelConnectivityProbeService {
     let preparation: AgentRunPreparation;
     try {
       preparation = await this.runs.prepare(principal.tenantId, seed.runId);
-    } catch {
-      await this.runs.completeUnknown(
+    } catch (error) {
+      this.logger.error(
+        `Model connectivity probe preparation failed for run ${seed.runId}: ${safeErrorMessage(error)}`,
+      );
+      await this.runs.completeFailed(
         principal.tenantId,
         seed.runId,
         'CONNECTIVITY_PROBE_PREPARATION_FAILED',
+        'The controlled model connectivity test could not prepare its execution context.',
       );
       return this.finish(principal, seed);
     }
@@ -262,6 +269,11 @@ export class AiModelConnectivityProbeService {
         user: { id: user.id, name: user.displayName },
         agent: { id: selection.agent.id, name: selection.agent.name },
       });
+      await transaction.$queryRaw`
+        SELECT pg_advisory_xact_lock(
+          hashtextextended(${`${principal.tenantId}:${conversation.id}:agent-run`}, 0)
+        )::text AS lock_token
+      `;
       const message = await transaction.message.create({
         data: {
           tenantId: principal.tenantId,
@@ -295,6 +307,7 @@ export class AiModelConnectivityProbeService {
           policySnapshot: buildAgentRunPolicySnapshot({
             agentVersion: selection.agent.version,
             roleAssignment: selection.assignment,
+            knowledgeScopeOverride: { knowledgeBaseIds: [] },
             extra: {
               controlledModelConnectivityProbe: true,
               connectivityProbeCatalogVersionId: selection.target.catalogVersionId,
@@ -651,4 +664,9 @@ function usageFromRuntime(result: RuntimeRunResult): AgentRunUsage | undefined {
 
 function safeCode(value: string): string {
   return /^[A-Z0-9_]{1,120}$/u.test(value) ? value : 'CONNECTIVITY_PROBE_FAILED';
+}
+
+function safeErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return 'Unknown preparation error';
 }

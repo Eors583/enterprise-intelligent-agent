@@ -141,6 +141,9 @@ export class KnowledgeIngestionWorker implements OnApplicationBootstrap, OnAppli
       this.logLostLease(claim.id);
       return;
     }
+    this.logger.error(
+      `Knowledge ingestion job ${claim.id} failed during processing (${safeFailureDetail(failure)}).`,
+    );
     await this.failOrRetry(claim, describeKnowledgeIngestionError(failure));
   }
 
@@ -266,4 +269,9 @@ function clampRandom(value: number): number {
 function errorKind(error: unknown): string {
   if (error instanceof Error) return error.name;
   return typeof error;
+}
+
+function safeFailureDetail(error: unknown): string {
+  if (!(error instanceof Error)) return typeof error;
+  return `${error.name}: ${error.message.replace(/[\r\n\u0000-\u001f\u007f]/gu, ' ').slice(0, 300)}`;
 }

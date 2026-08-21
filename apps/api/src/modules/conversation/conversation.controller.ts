@@ -148,6 +148,14 @@ export class ConversationController {
     return this.agentRuns.retry(conversationId, runId);
   }
 
+  @Post(':id/runs/:runId/abandon')
+  abandonUnknownRun(
+    @Param('id', new ParseUUIDPipe()) conversationId: string,
+    @Param('runId', new ParseUUIDPipe()) runId: string,
+  ): Promise<AgentRunResponse> {
+    return this.agentRuns.abandonUnknown(conversationId, runId);
+  }
+
   @Get(':id/runs/:runId/events')
   listRunEvents(
     @Param('id', new ParseUUIDPipe()) conversationId: string,

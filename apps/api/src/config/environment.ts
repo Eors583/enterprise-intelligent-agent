@@ -84,6 +84,7 @@ export interface EnvironmentVariables {
   readonly AGENT_RUN_WORKER_CONCURRENCY: number;
   readonly AGENT_RUN_POLL_INTERVAL_MS: number;
   readonly AGENT_RUN_CLAIM_TTL_MS: number;
+  readonly AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS: number;
   readonly TOOL_EXECUTION_WORKER_ENABLED: boolean;
   readonly TOOL_EXECUTION_WORKER_CONCURRENCY: number;
   readonly TOOL_EXECUTION_POLL_INTERVAL_MS: number;
@@ -145,6 +146,7 @@ export interface EnvironmentVariables {
   readonly KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES: number;
   readonly KNOWLEDGE_SOURCE_SYNC_MAX_PAGES: number;
   readonly KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE: boolean;
+  readonly KNOWLEDGE_LOCAL_BACKEND_ENABLED: boolean;
   readonly KNOWLEDGE_PERSISTENT_WRITES_ENABLED: boolean;
   readonly KNOWLEDGE_INGESTION_WORKER_ENABLED: boolean;
   readonly KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: number;
@@ -429,7 +431,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const imOutboxClaimTtlMs = parseInteger(
     source.IM_OUTBOX_CLAIM_TTL_MS,
     'IM_OUTBOX_CLAIM_TTL_MS',
-    30_000,
+    90_000,
     1_000,
     3_600_000,
   );
@@ -505,9 +507,16 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const agentRunClaimTtlMs = parseInteger(
     source.AGENT_RUN_CLAIM_TTL_MS,
     'AGENT_RUN_CLAIM_TTL_MS',
-    120_000,
+    360_000,
     5_000,
     3_600_000,
+  );
+  const agentRunUnknownReconciliationDelayMs = parseInteger(
+    source.AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS,
+    'AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS',
+    300_000,
+    10_000,
+    86_400_000,
   );
   const toolExecutionWorkerEnabled = parseBoolean(
     source.TOOL_EXECUTION_WORKER_ENABLED,
@@ -604,7 +613,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const aiRuntimeHttpTimeoutMs = parseInteger(
     source.AI_RUNTIME_HTTP_TIMEOUT_MS,
     'AI_RUNTIME_HTTP_TIMEOUT_MS',
-    90_000,
+    330_000,
     1_000,
     600_000,
   );
@@ -809,14 +818,19 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     source.KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE,
     false,
   );
-  const knowledgePersistentWritesEnabled = parseBoolean(
-    source.KNOWLEDGE_PERSISTENT_WRITES_ENABLED,
-    nodeEnvironment !== 'production' && repositoryDriver === 'prisma',
-  );
-  const knowledgeIngestionWorkerEnabled = parseBoolean(
-    source.KNOWLEDGE_INGESTION_WORKER_ENABLED,
-    nodeEnvironment === 'development' && repositoryDriver === 'prisma',
-  );
+  const knowledgeLocalBackendEnabled = parseBoolean(source.KNOWLEDGE_LOCAL_BACKEND_ENABLED, true);
+  const knowledgePersistentWritesEnabled =
+    knowledgeLocalBackendEnabled &&
+    parseBoolean(
+      source.KNOWLEDGE_PERSISTENT_WRITES_ENABLED,
+      nodeEnvironment !== 'production' && repositoryDriver === 'prisma',
+    );
+  const knowledgeIngestionWorkerEnabled =
+    knowledgeLocalBackendEnabled &&
+    parseBoolean(
+      source.KNOWLEDGE_INGESTION_WORKER_ENABLED,
+      nodeEnvironment === 'development' && repositoryDriver === 'prisma',
+    );
   const knowledgeIngestionPollIntervalMs = parseInteger(
     source.KNOWLEDGE_INGESTION_POLL_INTERVAL_MS,
     'KNOWLEDGE_INGESTION_POLL_INTERVAL_MS',
@@ -1406,6 +1420,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     AGENT_RUN_WORKER_CONCURRENCY: agentRunWorkerConcurrency,
     AGENT_RUN_POLL_INTERVAL_MS: agentRunPollIntervalMs,
     AGENT_RUN_CLAIM_TTL_MS: agentRunClaimTtlMs,
+    AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS: agentRunUnknownReconciliationDelayMs,
     TOOL_EXECUTION_WORKER_ENABLED: toolExecutionWorkerEnabled,
     TOOL_EXECUTION_WORKER_CONCURRENCY: toolExecutionWorkerConcurrency,
     TOOL_EXECUTION_POLL_INTERVAL_MS: toolExecutionPollIntervalMs,
@@ -1493,6 +1508,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES: knowledgeSourceSyncManifestMaxBytes,
     KNOWLEDGE_SOURCE_SYNC_MAX_PAGES: knowledgeSourceSyncMaxPages,
     KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE: knowledgeSourceSyncAllowLocalFixture,
+    KNOWLEDGE_LOCAL_BACKEND_ENABLED: knowledgeLocalBackendEnabled,
     KNOWLEDGE_PERSISTENT_WRITES_ENABLED: knowledgePersistentWritesEnabled,
     KNOWLEDGE_INGESTION_WORKER_ENABLED: knowledgeIngestionWorkerEnabled,
     KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: knowledgeIngestionPollIntervalMs,

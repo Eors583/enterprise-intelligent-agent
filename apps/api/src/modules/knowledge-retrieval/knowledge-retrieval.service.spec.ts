@@ -9,18 +9,109 @@ import {
   type KnowledgeAiRuntimeClient,
 } from '../knowledge-semantic/knowledge-ai-runtime.client.js';
 import type { KnowledgeRelationshipExpander } from './domain/knowledge-relationship-expander.port.js';
+import {
+  KnowledgeProviderRetrievalError,
+  type KnowledgeProviderRetrievalService,
+} from '../knowledge-provider/application/knowledge-provider-retrieval.service.js';
 import type { KnowledgeVersionResourcePolicy } from './knowledge-resource-authorization.js';
 import { KnowledgeRetrievalService } from './knowledge-retrieval.service.js';
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000001';
 const USER_ID = '00000000-0000-7000-8000-000000000002';
 const KNOWLEDGE_BASE_ID = '00000000-0000-7000-8000-000000000003';
+const SECOND_KNOWLEDGE_BASE_ID = '00000000-0000-7000-8000-000000000013';
 const ORG_UNIT_ID = '00000000-0000-7000-8000-000000000004';
 const ORGANIZATION_ID = '00000000-0000-7000-8000-000000000005';
 const OTHER_ORG_UNIT_ID = '00000000-0000-7000-8000-000000000006';
 const CANDIDATE_VERSION_ID = '00000000-0000-7000-8000-000000000009';
 
 describe('KnowledgeRetrievalService', () => {
+  it('keeps authoritative knowledge access metadata available when local indexing is disabled', async () => {
+    const transaction = accessibleTransaction();
+    const semantic = semanticClient();
+    const service = createService(
+      transaction,
+      semantic,
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      false,
+    );
+
+    await expect(
+      service.resolveAccessibleKnowledgeBaseIds({
+        tenantId: TENANT_ID,
+        userId: USER_ID,
+      }),
+    ).resolves.toEqual([KNOWLEDGE_BASE_ID]);
+    await expect(service.search(searchInput())).rejects.toMatchObject({
+      code: 'KNOWLEDGE_PROVIDER_RETRIEVAL_UNAVAILABLE',
+    });
+    await expect(
+      service.areChunksAccessible({
+        tenantId: TENANT_ID,
+        userId: USER_ID,
+        knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+        chunks: [],
+      }),
+    ).resolves.toBe(true);
+    expect(semantic.embed).not.toHaveBeenCalled();
+    expect(transaction.user.findFirst).toHaveBeenCalled();
+  });
+
+  it('accepts an empty evidence recheck when the optional local backend is disabled', async () => {
+    const transaction = accessibleTransaction();
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      false,
+    );
+
+    await expect(
+      service.areChunksAccessible({
+        tenantId: TENANT_ID,
+        userId: USER_ID,
+        knowledgeBaseIds: [],
+        chunks: [],
+      }),
+    ).resolves.toBe(true);
+    expect(transaction.user.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('still rejects local evidence when the optional local backend is disabled', async () => {
+    const transaction = accessibleTransaction();
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      false,
+    );
+
+    await expect(
+      service.areChunksAccessible({
+        tenantId: TENANT_ID,
+        userId: USER_ID,
+        knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+        chunks: [
+          {
+            chunkId: '00000000-0000-7000-8000-000000000020',
+            documentVersionId: '00000000-0000-7000-8000-000000000021',
+            knowledgeBaseId: KNOWLEDGE_BASE_ID,
+            classification: 'INTERNAL',
+            governanceHash: 'a'.repeat(64),
+            contentHash: 'b'.repeat(64),
+          },
+        ],
+      }),
+    ).resolves.toBe(false);
+    expect(transaction.user.findFirst).not.toHaveBeenCalled();
+  });
+
   it('resolves the employee accessible Knowledge Bases from the authoritative admin scope', async () => {
     const transaction = accessibleTransaction();
     transaction.knowledgeBase.findMany.mockResolvedValue([
@@ -81,6 +172,175 @@ describe('KnowledgeRetrievalService', () => {
     expect(transaction.user.findFirst).not.toHaveBeenCalled();
   });
 
+  it('merges authorized Lexiang AI search evidence and rechecks its active binding', async () => {
+    const transaction = accessibleTransaction();
+    transaction.$queryRaw.mockResolvedValue([]);
+    const provider = {
+      search: vi.fn().mockResolvedValue({
+        searchedKnowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+        items: [
+          {
+            evidenceId: 'evidence-1',
+            knowledgeBaseId: KNOWLEDGE_BASE_ID,
+            knowledgeBaseName: '咨询圈文库资料1',
+            title: '华为客户关系',
+            content: '客户关系管理需要持续维护关键人和合作记录。',
+            sourceUri: 'https://lexiangla.com/pages/page-1',
+            score: 0.92,
+            updatedAt: new Date('2026-08-13T00:00:00.000Z'),
+          },
+        ],
+      }),
+      areKnowledgeBasesRetrievable: vi.fn().mockResolvedValue(true),
+    };
+    const service = createService(
+      transaction,
+      semanticClient({ semanticEnabled: false }),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      true,
+      provider,
+    );
+
+    const result = await service.search({ ...searchInput(), query: '华为客户关系' });
+
+    expect(provider.search).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      userId: USER_ID,
+      knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+      query: '华为客户关系',
+      limit: 8,
+    });
+    expect(result.diagnostics).toContainEqual({
+      stage: 'EXTERNAL',
+      status: 'APPLIED',
+      code: 'LEXIANG_AI_SEARCH_APPLIED',
+      candidateCount: 1,
+    });
+    expect(result.items[0]).toMatchObject({
+      knowledgeBaseId: KNOWLEDGE_BASE_ID,
+      title: '华为客户关系',
+      sourceProvider: 'LEXIANG',
+      sourceUri: 'https://lexiangla.com/pages/page-1',
+      sourceType: 'WEB',
+      classification: 'INTERNAL',
+      finalScore: 0.92,
+    });
+    expect(result.items[0]?.chunkId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+
+    await expect(
+      service.areChunksAccessible({
+        tenantId: TENANT_ID,
+        userId: USER_ID,
+        knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+        chunks: result.items.map((item) => ({
+          chunkId: item.chunkId,
+          documentVersionId: item.documentVersionId,
+          knowledgeBaseId: item.knowledgeBaseId,
+          ...(item.sourceProvider === undefined ? {} : { sourceProvider: item.sourceProvider }),
+          classification: item.classification,
+          governanceHash: item.governanceHash,
+          contentHash: item.contentHash,
+        })),
+      }),
+    ).resolves.toBe(true);
+    expect(provider.areKnowledgeBasesRetrievable).toHaveBeenCalledWith(TENANT_ID, USER_ID, [
+      KNOWLEDGE_BASE_ID,
+    ]);
+  });
+
+  it('uses the external provider when local indexing is disabled', async () => {
+    const transaction = accessibleTransaction();
+    const provider = {
+      search: vi.fn().mockResolvedValue({
+        searchedKnowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+        items: [
+          {
+            evidenceId: 'external-evidence',
+            knowledgeBaseId: KNOWLEDGE_BASE_ID,
+            knowledgeBaseName: '企业资料',
+            title: '客户关系',
+            content: '客户关系内容',
+            sourceUri: 'https://lexiangla.com/pages/page-1',
+            score: 0.9,
+            updatedAt: new Date('2026-08-13T00:00:00.000Z'),
+          },
+        ],
+      }),
+      areKnowledgeBasesRetrievable: vi.fn().mockResolvedValue(true),
+    };
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      false,
+      provider,
+    );
+
+    const result = await service.search(searchInput());
+
+    expect(provider.search).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      userId: USER_ID,
+      knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+      query: 'policy',
+      limit: 8,
+    });
+    expect(result.items[0]).toMatchObject({ sourceProvider: 'LEXIANG' });
+    expect(result.degradedReason).toBeNull();
+  });
+
+  it('does not turn a remote-only provider outage into a successful empty search', async () => {
+    const transaction = accessibleTransaction();
+    const provider = {
+      search: vi
+        .fn()
+        .mockRejectedValue(
+          new KnowledgeProviderRetrievalError('LEXIANG_SEARCH_UNAVAILABLE', [KNOWLEDGE_BASE_ID]),
+        ),
+      areKnowledgeBasesRetrievable: vi.fn().mockResolvedValue(true),
+    };
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      false,
+      provider,
+    );
+
+    await expect(service.search(searchInput())).rejects.toMatchObject({
+      code: 'LEXIANG_SEARCH_UNAVAILABLE',
+    });
+  });
+
+  it('does not report no matches when an accessible remote-only base has no search target', async () => {
+    const transaction = accessibleTransaction();
+    const provider = {
+      search: vi.fn().mockResolvedValue({ searchedKnowledgeBaseIds: [], items: [] }),
+      areKnowledgeBasesRetrievable: vi.fn().mockResolvedValue(false),
+    };
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      undefined,
+      false,
+      provider,
+    );
+
+    await expect(service.search(searchInput())).rejects.toMatchObject({
+      code: 'LEXIANG_SEARCH_TARGET_UNAVAILABLE',
+    });
+  });
+
   it('uses configured weighted fusion so a chunk present in both candidate lists wins', async () => {
     const lexicalRows = [
       candidate('chunk-a', 'document-a', 6, 1),
@@ -112,6 +372,72 @@ describe('KnowledgeRetrievalService', () => {
     expect(transaction.$executeRawUnsafe).toHaveBeenCalledWith('SET LOCAL enable_bitmapscan = off');
   });
 
+  it('fans out compatible Knowledge Bases across Qdrant collections without scanning PostgreSQL text', async () => {
+    const transaction = accessibleTransaction();
+    transaction.knowledgeBase.findMany.mockResolvedValue([
+      knowledgeBaseRecord(
+        KNOWLEDGE_BASE_ID,
+        'collection-a',
+        '00000000-0000-7000-8000-000000000099',
+      ),
+      knowledgeBaseRecord(
+        SECOND_KNOWLEDGE_BASE_ID,
+        'collection-b',
+        '00000000-0000-7000-8000-000000000199',
+      ),
+    ]);
+    transaction.$queryRaw.mockResolvedValueOnce([
+      { ...candidate('chunk-a', 'document-a', 0, 0), semantic_score: 1 },
+      {
+        ...candidate('chunk-b', 'document-b', 0, 0),
+        knowledge_base_id: SECOND_KNOWLEDGE_BASE_ID,
+        semantic_score: 0.9,
+      },
+    ]);
+    const searchIndex = {
+      driver: 'qdrant' as const,
+      query: vi
+        .fn()
+        .mockResolvedValueOnce([{ chunkId: 'chunk-a', score: 0.9 }])
+        .mockResolvedValueOnce([{ chunkId: 'chunk-b', score: 0.8 }]),
+    };
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      searchIndex,
+    );
+
+    const result = await service.search({
+      ...searchInput(),
+      knowledgeBaseIds: [KNOWLEDGE_BASE_ID, SECOND_KNOWLEDGE_BASE_ID],
+    });
+
+    expect(searchIndex.query).toHaveBeenCalledTimes(2);
+    expect(searchIndex.query).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        knowledgeBaseIds: [KNOWLEDGE_BASE_ID],
+        profile: expect.objectContaining({ collectionName: 'collection-a' }),
+      }),
+    );
+    expect(searchIndex.query).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        knowledgeBaseIds: [SECOND_KNOWLEDGE_BASE_ID],
+        profile: expect.objectContaining({ collectionName: 'collection-b' }),
+      }),
+    );
+    expect(transaction.$queryRaw).toHaveBeenCalledOnce();
+    expect(transaction.$executeRawUnsafe).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      degradedReason: null,
+      lexicalCandidateCount: 0,
+      vectorCandidateCount: 2,
+    });
+  });
+
   it('returns no evidence for a semantically nearby result without direct support', async () => {
     const transaction = accessibleTransaction();
     transaction.$queryRaw
@@ -128,6 +454,95 @@ describe('KnowledgeRetrievalService', () => {
 
     expect(result.items).toEqual([]);
     expect(result.vectorCandidateCount).toBe(1);
+  });
+
+  it('keeps an exact quoted source hit when document instructions surround the evidence', async () => {
+    const transaction = accessibleTransaction();
+    transaction.knowledgeBase.findMany.mockResolvedValue([
+      knowledgeBaseRecord(
+        KNOWLEDGE_BASE_ID,
+        'collection-a',
+        '00000000-0000-7000-8000-000000000099',
+      ),
+    ]);
+    transaction.$queryRaw.mockResolvedValueOnce([
+      {
+        ...candidate('chunk-table', 'document-table', 0, 0),
+        title: 'quarterly-service-metrics',
+        content:
+          'Service Q1 uptime Q2 uptime Average Payment API 0.999 0.998 Identity API 0.997 0.999',
+        semantic_score: 1,
+      },
+    ]);
+    const searchIndex = {
+      driver: 'qdrant' as const,
+      query: vi.fn().mockResolvedValue([{ chunkId: 'chunk-table', score: 1 }]),
+    };
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      searchIndex,
+    );
+
+    const result = await service.search({
+      ...searchInput(),
+      query:
+        '请根据《quarterly-service-metrics》“正文”说明这段原文的含义：Service、Q1 uptime、Q2 uptime、Average、Payment API、0.999、0.998、Identity API、0.997、0.999',
+    });
+
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-table']);
+    expect(result.lexicalCandidateCount).toBe(0);
+  });
+
+  it('uses a quoted section heading to break equal hybrid-score ties', async () => {
+    const transaction = accessibleTransaction();
+    transaction.knowledgeBase.findMany.mockResolvedValue([
+      knowledgeBaseRecord(
+        KNOWLEDGE_BASE_ID,
+        'collection-a',
+        '00000000-0000-7000-8000-000000000099',
+      ),
+    ]);
+    const sharedExcerpt =
+      'Enterprise Incident Dashboard Owner Platform Operations P1 response target 15 minutes';
+    transaction.$queryRaw.mockResolvedValueOnce([
+      {
+        ...candidate('chunk-a', 'document-policy', 0, 0),
+        heading_path: ['Policy owner'],
+        content: sharedExcerpt,
+        semantic_score: 1,
+      },
+      {
+        ...candidate('chunk-z', 'document-policy', 0, 0),
+        heading_path: ['Escalation evidence'],
+        content: sharedExcerpt,
+        semantic_score: 1,
+      },
+    ]);
+    const searchIndex = {
+      driver: 'qdrant' as const,
+      query: vi.fn().mockResolvedValue([
+        { chunkId: 'chunk-a', score: 1 },
+        { chunkId: 'chunk-z', score: 1 },
+      ]),
+    };
+    const service = createService(
+      transaction,
+      semanticClient(),
+      relationshipExpander(),
+      new AuthorizationDecisionService(),
+      searchIndex,
+    );
+
+    const result = await service.search({
+      ...searchInput(),
+      query:
+        '员工查阅《incident-response-policy》的“Escalation evidence”时，应如何理解原文“Enterprise Incident Dashboard Owner Platform Operations P1 response target 15 minutes”？',
+    });
+
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-z', 'chunk-a']);
   });
 
   it('degrades to lexical retrieval with an explicit safe reason when embedding fails', async () => {
@@ -168,6 +583,7 @@ describe('KnowledgeRetrievalService', () => {
 
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-canary']);
     const query = transaction.$queryRaw.mock.calls[0]?.[0] as Prisma.Sql;
+    expect(query.strings.join('')).toContain('chunk."content" ILIKE');
     expect(query.values).toContain('%验收%');
     expect(query.values).toContain('%口令%');
   });
@@ -343,6 +759,37 @@ describe('KnowledgeRetrievalService', () => {
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
   });
 
+  it('temporarily bypasses reranking after an interactive timeout', async () => {
+    vi.useFakeTimers();
+    try {
+      const transaction = accessibleTransaction();
+      transaction.$queryRaw.mockResolvedValue([
+        { ...candidate('chunk-a', 'document-a', 0, 0), semantic_score: 0.9 },
+      ]);
+      const semantic = semanticClient({ rerankEnabled: true });
+      semantic.rerank.mockImplementation(
+        async (_tenant, _query, _documents, _topN, _classification, signal) =>
+          new Promise((_, reject) =>
+            signal?.addEventListener('abort', () => reject(new Error('aborted')), { once: true }),
+          ),
+      );
+      const service = createService(transaction, semantic);
+
+      const first = service.search(searchInput());
+      await vi.advanceTimersByTimeAsync(3_001);
+      await expect(first).resolves.toMatchObject({
+        degradedReason: 'KNOWLEDGE_RERANK_TIMEOUT_FALLBACK',
+      });
+
+      await expect(service.search(searchInput())).resolves.toMatchObject({
+        degradedReason: 'KNOWLEDGE_RERANK_CIRCUIT_OPEN_FALLBACK',
+      });
+      expect(semantic.rerank).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('falls back to weighted fusion when the cross-encoder filters every valid vector candidate', async () => {
     const transaction = accessibleTransaction();
     transaction.$queryRaw
@@ -366,6 +813,31 @@ describe('KnowledgeRetrievalService', () => {
       degradedReason: 'KNOWLEDGE_RERANK_NO_RESULT_FALLBACK',
     });
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
+  });
+
+  it('reranks a bounded evidence window around a query match in a long chunk', async () => {
+    const transaction = accessibleTransaction();
+    const longCandidate = {
+      ...candidate('chunk-a', 'document-a', 6, 0.9),
+      content: `${'prefix '.repeat(1_000)}needle evidence${' suffix'.repeat(1_000)}`,
+    };
+    transaction.$queryRaw
+      .mockResolvedValueOnce([longCandidate])
+      .mockResolvedValueOnce([{ ...longCandidate, semantic_score: 0.9 }]);
+    const semantic = semanticClient({ rerankEnabled: true });
+    semantic.rerank.mockResolvedValue({
+      model: 'local-reranker',
+      results: [{ id: 'chunk-a', relevanceScore: 0.9 }],
+    });
+    const service = createService(transaction, semantic);
+
+    const result = await service.search({ ...searchInput(), query: 'needle' });
+
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
+    const rerankDocuments = semantic.rerank.mock.calls[0]?.[2] as
+      readonly { readonly text: string }[] | undefined;
+    expect(rerankDocuments?.[0]?.text).toContain('needle evidence');
+    expect(rerankDocuments?.[0]?.text.length).toBeLessThanOrEqual(1_500);
   });
 
   it('does not embed a confidential query and degrades to lexical retrieval', async () => {
@@ -490,6 +962,7 @@ describe('KnowledgeRetrievalService', () => {
 
     const result = await service.search({
       ...searchInput(),
+      query: 'Which policy relationship applies to this preview?',
       previewKnowledgeVersionIds: [CANDIDATE_VERSION_ID],
     });
 
@@ -531,6 +1004,28 @@ describe('KnowledgeRetrievalService', () => {
       include: { orgUnits: true, members: true },
     });
     expect(transaction.$queryRaw).not.toHaveBeenCalled();
+  });
+
+  it('does not run graph expansion for an ordinary document query with base candidates', async () => {
+    const transaction = accessibleTransaction();
+    transaction.$queryRaw.mockResolvedValueOnce([candidate('chunk-a', 'document-a', 6, 0.9)]);
+    const relationships = relationshipExpander();
+    const service = createService(
+      transaction,
+      semanticClient({ semanticEnabled: false }),
+      relationships,
+    );
+
+    const result = await service.search({ ...searchInput(), query: 'What is the travel policy?' });
+
+    expect(relationships.expand).not.toHaveBeenCalled();
+    expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
+    expect(result.diagnostics).toContainEqual({
+      stage: 'RELATIONSHIP',
+      status: 'SKIPPED',
+      code: 'KNOWLEDGE_RELATIONSHIP_ROUTE_NOT_SELECTED',
+      candidateCount: 0,
+    });
   });
 
   it('expands an authorized relationship target and returns explainable scoring evidence', async () => {
@@ -588,7 +1083,10 @@ describe('KnowledgeRetrievalService', () => {
       relationships,
     );
 
-    const result = await service.search(searchInput());
+    const result = await service.search({
+      ...searchInput(),
+      query: 'What relationship requires the approval form?',
+    });
 
     expect(result.relationshipCandidateCount).toBe(1);
     expect(result.relationshipExpandedCount).toBe(1);
@@ -710,7 +1208,10 @@ describe('KnowledgeRetrievalService', () => {
       relationships,
     );
 
-    const result = await service.search(searchInput());
+    const result = await service.search({
+      ...searchInput(),
+      query: 'What relationship does the travel policy depend on?',
+    });
 
     expect(result.items.map((item) => item.chunkId)).toEqual(['chunk-a']);
     expect(result.degradedReason).toBe('KNOWLEDGE_RELATIONSHIP_GRAPH_UNAVAILABLE');
@@ -729,6 +1230,18 @@ function createService(
   semantic: ReturnType<typeof semanticClient>,
   relationships: ReturnType<typeof relationshipExpander> = relationshipExpander(),
   authorization: AuthorizationDecisionService = new AuthorizationDecisionService(),
+  searchIndex: {
+    readonly driver: 'postgres' | 'qdrant';
+    readonly query: ReturnType<typeof vi.fn>;
+  } = {
+    driver: 'postgres',
+    query: vi.fn().mockResolvedValue([]),
+  },
+  localBackendEnabled = true,
+  providerRetrieval?: Pick<
+    KnowledgeProviderRetrievalService,
+    'search' | 'areKnowledgeBasesRetrievable'
+  >,
 ): KnowledgeRetrievalService {
   const prisma = {
     withTenant: vi.fn(
@@ -739,14 +1252,32 @@ function createService(
   return new KnowledgeRetrievalService(
     prisma as unknown as PrismaService,
     semantic as unknown as KnowledgeAiRuntimeClient,
-    {
-      driver: 'postgres',
-      query: vi.fn().mockResolvedValue([]),
-    } as never,
+    searchIndex as never,
     relationships as unknown as KnowledgeRelationshipExpander,
     authorization,
     { tryQuery: vi.fn().mockResolvedValue(null) } as never,
+    {
+      get: vi.fn().mockReturnValue(localBackendEnabled),
+    } as never,
+    providerRetrieval as KnowledgeProviderRetrievalService | undefined,
   );
+}
+
+function knowledgeBaseRecord(id: string, collectionName: string, indexVersionId: string) {
+  return {
+    id,
+    status: 'ACTIVE' as const,
+    orgUnits: [],
+    members: [],
+    activeEmbeddingIndexVersion: {
+      id: indexVersionId,
+      provider: 'ai-runtime',
+      model: 'embedding-model-v1',
+      dimensions: 1_536,
+      distance: 'COSINE',
+      collectionName,
+    },
+  };
 }
 
 function accessibleTransaction() {

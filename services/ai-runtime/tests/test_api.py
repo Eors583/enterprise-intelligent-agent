@@ -130,6 +130,23 @@ def test_create_get_and_idempotent_cancel(
     assert canceled_again.json()["version"] == 2
 
 
+def test_create_is_idempotent_for_caller_supplied_run_id(
+    client: TestClient,
+    run_payload: dict[str, object],
+) -> None:
+    run_id = "00000000-0000-7000-8000-000000000801"
+    payload = {**run_payload, "run_id": run_id}
+    headers = {"X-Tenant-ID": "tenant-a", "X-Request-ID": "agent-run-local-801"}
+
+    first = client.post("/internal/v1/runs", headers=headers, json=payload)
+    second = client.post("/internal/v1/runs", headers=headers, json=payload)
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert first.json()["run_id"] == run_id
+    assert second.json()["run_id"] == run_id
+
+
 def test_tenant_context_is_enforced(
     client: TestClient,
     run_payload: dict[str, object],

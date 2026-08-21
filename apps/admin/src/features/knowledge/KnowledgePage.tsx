@@ -14,10 +14,14 @@ import {
   archiveKnowledgeDocument,
   createKnowledgeBase,
   createKnowledgeDocument,
+  deleteKnowledgeBase,
   getKnowledgeDocument,
   getKnowledgeDocumentVersion,
+  getLexiangKnowledgeConnection,
   getOrganization,
   listKnowledgeBases,
+  syncExternalKnowledgeBase,
+  syncLexiangKnowledgeBases,
   updateKnowledgeBase,
   updateKnowledgeDocument,
 } from '@/api/admin-api';
@@ -101,6 +105,7 @@ export function KnowledgePage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [organizationError, setOrganizationError] = useState<string | null>(null);
+  const [lexiangReady, setLexiangReady] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -111,6 +116,8 @@ export function KnowledgePage({
   const [documentDetailState, setDocumentDetailState] = useState<DocumentDetailState | null>(null);
   const documentDetailRequestId = useRef(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [lexiangSyncing, setLexiangSyncing] = useState(false);
+  const [lexiangSyncError, setLexiangSyncError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -126,6 +133,21 @@ export function KnowledgePage({
       .finally(() => {
         if (!controller.signal.aborted) setOrganizationLoading(false);
       });
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void getLexiangKnowledgeConnection(controller.signal)
+      .then(({ connection }) => {
+        setLexiangReady(
+          connection?.status === 'ACTIVE' &&
+            connection.credentialsConfigured &&
+            connection.teamId !== null &&
+            connection.operatorStaffId !== null,
+        );
+      })
+      .catch(() => setLexiangReady(false));
     return () => controller.abort();
   }, []);
 
@@ -189,6 +211,26 @@ export function KnowledgePage({
 
   const reload = (): void => setReloadKey((value) => value + 1);
 
+  const syncLexiang = async (): Promise<void> => {
+    setLexiangSyncing(true);
+    setLexiangSyncError(null);
+    try {
+      const result = await syncLexiangKnowledgeBases();
+      const privacyReview =
+        result.requiresPrivacyReview === 0
+          ? ''
+          : `；${result.requiresPrivacyReview} 个知识库仍继承乐享侧权限，已停止检索，请先在乐享设为不可见且不继承团队权限`;
+      setNotice(
+        `已发现 ${result.discovered} 个乐享知识库，新导入 ${result.imported} 个，更新 ${result.updated} 个；同步 ${result.foldersSynchronized} 个文件夹、发现 ${result.documentsDiscovered} 篇文档（新增 ${result.documentsImported}、更新 ${result.documentsUpdated}、归档 ${result.documentsArchived}）${privacyReview}。新导入知识库以草稿保存，默认仅当前管理员可访问，请确认本系统权限后再启用。`,
+      );
+      reload();
+    } catch (caught) {
+      setLexiangSyncError(messageFromError(caught));
+    } finally {
+      setLexiangSyncing(false);
+    }
+  };
+
   const closeDocumentDetail = (): void => {
     documentDetailRequestId.current += 1;
     setDocumentDetailState(null);
@@ -231,7 +273,9 @@ export function KnowledgePage({
         ? `，其中 ${result.failedCount} 份处理失败，可在列表中查看原因并重试`
         : '';
     setNotice(
-      `“${result.knowledgeBase.name}”已由 ${result.uploadedCount} 份文件创建为草稿知识库${failureCopy}。`,
+      result.createdKnowledgeBase
+        ? `“${result.knowledgeBase.name}”已由 ${result.uploadedCount} 份文件创建为草稿知识库${failureCopy}。`
+        : `已向“${result.knowledgeBase.name}”上传 ${result.uploadedCount} 份文件${failureCopy}。`,
     );
     reload();
   };
@@ -249,12 +293,28 @@ export function KnowledgePage({
             <Icon name="refresh" size={17} /> 刷新
           </button>
           <button
+            className="button secondary"
+            type="button"
+            onClick={() => void syncLexiang()}
+            disabled={!lexiangReady || loading || lexiangSyncing}
+            title={lexiangReady ? undefined : '请先在“知识来源”完成乐享验证并连接'}
+          >
+            <Icon name="refresh" size={17} />
+            {lexiangSyncing ? '正在同步乐享…' : '同步乐享知识库'}
+          </button>
+          <button
             className="button primary"
             type="button"
             onClick={() => setImportOpen(true)}
-            disabled={loading}
+            disabled={
+              loading ||
+              selected?.status === 'ARCHIVED' ||
+              (selected?.storageProvider === 'LEXIANG' &&
+                selected.externalSpace?.status !== 'ACTIVE')
+            }
           >
-            <span aria-hidden="true">↑</span> 上传资料
+            <span aria-hidden="true">↑</span>{' '}
+            {selected === null ? '上传资料并新建库' : '上传到当前库'}
           </button>
           <button
             className="button secondary"
@@ -275,6 +335,11 @@ export function KnowledgePage({
       {organizationError ? (
         <Notice tone="info">
           组织架构暂时无法读取，部门可见范围暂不可编辑：{organizationError}
+        </Notice>
+      ) : null}
+      {lexiangSyncError ? (
+        <Notice tone="error" onClose={() => setLexiangSyncError(null)}>
+          乐享知识库同步失败：{lexiangSyncError}
         </Notice>
       ) : null}
       {error && items.length > 0 ? (
@@ -408,10 +473,17 @@ export function KnowledgePage({
           organization={organization}
           knowledgeBases={items}
           organizationReady={organizationReady}
+          lexiangReady={lexiangReady}
           onClose={() => setCreateOpen(false)}
-          onCreated={() => {
+          onCreated={(created) => {
             setCreateOpen(false);
-            setNotice('知识库已创建。');
+            setNotice(
+              created.externalSpace?.status === 'ACTIVE'
+                ? '知识库已在腾讯乐享创建并完成本地绑定。'
+                : created.storageProvider === 'LEXIANG'
+                  ? '本地记录已创建，但乐享同步需要重试。'
+                  : '知识库已创建。',
+            );
             reload();
           }}
         />
@@ -422,6 +494,7 @@ export function KnowledgePage({
           currentUserName={currentUserName}
           organization={organization}
           knowledgeBases={items}
+          {...(selected === null ? {} : { targetKnowledgeBase: selected })}
           onClose={() => setImportOpen(false)}
           onImported={completeImport}
         />
@@ -475,6 +548,7 @@ function CreateKnowledgeBaseModal({
   organization,
   knowledgeBases,
   organizationReady,
+  lexiangReady,
   onClose,
   onCreated,
 }: {
@@ -483,8 +557,9 @@ function CreateKnowledgeBaseModal({
   organization: AdminOrganizationResponse | null;
   knowledgeBases: ReadonlyArray<KnowledgeBase>;
   organizationReady: boolean;
+  lexiangReady: boolean;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (knowledgeBase: KnowledgeBase) => void;
 }): ReactNode {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
@@ -494,6 +569,9 @@ function CreateKnowledgeBaseModal({
   const [accessMode, setAccessMode] = useState<KnowledgeAccessMode>('ENTERPRISE');
   const [orgUnitScopes, setOrgUnitScopes] = useState<KnowledgeBaseOrgUnitScope[]>([]);
   const [memberUserIds, setMemberUserIds] = useState<string[]>([]);
+  const [storageProvider, setStorageProvider] = useState<'LOCAL' | 'LEXIANG'>(() =>
+    lexiangReady ? 'LEXIANG' : 'LOCAL',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -516,7 +594,7 @@ function CreateKnowledgeBaseModal({
     setSubmitting(true);
     setError(null);
     try {
-      await createKnowledgeBase({
+      const created = await createKnowledgeBase({
         name,
         description: description || null,
         status: 'ACTIVE',
@@ -524,8 +602,9 @@ function CreateKnowledgeBaseModal({
         orgUnitIds: [],
         orgUnitScopes,
         memberUserIds,
+        storageProvider,
       });
-      onCreated();
+      onCreated(created);
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -561,6 +640,23 @@ function CreateKnowledgeBaseModal({
         <p className="form-hint">
           创建后上传资料；系统完成解析、切片和索引后，资料会自动对员工可用。
         </p>
+        <label>
+          <span>知识库存储</span>
+          <select
+            value={storageProvider}
+            onChange={(event) => setStorageProvider(event.target.value as 'LOCAL' | 'LEXIANG')}
+          >
+            <option value="LOCAL">本系统知识库</option>
+            <option value="LEXIANG" disabled={!lexiangReady}>
+              {lexiangReady ? '腾讯乐享知识库' : '腾讯乐享（请先完成知识来源配置）'}
+            </option>
+          </select>
+        </label>
+        {storageProvider === 'LEXIANG' ? (
+          <Notice tone="info">
+            远端知识库将设为不可见，团队成员不继承权限；员工访问继续由本系统下方的可见范围控制。
+          </Notice>
+        ) : null}
         <KnowledgeSpacePicker
           currentUserId={currentUserId}
           currentUserName={currentUserName}
@@ -621,7 +717,6 @@ function KnowledgeBaseEditor({
 }): ReactNode {
   const [name, setName] = useState(item.name);
   const [description, setDescription] = useState(item.description ?? '');
-  const [status, setStatus] = useState(item.status);
   const [space, setSpace] = useState<KnowledgeSpaceDraft>(() => knowledgeSpaceDraftFromBase(item));
   const [retrievalConfig, setRetrievalConfig] = useState(item.retrievalConfig);
   const [chunkingConfig, setChunkingConfig] = useState(item.chunkingConfig);
@@ -659,14 +754,6 @@ function KnowledgeBaseEditor({
       setError(accessError);
       return;
     }
-    if (
-      status === 'ARCHIVED' &&
-      item.status !== 'ARCHIVED' &&
-      !window.confirm(
-        `确认删除知识库“${item.name}”吗？删除后员工智能体将不再检索其中的资料，但历史文档、版本、引用和审计记录仍会保留。`,
-      )
-    )
-      return;
     setSubmitting(true);
     setError(null);
     try {
@@ -674,18 +761,50 @@ function KnowledgeBaseEditor({
         name,
         description: description || null,
         space: knowledgeSpaceSelectionFromDraft(space),
-        ...(status === item.status ? {} : { status }),
         retrievalConfig,
         chunkingConfig,
         orgUnitScopes,
         memberUserIds,
         expectedVersion: item.version,
       });
+      onChanged('知识库设置已更新。');
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const removeKnowledgeBase = async (): Promise<void> => {
+    const managedByLexiang = item.storageProvider === 'LEXIANG';
+    if (
+      !window.confirm(
+        managedByLexiang
+          ? `确认删除知识库“${item.name}”吗？系统会先删除腾讯乐享中的对应知识库，成功后再从本系统归档。`
+          : `确认删除知识库“${item.name}”吗？知识库及其中的资料将不再显示。`,
+      )
+    )
+      return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await deleteKnowledgeBase(item.id, item.version);
       onChanged(
-        status === 'ARCHIVED'
-          ? '知识库已删除，员工智能体将不再检索其中的资料。'
-          : '知识库设置已更新。',
+        managedByLexiang ? '腾讯乐享中的对应知识库已删除，本系统记录已归档。' : '知识库已删除。',
       );
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const retryExternalSync = async (): Promise<void> => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await syncExternalKnowledgeBase(item.id);
+      onChanged('腾讯乐享知识库已重新同步。');
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -773,6 +892,7 @@ function KnowledgeBaseEditor({
         <KnowledgeRetrievalTestPanel
           knowledgeBaseId={item.id}
           knowledgeBaseStatus={item.status}
+          storageProvider={item.storageProvider}
           documents={item.documents}
         />
       ) : null}
@@ -788,26 +908,77 @@ function KnowledgeBaseEditor({
               <p>维护知识存放位置、名称、生命周期状态和智能体可访问范围。</p>
             </div>
           </header>
+          {item.externalSpace ? (
+            <>
+              <div className="integration-overview" aria-label="腾讯乐享知识库绑定信息">
+                <div>
+                  <span>存储位置</span>
+                  <strong>腾讯乐享</strong>
+                </div>
+                <div>
+                  <span>同步状态</span>
+                  <strong>{externalSpaceStatusLabel(item.externalSpace.status)}</strong>
+                </div>
+                <div>
+                  <span>乐享团队 ID</span>
+                  <strong>{item.externalSpace.externalTeamId}</strong>
+                </div>
+                <div>
+                  <span>乐享知识库 ID</span>
+                  <strong>{item.externalSpace.externalSpaceId ?? '等待创建'}</strong>
+                </div>
+                <div>
+                  <span>乐享根目录 ID</span>
+                  <strong>{item.externalSpace.externalRootEntryId ?? '等待获取'}</strong>
+                </div>
+                <div>
+                  <span>最近同步</span>
+                  <strong>
+                    {item.externalSpace.lastSyncedAt
+                      ? formatDate(item.externalSpace.lastSyncedAt)
+                      : '尚未完成'}
+                  </strong>
+                </div>
+              </div>
+              <Notice
+                tone={
+                  item.externalSpace.status === 'ACTIVE' &&
+                  item.externalSpace.visibleType === 0 &&
+                  item.externalSpace.managerInheritType === 'none' &&
+                  item.externalSpace.memberInheritType === 'none'
+                    ? 'info'
+                    : 'error'
+                }
+              >
+                乐享侧固定为私有且不继承团队权限；员工能否访问由本系统下方的组织与成员范围决定。
+                {item.externalSpace.lastErrorCode
+                  ? ` 最近一次同步错误：${item.externalSpace.lastErrorCode}。`
+                  : ''}
+              </Notice>
+              {item.externalSpace.status === 'SYNC_FAILED' ||
+              item.externalSpace.status === 'PROVISIONING' ? (
+                <div className="page-actions">
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => void retryExternalSync()}
+                  >
+                    重新同步乐享知识库
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
           <KnowledgeEmbeddingIndexPanel
             knowledgeBase={item}
             readiness={enterpriseReadiness}
             onChanged={onChanged}
           />
-          <div className="form-grid two">
+          <div className="form-grid">
             <label>
               <span>知识库名称</span>
               <input value={name} onChange={(event) => setName(event.target.value)} />
-            </label>
-            <label>
-              <span>状态</span>
-              <select
-                value={status}
-                onChange={(event) => setStatus(event.target.value as typeof status)}
-              >
-                <option value="DRAFT">草稿</option>
-                <option value="ACTIVE">启用</option>
-                <option value="ARCHIVED">删除（停止检索）</option>
-              </select>
             </label>
           </div>
           <label>
@@ -1012,7 +1183,15 @@ function KnowledgeBaseEditor({
             onMemberUserIdsChange={setMemberUserIds}
           />
           <FieldError message={error} />
-          <div className="editor-footer align-end">
+          <div className="editor-footer">
+            <button
+              className="button danger-ghost"
+              type="button"
+              disabled={submitting}
+              onClick={() => void removeKnowledgeBase()}
+            >
+              删除知识库
+            </button>
             <button
               className="button primary"
               type="submit"
@@ -1025,6 +1204,25 @@ function KnowledgeBaseEditor({
       ) : null}
     </div>
   );
+}
+
+function externalSpaceStatusLabel(
+  status: NonNullable<KnowledgeBase['externalSpace']>['status'],
+): string {
+  switch (status) {
+    case 'PROVISIONING':
+      return '正在创建';
+    case 'ACTIVE':
+      return '同步正常';
+    case 'SYNC_FAILED':
+      return '同步失败';
+    case 'DELETING':
+      return '正在删除';
+    case 'DELETE_FAILED':
+      return '删除失败';
+    case 'DELETED':
+      return '已删除';
+  }
 }
 
 function CreateDocumentModal({

@@ -262,7 +262,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
           .expect(200)
       ).body,
     );
-    expect(updated.documentVersion).toBe(1);
+    expect(updated.documentVersion).toBe(2);
     expect(updated.versions.find((version) => version.versionNumber === 2)).toMatchObject({
       status: 'READY',
       ingestionJob: { status: 'SUCCEEDED', attempts: 1 },
@@ -270,7 +270,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
 
     await request(app.getHttpServer())
       .delete(
-        `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${document.id}?expectedVersion=1`,
+        `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${document.id}?expectedVersion=2`,
       )
       .set(bearer(accessToken))
       .expect(200)

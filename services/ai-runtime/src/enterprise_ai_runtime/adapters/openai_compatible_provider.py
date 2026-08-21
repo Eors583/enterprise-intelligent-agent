@@ -37,7 +37,7 @@ MAX_STREAM_EVENTS = 10_000
 
 
 class OpenAICompatibleProvider:
-    """Minimal non-streaming `/chat/completions` adapter.
+    """Bounded `/chat/completions` adapter with strict SSE streaming.
 
     The API key is intentionally never included in exceptions, object reprs, or logs.
     """
@@ -176,14 +176,24 @@ class OpenAICompatibleProvider:
                     raise ProviderResponseError()
 
                 async for chunk in response.aiter_raw():
+                    deltas: list[str] = []
                     for data in decoder.feed(chunk):
                         delta = state.accept(data)
                         if delta is not None:
-                            yield ProviderStreamDelta(content=delta)
+                            deltas.append(delta)
+                    # One upstream network chunk may contain many tiny token
+                    # events. Persist and forward it as one real-time package
+                    # to avoid a database transaction per token without adding
+                    # an artificial timer or delaying the first network chunk.
+                    if deltas:
+                        yield ProviderStreamDelta(content="".join(deltas))
+                final_deltas: list[str] = []
                 for data in decoder.finish():
                     delta = state.accept(data)
                     if delta is not None:
-                        yield ProviderStreamDelta(content=delta)
+                        final_deltas.append(delta)
+                if final_deltas:
+                    yield ProviderStreamDelta(content="".join(final_deltas))
                 yield ProviderStreamTerminal(result=state.result(), mode="live")
         except (
             ProviderAuthenticationError,

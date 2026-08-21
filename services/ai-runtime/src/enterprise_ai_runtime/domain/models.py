@@ -151,6 +151,7 @@ class SafetyDecision(StrictModel):
 class SafetyContext(StrictModel):
     input_decision: SafetyDecision
     knowledge_is_untrusted_data: Literal[True]
+    collaboration_context_is_untrusted_data: Literal[True] = True
 
     @model_validator(mode="after")
     def validate_input_decision(self) -> SafetyContext:
@@ -162,6 +163,7 @@ class SafetyContext(StrictModel):
 
 
 class RunCreateRequest(StrictModel):
+    run_id: UUID | None = None
     tenant_id: Identifier
     principal: PrincipalContext
     agent_id: Identifier

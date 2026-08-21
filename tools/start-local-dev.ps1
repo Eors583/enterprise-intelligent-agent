@@ -80,14 +80,18 @@ try {
     )
   }
 
-  Invoke-Checked -Label 'Starting knowledge storage, search, parser, and scanner' -Command $docker -Arguments @(
-    'compose', '-f', 'infra/docker-compose.knowledge.dev.yml',
-    'up', '-d', '--wait', '--wait-timeout', '900', 'minio', 'qdrant', 'docling', 'tika', 'clamav'
-  )
-  Invoke-Checked -Label 'Ensuring the private knowledge bucket exists' -Command $docker -Arguments @(
-    'compose', '-f', 'infra/docker-compose.knowledge.dev.yml',
-    'run', '--rm', 'minio-init'
-  )
+  if ((Read-DotEnvValue -Name 'KNOWLEDGE_LOCAL_BACKEND_ENABLED') -ne 'false') {
+    Invoke-Checked -Label 'Starting knowledge storage, search, parser, and scanner' -Command $docker -Arguments @(
+      'compose', '-f', 'infra/docker-compose.knowledge.dev.yml',
+      'up', '-d', '--wait', '--wait-timeout', '900', 'minio', 'qdrant', 'docling', 'tika', 'clamav'
+    )
+    Invoke-Checked -Label 'Ensuring the private knowledge bucket exists' -Command $docker -Arguments @(
+      'compose', '-f', 'infra/docker-compose.knowledge.dev.yml',
+      'run', '--rm', 'minio-init'
+    )
+  } else {
+    Write-Host "Local knowledge infrastructure is disabled; skipping it."
+  }
 
   if ($InfrastructureOnly) {
     Write-Host "`nInfrastructure is ready." -ForegroundColor Green

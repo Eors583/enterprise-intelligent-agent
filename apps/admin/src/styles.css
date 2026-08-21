@@ -1164,7 +1164,7 @@ textarea::placeholder {
   gap: 12px;
 }
 
-.feishu-binding-form {
+:is(.feishu-binding-form, .integration-binding-form) {
   display: grid;
   gap: 14px;
   padding: 16px;
@@ -6344,6 +6344,7 @@ tbody tr:hover {
 }
 
 .knowledge-folder-card {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: var(--space-6);
@@ -6354,10 +6355,26 @@ tbody tr:hover {
   background: var(--color-surface-primary);
   color: var(--color-text-primary);
   text-align: left;
-  cursor: pointer;
   transition:
     border-color var(--motion-fast),
     background var(--motion-fast);
+}
+
+.knowledge-folder-open {
+  display: flex;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.knowledge-folder-delete {
+  position: absolute;
+  right: var(--space-6);
+  bottom: var(--space-6);
 }
 
 .knowledge-folder-card:hover {
