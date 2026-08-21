@@ -2,6 +2,7 @@ import type { KnowledgeBaseIndexReadiness } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
 
 import {
+  knowledgeCapabilityRecoveryPollingRequired,
   knowledgeReadinessReasonLabel,
   knowledgeReadinessSummary,
 } from './knowledge-readiness-view';
@@ -28,17 +29,71 @@ describe('knowledge readiness view', () => {
     );
   });
 
-  it('prioritizes processing and failed documents over the activation summary', () => {
+  it('prioritizes processing and failed documents over the retrieval summary', () => {
     expect(knowledgeReadinessSummary(readiness({ processing: 1 }))).toBe('PROCESSING');
     expect(knowledgeReadinessSummary(readiness({ failed: 1 }))).toBe('FAILED');
-    expect(knowledgeReadinessSummary(readiness({}, true))).toBe('READY');
+    expect(knowledgeReadinessSummary(readiness({}, 'HYBRID'))).toBe('READY');
     expect(knowledgeReadinessSummary(readiness())).toBe('DEGRADED');
+  });
+
+  it('automatically rechecks transient capability failures until the runtime recovers', () => {
+    expect(
+      knowledgeCapabilityRecoveryPollingRequired({
+        ...readiness(),
+        embedding: {
+          status: 'UNAVAILABLE',
+          provider: 'local_fastembed',
+          model: null,
+          dimensions: 1536,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      knowledgeCapabilityRecoveryPollingRequired({
+        ...readiness(),
+        rerank: {
+          status: 'NOT_READY',
+          provider: 'local_fastembed',
+          model: null,
+          dimensions: null,
+        },
+      }),
+    ).toBe(true);
+    expect(
+      knowledgeCapabilityRecoveryPollingRequired({
+        ...readiness({ processing: 1 }),
+        embedding: {
+          status: 'UNAVAILABLE',
+          provider: 'local_fastembed',
+          model: null,
+          dimensions: 1536,
+        },
+      }),
+    ).toBe(false);
+    expect(
+      knowledgeCapabilityRecoveryPollingRequired({
+        ...readiness({}, 'HYBRID'),
+        embedding: {
+          status: 'READY',
+          provider: 'local_fastembed',
+          model: 'bge-small-zh',
+          dimensions: 1536,
+        },
+        rerank: {
+          status: 'READY',
+          provider: 'local_fastembed',
+          model: 'bge-reranker-base',
+          dimensions: null,
+        },
+        degradedReason: null,
+      }),
+    ).toBe(false);
   });
 });
 
 function readiness(
   documentOverrides: Partial<KnowledgeBaseIndexReadiness['documents']> = {},
-  activationAllowed = false,
+  retrievalMode: KnowledgeBaseIndexReadiness['retrievalMode'] = 'LEXICAL',
 ): KnowledgeBaseIndexReadiness {
   return {
     knowledgeBaseId: '00000000-0000-7000-8000-000000000001',
@@ -66,9 +121,7 @@ function readiness(
       model: null,
       dimensions: null,
     },
-    retrievalMode: 'LEXICAL',
+    retrievalMode,
     degradedReason: 'NO_PUBLISHED_CHUNKS',
-    activationAllowed,
-    activationBlockers: activationAllowed ? [] : ['NO_PUBLISHED_CHUNKS'],
   };
 }

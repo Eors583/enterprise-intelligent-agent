@@ -14,6 +14,7 @@ import {
 } from '../src/modules/im-outbox/domain/im-delivery.provider.js';
 import { LocalImDeliveryProvider } from '../src/modules/im-outbox/infrastructure/local/local-im-delivery.provider.js';
 import { PrismaOutboxDeliveryRepository } from '../src/modules/im-outbox/infrastructure/prisma/prisma-outbox-delivery.repository.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantId = '00000000-0000-7000-8000-000000000008';
@@ -66,15 +67,19 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
       ...left.map((event) => publish(leftRepository, event.id, 'worker-left')),
       ...right.map((event) => publish(rightRepository, event.id, 'worker-right')),
     ]);
-    const stored = await administrator.outboxEvent.findMany({ where: { id: { in: ids } } });
+    const stored = await administrator.outboxEventDelivery.findMany({
+      where: { eventId: { in: ids }, consumerKey: 'im-delivery' },
+    });
     expect(
       stored.every(
-        (event) =>
-          event.status === 'PUBLISHED' &&
-          event.attempts === 1 &&
-          event.firstAttemptedAt instanceof Date,
+        (delivery) =>
+          delivery.status === 'PUBLISHED' &&
+          delivery.attempts === 1 &&
+          delivery.firstAttemptedAt instanceof Date,
       ),
     ).toBe(true);
+    const facts = await administrator.outboxEvent.findMany({ where: { id: { in: ids } } });
+    expect(facts.every((event) => event.status === 'PENDING' && event.attempts === 0)).toBe(true);
   });
 
   it('recovers an expired lease and rejects the stale owner transition', async () => {
@@ -98,8 +103,10 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
     expect(visibleClaim.id).not.toBe(eventId);
     await publish(rightRepository, visibleClaim.id, 'worker-current');
 
-    await administrator.outboxEvent.update({
-      where: { id: eventId },
+    await administrator.outboxEventDelivery.update({
+      where: {
+        tenantId_eventId_consumerKey: { tenantId, eventId, consumerKey: 'im-delivery' },
+      },
       data: { lockedUntil: new Date('2000-01-01T00:00:00.000Z') },
     });
     const reclaimed = only(
@@ -119,9 +126,7 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
     const humanEventId = only(await createEvents(1, 'local-human'));
     const humanWorker = createWorker(leftRepository, new LocalImDeliveryProvider());
     await expect(humanWorker.runOnce()).resolves.toBe(1);
-    await expect(
-      administrator.outboxEvent.findUniqueOrThrow({ where: { id: humanEventId } }),
-    ).resolves.toMatchObject({
+    await expect(deliveryFor(humanEventId)).resolves.toMatchObject({
       status: 'PUBLISHED',
       providerName: 'local',
       providerReceipt: {
@@ -133,9 +138,7 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
 
     const agentEventId = only(await createEvents(1, 'local-agent', 'agent'));
     await expect(humanWorker.runOnce()).resolves.toBe(1);
-    await expect(
-      administrator.outboxEvent.findUniqueOrThrow({ where: { id: agentEventId } }),
-    ).resolves.toMatchObject({
+    await expect(deliveryFor(agentEventId)).resolves.toMatchObject({
       status: 'PUBLISHED',
       providerName: 'local',
       providerReceipt: {
@@ -152,7 +155,7 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
     const worker = createWorker(leftRepository, provider, { IM_OUTBOX_MAX_ATTEMPTS: '2' });
 
     await expect(worker.runOnce()).resolves.toBe(1);
-    let stored = await administrator.outboxEvent.findUniqueOrThrow({ where: { id: eventId } });
+    let stored = await deliveryFor(eventId);
     expect(stored).toMatchObject({
       status: 'PENDING',
       attempts: 1,
@@ -163,12 +166,14 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
     expect(firstAttemptedAt).toBeInstanceOf(Date);
     expect(stored.availableAt.getTime()).toBeGreaterThan(Date.now());
 
-    await administrator.outboxEvent.update({
-      where: { id: eventId },
+    await administrator.outboxEventDelivery.update({
+      where: {
+        tenantId_eventId_consumerKey: { tenantId, eventId, consumerKey: 'im-delivery' },
+      },
       data: { availableAt: new Date('2000-01-01T00:00:00.000Z') },
     });
     await expect(worker.runOnce()).resolves.toBe(1);
-    stored = await administrator.outboxEvent.findUniqueOrThrow({ where: { id: eventId } });
+    stored = await deliveryFor(eventId);
     expect(stored).toMatchObject({
       status: 'FAILED',
       attempts: 2,
@@ -187,9 +192,7 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
 
     await expect(worker.runOnce()).resolves.toBe(1);
 
-    await expect(
-      administrator.outboxEvent.findUniqueOrThrow({ where: { id: eventId } }),
-    ).resolves.toMatchObject({
+    await expect(deliveryFor(eventId)).resolves.toMatchObject({
       status: 'UNKNOWN',
       attempts: 1,
       providerName: 'unknown-rejecting',
@@ -198,7 +201,7 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
         deliveredRecipientCount: 0,
         reason: 'delivery_outcome_unknown',
       },
-      publishedAt: null,
+      acknowledgedAt: null,
       lockedBy: null,
       lockedUntil: null,
       lastError: 'NETWORK_RESULT_INDETERMINATE: IM provider delivery failed',
@@ -209,11 +212,52 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
     const eventId = only(await createEvents(1, 'invalid-unknown'));
 
     await expect(
-      administrator.outboxEvent.update({
-        where: { id: eventId },
+      administrator.outboxEventDelivery.update({
+        where: {
+          tenantId_eventId_consumerKey: { tenantId, eventId, consumerKey: 'im-delivery' },
+        },
         data: { status: 'UNKNOWN' },
       }),
     ).rejects.toThrow();
+  });
+
+  it('does not enqueue fact-only events and quarantines unregistered event types', async () => {
+    const fact = await administrator.outboxEvent.create({
+      data: {
+        tenantId,
+        aggregateType: 'conversation',
+        aggregateId: randomUUID(),
+        eventType: 'conversation.created.v1',
+        payload: {},
+      },
+    });
+    const unknown = await administrator.outboxEvent.create({
+      data: {
+        tenantId,
+        aggregateType: 'integration-test',
+        aggregateId: randomUUID(),
+        eventType: 'integration.unregistered.v1',
+        payload: {},
+      },
+    });
+
+    await expect(
+      administrator.outboxEvent.findUniqueOrThrow({ where: { id: fact.id } }),
+    ).resolves.toMatchObject({
+      routingPurpose: 'FACT_ONLY',
+      routingError: null,
+    });
+    await expect(
+      administrator.outboxEvent.findUniqueOrThrow({ where: { id: unknown.id } }),
+    ).resolves.toMatchObject({
+      routingPurpose: 'QUARANTINED',
+      routingError: 'UNREGISTERED_EVENT_TYPE',
+    });
+    await expect(
+      administrator.outboxEventDelivery.count({
+        where: { eventId: { in: [fact.id, unknown.id] } },
+      }),
+    ).resolves.toBe(0);
   });
 
   it('cannot use the cross-tenant outbox role to read business tables', async () => {
@@ -246,9 +290,16 @@ describe.runIf(enabled)('PostgreSQL IM outbox delivery', () => {
     return stored.map((event) => event.id);
   }
 
+  function deliveryFor(eventId: string) {
+    return administrator.outboxEventDelivery.findUniqueOrThrow({
+      where: {
+        tenantId_eventId_consumerKey: { tenantId, eventId, consumerKey: 'im-delivery' },
+      },
+    });
+  }
+
   async function cleanup(): Promise<void> {
-    await administrator.outboxEvent.deleteMany({ where: { tenantId } });
-    await administrator.tenant.deleteMany({ where: { id: tenantId } });
+    await cleanupDisposableTenants(administrator, [tenantId]);
   }
 });
 

@@ -2,8 +2,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 
 import { OutboxPrismaService } from '../../../../database/outbox-prisma.service.js';
+import { OUTBOX_CONSUMER, OUTBOX_LANE } from '../../../../database/outbox-routing.js';
 import { AgentRunQueueRepository } from '../../domain/agent-run-queue.repository.js';
 import {
+  AGENT_RUN_CANCEL_REQUESTED_EVENT_TYPE,
   AGENT_RUN_REQUESTED_EVENT_TYPE,
   type ClaimedAgentRunEvent,
 } from '../../domain/agent-run.models.js';
@@ -31,38 +33,118 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
     readonly batchSize: number;
     readonly claimTtlMs: number;
   }): Promise<readonly ClaimedAgentRunEvent[]> {
+    return this.claimEventType(input, AGENT_RUN_REQUESTED_EVENT_TYPE);
+  }
+
+  claimCancellations(input: {
+    readonly workerId: string;
+    readonly batchSize: number;
+    readonly claimTtlMs: number;
+  }): Promise<readonly ClaimedAgentRunEvent[]> {
+    return this.claimEventType(input, AGENT_RUN_CANCEL_REQUESTED_EVENT_TYPE);
+  }
+
+  private claimEventType(
+    input: {
+      readonly workerId: string;
+      readonly batchSize: number;
+      readonly claimTtlMs: number;
+    },
+    eventType: typeof AGENT_RUN_REQUESTED_EVENT_TYPE | typeof AGENT_RUN_CANCEL_REQUESTED_EVENT_TYPE,
+  ): Promise<readonly ClaimedAgentRunEvent[]> {
+    const lane =
+      eventType === AGENT_RUN_REQUESTED_EVENT_TYPE
+        ? OUTBOX_LANE.agentRunExecution
+        : OUTBOX_LANE.agentRunCancellation;
+    const queueHeadJoin =
+      eventType === AGENT_RUN_REQUESTED_EVENT_TYPE
+        ? Prisma.sql`
+          LEFT JOIN public."agent_runs" AS run
+            ON run."tenant_id" = event."tenant_id"
+           AND run."id" = event."aggregate_id"
+        `
+        : Prisma.empty;
+    const queueHeadPredicate =
+      eventType === AGENT_RUN_REQUESTED_EVENT_TYPE
+        ? Prisma.sql`
+          AND (
+            run."id" IS NULL
+            OR run."status" <> 'QUEUED'::public."AgentRunStatus"
+            OR NOT EXISTS (
+              SELECT 1
+              FROM public."agent_runs" AS earlier
+              WHERE earlier."tenant_id" = run."tenant_id"
+                AND earlier."conversation_id" = run."conversation_id"
+                AND (
+                  earlier."conversation_sequence" < run."conversation_sequence"
+                  OR (
+                    earlier."conversation_sequence" = run."conversation_sequence"
+                    AND earlier."turn_index" < run."turn_index"
+                  )
+                )
+                AND earlier."status" IN (
+                  'QUEUED'::public."AgentRunStatus",
+                  'DISPATCHING'::public."AgentRunStatus",
+                  'RUNNING'::public."AgentRunStatus",
+                  'UNKNOWN'::public."AgentRunStatus"
+                )
+                AND earlier."superseded_by_run_id" IS NULL
+            )
+          )
+        `
+        : Prisma.empty;
     return this.withWorkerRole(async (transaction) => {
       const rows = await transaction.$queryRaw<ClaimedRow[]>(Prisma.sql`
         WITH candidates AS MATERIALIZED (
-          SELECT event."id"
-          FROM public."outbox_events" AS event
-          WHERE event."event_type" = ${AGENT_RUN_REQUESTED_EVENT_TYPE}
-            AND event."status" = 'PENDING'::"OutboxEventStatus"
-            AND event."available_at" <= clock_timestamp()
-            AND (event."locked_until" IS NULL OR event."locked_until" <= clock_timestamp())
-          ORDER BY event."available_at", event."created_at", event."id"
+          SELECT delivery."id"
+          FROM public."outbox_event_deliveries" AS delivery
+          JOIN public."outbox_events" AS event
+            ON event."tenant_id" = delivery."tenant_id"
+           AND event."id" = delivery."event_id"
+          ${queueHeadJoin}
+          WHERE delivery."consumer_key" = ${OUTBOX_CONSUMER.agentRun}
+            AND delivery."lane" = ${lane}
+            AND event."event_type" = ${eventType}
+            AND delivery."status" = 'PENDING'::"OutboxEventStatus"
+            AND delivery."available_at" <= clock_timestamp()
+            AND (
+              delivery."locked_until" IS NULL
+              OR delivery."locked_until" <= clock_timestamp()
+            )
+            ${queueHeadPredicate}
+          ORDER BY delivery."available_at", delivery."created_at", delivery."id"
           LIMIT ${input.batchSize}
-          FOR UPDATE SKIP LOCKED
+          FOR UPDATE OF delivery SKIP LOCKED
+        ),
+        claimed AS (
+          UPDATE public."outbox_event_deliveries" AS delivery
+          SET
+            "locked_by" = ${input.workerId},
+            "locked_until" =
+              clock_timestamp() + ${input.claimTtlMs} * INTERVAL '1 millisecond',
+            "attempts" = delivery."attempts" + 1,
+            "first_attempted_at" =
+              COALESCE(delivery."first_attempted_at", clock_timestamp()),
+            "last_error" = NULL,
+            "updated_at" = clock_timestamp()
+          FROM candidates
+          WHERE delivery."id" = candidates."id"
+          RETURNING delivery.*
         )
-        UPDATE public."outbox_events" AS event
-        SET
-          "locked_by" = ${input.workerId},
-          "locked_until" = clock_timestamp() + ${input.claimTtlMs} * INTERVAL '1 millisecond',
-          "attempts" = event."attempts" + 1,
-          "first_attempted_at" = COALESCE(event."first_attempted_at", clock_timestamp()),
-          "last_error" = NULL
-        FROM candidates
-        WHERE event."id" = candidates."id"
-        RETURNING
+        SELECT
           event."id"::text AS id,
           event."tenant_id"::text AS tenant_id,
           event."aggregate_id"::text AS aggregate_id,
           event."event_type" AS event_type,
           event."payload" AS payload,
-          event."attempts" AS attempts,
-          event."first_attempted_at" AS first_attempted_at,
-          event."locked_until" AS locked_until,
+          claimed."attempts" AS attempts,
+          claimed."first_attempted_at" AS first_attempted_at,
+          claimed."locked_until" AS locked_until,
           event."created_at" AS created_at
+        FROM claimed
+        JOIN public."outbox_events" AS event
+          ON event."tenant_id" = claimed."tenant_id"
+         AND event."id" = claimed."event_id"
       `);
       return rows.map((row) => ({
         id: row.id,
@@ -75,6 +157,28 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
         leaseExpiresAt: row.locked_until,
         createdAt: row.created_at,
       }));
+    });
+  }
+
+  renewLease(input: {
+    readonly eventId: string;
+    readonly workerId: string;
+    readonly claimTtlMs: number;
+  }): Promise<boolean> {
+    return this.withWorkerRole(async (transaction) => {
+      const updated = await transaction.$executeRaw(Prisma.sql`
+        UPDATE public."outbox_event_deliveries"
+        SET
+          "locked_until" =
+            clock_timestamp() + ${input.claimTtlMs} * INTERVAL '1 millisecond',
+          "updated_at" = clock_timestamp()
+        WHERE "event_id" = ${input.eventId}::uuid
+          AND "consumer_key" = ${OUTBOX_CONSUMER.agentRun}
+          AND "status" = 'PENDING'::"OutboxEventStatus"
+          AND "locked_by" = ${input.workerId}
+          AND "locked_until" > clock_timestamp()
+      `);
+      return updated === 1;
     });
   }
 
@@ -93,7 +197,7 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
       input.workerId,
       Prisma.sql`
       "status" = 'PUBLISHED'::"OutboxEventStatus",
-      "published_at" = clock_timestamp(),
+      "acknowledged_at" = clock_timestamp(),
       "provider_name" = 'ai-runtime',
       "provider_receipt" = ${JSON.stringify(receipt)}::jsonb,
       "last_error" = NULL
@@ -111,7 +215,7 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
       input.workerId,
       Prisma.sql`
       "status" = 'FAILED'::"OutboxEventStatus",
-      "published_at" = NULL,
+      "acknowledged_at" = NULL,
       "provider_name" = NULL,
       "provider_receipt" = NULL,
       "last_error" = ${safeQueueError(input.errorCode)}
@@ -129,7 +233,7 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
       input.workerId,
       Prisma.sql`
       "status" = 'UNKNOWN'::"OutboxEventStatus",
-      "published_at" = NULL,
+      "acknowledged_at" = NULL,
       "provider_name" = 'ai-runtime',
       "provider_receipt" = '{"outcome":"unknown","deliveredRecipientCount":0,"reason":"delivery_outcome_unknown"}'::jsonb,
       "last_error" = ${safeQueueError(input.errorCode)}
@@ -156,12 +260,14 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
   private transition(eventId: string, workerId: string, assignments: Prisma.Sql): Promise<boolean> {
     return this.withWorkerRole(async (transaction) => {
       const updated = await transaction.$executeRaw(Prisma.sql`
-        UPDATE public."outbox_events"
+        UPDATE public."outbox_event_deliveries"
         SET
           ${assignments},
           "locked_by" = NULL,
-          "locked_until" = NULL
-        WHERE "id" = ${eventId}::uuid
+          "locked_until" = NULL,
+          "updated_at" = clock_timestamp()
+        WHERE "event_id" = ${eventId}::uuid
+          AND "consumer_key" = ${OUTBOX_CONSUMER.agentRun}
           AND "status" = 'PENDING'::"OutboxEventStatus"
           AND "locked_by" = ${workerId}
       `);
@@ -180,6 +286,6 @@ export class PrismaAgentRunQueueRepository extends AgentRunQueueRepository {
 }
 
 function safeQueueError(code: string): string {
-  const safeCode = /^[A-Z0-9_]{1,120}$/.test(code) ? code : 'AGENT_RUN_FAILED';
+  const safeCode = /^[A-Z0-9][A-Z0-9_]{0,119}$/.test(code) ? code : 'AGENT_RUN_FAILED';
   return `${safeCode}: Agent Run processing did not complete.`;
 }

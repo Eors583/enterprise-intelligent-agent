@@ -18,6 +18,7 @@ describe('PrismaKnowledgeIngestionJobRepository', () => {
           tenant_id: TENANT_ID,
           document_version_id: VERSION_ID,
           attempts: 2,
+          failure_attempts: 1,
           lease_expires_at: leaseExpiresAt,
           created_at: createdAt,
         },
@@ -32,6 +33,7 @@ describe('PrismaKnowledgeIngestionJobRepository', () => {
         tenantId: TENANT_ID,
         documentVersionId: VERSION_ID,
         attempts: 2,
+        failureAttempts: 1,
         leaseExpiresAt,
         createdAt,
       },
@@ -41,6 +43,15 @@ describe('PrismaKnowledgeIngestionJobRepository', () => {
       'SET LOCAL ROLE enterprise_agent_outbox',
     );
     expect(transaction.$queryRaw).toHaveBeenCalledOnce();
+    const claimSql = transaction.$queryRaw.mock.calls[0]?.[0] as {
+      readonly strings: readonly string[];
+    };
+    expect(claimSql.strings.join(' ').replace(/\s+/gu, ' ')).toContain(
+      'ORDER BY tenant_activity.last_activity_at NULLS FIRST, job."failure_attempts", job."attempts", job."available_at", job."created_at", job."id"',
+    );
+    expect(claimSql.strings.join(' ').replace(/\s+/gu, ' ')).toContain(
+      'LEFT JOIN tenant_activity ON tenant_activity."tenant_id" = job."tenant_id"',
+    );
   });
 
   it('reports a lost lease when a retry transition updates no row', async () => {
@@ -55,6 +66,21 @@ describe('PrismaKnowledgeIngestionJobRepository', () => {
         errorMessage: 'Embedding service is unavailable.',
       }),
     ).resolves.toBe(false);
+  });
+
+  it.each([
+    ['active ownership', [{ owned: true }], true],
+    ['expired or reclaimed ownership', [{ owned: false }], false],
+    ['an unavailable ownership row', [], false],
+  ] as const)('reports %s without extending the lease', async (_label, queryRows, expected) => {
+    const { repository, transaction } = createRepository({ queryRows });
+
+    await expect(repository.ownsLease({ jobId: JOB_ID, workerId: 'worker-1' })).resolves.toBe(
+      expected,
+    );
+
+    expect(transaction.$queryRaw).toHaveBeenCalledOnce();
+    expect(transaction.$executeRaw).not.toHaveBeenCalled();
   });
 
   it('refuses to run without the dedicated worker database capability', async () => {

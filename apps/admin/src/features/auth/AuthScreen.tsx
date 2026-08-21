@@ -1,11 +1,20 @@
 import {
   loginRequestSchema,
   registerTenantRequestSchema,
-  type AuthSessionResponse,
+  type BrowserAuthSessionResponse,
+  type MfaLoginChallengeResponse,
+  type OidcPublicProviderListResponse,
 } from '@enterprise/contracts';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
-import { login, registerTenant } from '@/api/admin-api';
+import {
+  completeMfaLogin,
+  completeOidcLogin,
+  listOidcLoginProviders,
+  login,
+  registerTenant,
+  startOidcLogin,
+} from '@/api/auth-api';
 import { messageFromError } from '@/api/client';
 import { isSessionRoleAllowed, writeSession } from '@/auth/session';
 import { FieldError, Spinner } from '@/components/ui';
@@ -41,7 +50,7 @@ function firstIssue(error: { issues: ReadonlyArray<{ message: string }> }): stri
   return error.issues[0]?.message ?? '请检查表单内容。';
 }
 
-function acceptSession(session: AuthSessionResponse): void {
+function acceptSession(session: BrowserAuthSessionResponse): void {
   if (!isSessionRoleAllowed(session)) {
     throw new Error('当前账号不是管理员，无法进入管理后台。');
   }
@@ -55,11 +64,34 @@ export function AuthScreen(): ReactNode {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [mfaChallenge, setMfaChallenge] = useState<MfaLoginChallengeResponse | null>(null);
+  const [oidcProviders, setOidcProviders] = useState<OidcPublicProviderListResponse['items']>([]);
+  const oidcCallbackStarted = useRef(false);
+
+  useEffect(() => {
+    if (!window.location.pathname.endsWith('/oidc/callback') || oidcCallbackStarted.current) return;
+    const parameters = new URLSearchParams(window.location.search);
+    const state = parameters.get('state');
+    const code = parameters.get('code');
+    oidcCallbackStarted.current = true;
+    window.history.replaceState({}, '', '/');
+    if (!state || !code) {
+      setError('OIDC 回调缺少授权码或状态参数，登录已拒绝。');
+      return;
+    }
+    setSubmitting(true);
+    void completeOidcLogin({ state, code, sessionLabel: '管理后台' })
+      .then(acceptSession)
+      .catch((caught: unknown) => setError(messageFromError(caught)))
+      .finally(() => setSubmitting(false));
+  }, []);
 
   const switchMode = (next: Mode): void => {
     setMode(next);
     setError(null);
     setShowPassword(false);
+    setMfaChallenge(null);
+    setOidcProviders([]);
   };
 
   const submitLogin = async (event: FormEvent): Promise<void> => {
@@ -72,10 +104,70 @@ export function AuthScreen(): ReactNode {
     }
     setSubmitting(true);
     try {
-      acceptSession(await login(parsed.data));
+      const result = await login(parsed.data);
+      if ('kind' in result) {
+        setMfaChallenge(result);
+      } else {
+        acceptSession(result);
+      }
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const submitMfa = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
+    event.preventDefault();
+    if (!mfaChallenge) return;
+    const form = new FormData(event.currentTarget);
+    setSubmitting(true);
+    setError(null);
+    try {
+      acceptSession(
+        await completeMfaLogin({
+          challenge: mfaChallenge.challenge,
+          code: String(form.get('code') ?? ''),
+          method: String(form.get('method') ?? 'TOTP') as 'TOTP' | 'RECOVERY_CODE',
+          sessionLabel: '管理后台',
+        }),
+      );
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const discoverSso = async (): Promise<void> => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const providers = await listOidcLoginProviders(loginForm.tenantSlug);
+      setOidcProviders(providers.items);
+      if (providers.items.length === 0) {
+        setError('该企业没有已验证并发布的 OIDC 登录方式。');
+      }
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const beginSso = async (providerKey: string): Promise<void> => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await startOidcLogin({
+        tenantSlug: loginForm.tenantSlug,
+        providerKey,
+        redirectUri: new URL('/oidc/callback', window.location.origin).toString(),
+        sessionLabel: '管理后台',
+      });
+      window.location.assign(result.authorizationUrl);
+    } catch (caught) {
+      setError(messageFromError(caught));
       setSubmitting(false);
     }
   };
@@ -167,7 +259,45 @@ export function AuthScreen(): ReactNode {
             </button>
           </div>
 
-          {mode === 'login' ? (
+          {mode === 'login' && mfaChallenge ? (
+            <form className="form-stack" onSubmit={(event) => void submitMfa(event)}>
+              <div className="notice info" role="status">
+                密码已验证。请使用身份验证器或一次性恢复码完成登录。
+              </div>
+              <label>
+                <span>验证方式</span>
+                <select name="method" defaultValue={mfaChallenge.methods[0]}>
+                  {mfaChallenge.methods.includes('TOTP') ? (
+                    <option value="TOTP">身份验证器</option>
+                  ) : null}
+                  {mfaChallenge.methods.includes('RECOVERY_CODE') ? (
+                    <option value="RECOVERY_CODE">一次性恢复码</option>
+                  ) : null}
+                </select>
+              </label>
+              <label>
+                <span>验证码</span>
+                <input
+                  name="code"
+                  autoFocus
+                  autoComplete="one-time-code"
+                  inputMode="numeric"
+                  required
+                />
+              </label>
+              <FieldError message={error} />
+              <button className="button primary large" type="submit" disabled={submitting}>
+                {submitting ? <Spinner label="正在验证…" /> : '完成安全验证'}
+              </button>
+              <button
+                className="button secondary"
+                type="button"
+                onClick={() => setMfaChallenge(null)}
+              >
+                返回密码登录
+              </button>
+            </form>
+          ) : mode === 'login' ? (
             <form className="form-stack" onSubmit={(event) => void submitLogin(event)}>
               <label>
                 <span>企业标识</span>
@@ -223,6 +353,32 @@ export function AuthScreen(): ReactNode {
               <button className="button primary large" type="submit" disabled={submitting}>
                 {submitting ? <Spinner label="正在登录…" /> : '进入管理后台'}
               </button>
+              <div className="form-divider">或使用企业单点登录</div>
+              {oidcProviders.length === 0 ? (
+                <button
+                  className="button secondary"
+                  type="button"
+                  disabled={submitting || loginForm.tenantSlug.trim().length === 0}
+                  onClick={() => void discoverSso()}
+                >
+                  查找企业 OIDC 登录
+                </button>
+              ) : (
+                oidcProviders.map((provider) => (
+                  <button
+                    className="button secondary"
+                    type="button"
+                    key={provider.key}
+                    disabled={submitting}
+                    onClick={() => void beginSso(provider.key)}
+                  >
+                    使用 {provider.displayName} 登录
+                  </button>
+                ))
+              )}
+              <p className="muted">
+                SAML 当前未配置真实 XML 签名验证器，所有 SAML 登录均会 fail-closed 拒绝。
+              </p>
             </form>
           ) : (
             <form className="form-stack" onSubmit={(event) => void submitRegister(event)}>

@@ -8,42 +8,128 @@ import {
   acceptMemberInvitationRequestSchema,
   acceptMemberInvitationResponseSchema,
   bindFeishuOrganizationRequestSchema,
+  applyFeishuDirectoryPreviewRequestSchema,
   changePasswordRequestSchema,
   changePasswordResponseSchema,
   completePasswordResetRequestSchema,
   completePasswordResetResponseSchema,
+  createExperienceCandidateRequestSchema,
+  createDepartmentAgentRequestSchema,
+  createToolDefinitionRequestSchema,
+  createToolVersionRequestSchema,
   createKnowledgeBaseRequestSchema,
+  createKnowledgeEmbeddingIndexVersionRequestSchema,
   createKnowledgeDocumentRequestSchema,
+  createKnowledgeGraphConflictRequestSchema,
+  createKnowledgeGraphCorrectionRequestSchema,
+  createKnowledgeOntologyRequestSchema,
+  createKnowledgeOntologyVersionRequestSchema,
   createMemberRequestSchema,
   createOrgUnitRequestSchema,
   inviteMemberRequestSchema,
   issueMemberInvitationResponseSchema,
   feishuOrganizationSyncStatusSchema,
+  feishuDirectoryPreviewSchema,
+  feishuDirectorySyncRunDetailSchema,
+  feishuDirectorySyncRunListSchema,
+  experienceCandidateSchema,
+  experienceKnowledgeProjectionSchema,
+  experienceTransitionRequestSchema,
+  prepareExperienceKnowledgeProjectionRequestSchema,
   knowledgeBaseSchema,
+  ensureKnowledgeFoldersRequestSchema,
+  knowledgeFolderListResponseSchema,
   knowledgeBaseIndexReadinessSchema,
   knowledgeBaseListResponseSchema,
   knowledgeDocumentChunkListResponseSchema,
   knowledgeDocumentSchema,
+  knowledgeUploadInspectionSchema,
+  inspectKnowledgeUploadRequestSchema,
   knowledgeDocumentVersionDetailSchema,
+  knowledgeStructuredDocumentPreviewSchema,
+  knowledgeParseReviewQueueResponseSchema,
   knowledgeEmbeddingRebuildResponseSchema,
+  knowledgeEmbeddingIndexVersionSchema,
+  knowledgeEmbeddingIndexVersionListResponseSchema,
+  knowledgeGraphRebuildResponseSchema,
+  knowledgeGraphOverviewSchema,
+  knowledgeGraphConflictSchema,
+  knowledgeGraphCorrectionSchema,
+  knowledgeGraphGovernanceOverviewSchema,
+  knowledgeOntologySchema,
+  knowledgeOntologyVersionSchema,
+  knowledgeGraphQuerySchema,
+  knowledgeGraphResponseSchema,
   knowledgeRetrievalTestRequestSchema,
   knowledgeRetrievalTestResponseSchema,
+  importKnowledgeWebDocumentRequestSchema,
+  reviewKnowledgeDocumentParseRequestSchema,
+  reviewKnowledgeDocumentGovernanceRequestSchema,
+  updateKnowledgeDocumentVersionGovernanceRequestSchema,
+  updateKnowledgeDocumentAccessRequestSchema,
+  transitionKnowledgeGraphCorrectionRequestSchema,
+  transitionKnowledgeGraphCorrectionBatchRequestSchema,
+  knowledgeGraphCorrectionBatchResultSchema,
+  createLexiangConnectionRequestSchema,
+  discoverLexiangConnectionRequestSchema,
+  knowledgeProviderConnectionResponseSchema,
+  knowledgeProviderHealthCheckResponseSchema,
+  lexiangConnectionDiscoveryResponseSchema,
+  lexiangSpaceSyncResponseSchema,
+  bindLexiangUserRequestSchema,
+  knowledgeProviderUserBindingsResponseSchema,
+  transitionKnowledgeOntologyVersionRequestSchema,
+  browserAuthSessionResponseSchema,
+  browserLoginResultSchema,
+  currentSessionResponseSchema,
   loginRequestSchema,
+  mfaLoginVerifyRequestSchema,
+  oidcLoginCallbackRequestSchema,
+  oidcLoginStartRequestSchema,
+  oidcLoginStartResponseSchema,
+  oidcPublicProviderListResponseSchema,
   memberInvitationSchema,
   registerTenantRequestSchema,
   requestPasswordResetRequestSchema,
   requestPasswordResetResponseSchema,
   resetMemberPasswordRequestSchema,
   resetMemberPasswordResponseSchema,
+  createRoleBlueprintRequestSchema,
+  createRoleVersionDraftRequestSchema,
+  reviewRoleVersionRequestSchema,
+  roleBlueprintListResponseSchema,
+  roleBlueprintSchema,
+  roleAssignmentCandidateListResponseSchema,
+  roleAssignmentListResponseSchema,
+  roleAssignmentSchema,
+  roleVersionSchema,
+  publishRoleVersionRequestSchema,
+  roleVersionTransitionRequestSchema,
+  rollbackRoleVersionRequestSchema,
+  rollbackRoleVersionResponseSchema,
+  createRoleAssignmentRequestSchema,
+  revokeRoleAssignmentRequestSchema,
   rollbackKnowledgeDocumentVersionRequestSchema,
+  publishKnowledgeDocumentVersionRequestSchema,
   updateKnowledgeBaseRequestSchema,
   updateKnowledgeDocumentRequestSchema,
+  createKnowledgeSourceConnectorRequestSchema,
+  updateKnowledgeSourceConnectorRequestSchema,
+  knowledgeSourceConnectorSchema,
+  knowledgeSourceConnectorListResponseSchema,
+  knowledgeSourceSyncRunSchema,
   updateMemberRequestSchema,
   updateAdminAgentRequestSchema,
   updateAgentUsageLimitsRequestSchema,
   updateOrganizationRequestSchema,
   updateOrgUnitRequestSchema,
-  authSessionResponseSchema,
+  updateRoleBlueprintRequestSchema,
+  updateRoleVersionDraftRequestSchema,
+  toolDefinitionDetailSchema,
+  toolDefinitionListResponseSchema,
+  toolDefinitionSchema,
+  toolVersionLifecycleRequestSchema,
+  toolVersionSchema,
   type AdminOrganizationResponse,
   type AdminAgent,
   type AdminAgentListResponse,
@@ -53,71 +139,214 @@ import {
   type AcceptMemberInvitationRequest,
   type AcceptMemberInvitationResponse,
   type BindFeishuOrganizationRequest,
-  type AuthSessionResponse,
+  type ApplyFeishuDirectoryPreviewRequest,
+  type BrowserAuthSessionResponse,
+  type BrowserLoginResult,
+  type CurrentSessionResponse,
   type ChangePasswordRequest,
   type ChangePasswordResponse,
   type CompletePasswordResetRequest,
   type CompletePasswordResetResponse,
+  type CreateExperienceCandidateRequest,
+  type CreateDepartmentAgentRequest,
+  type CreateToolDefinitionRequest,
+  type CreateToolVersionRequest,
   type CreateKnowledgeBaseRequest,
+  type CreateKnowledgeEmbeddingIndexVersionRequest,
   type CreateKnowledgeDocumentRequest,
+  type CreateKnowledgeGraphConflictRequest,
+  type CreateKnowledgeGraphCorrectionRequest,
+  type CreateKnowledgeOntologyRequest,
+  type CreateKnowledgeOntologyVersionRequest,
   type CreateMemberRequest,
   type CreateOrgUnitRequest,
   type FeishuOrganizationSyncStatus,
+  type FeishuDirectoryPreview,
+  type FeishuDirectorySyncRunDetail,
+  type FeishuDirectorySyncRunList,
+  type ExperienceCandidate,
+  type ExperienceKnowledgeProjection,
+  type ExperienceTransitionRequest,
+  type PrepareExperienceKnowledgeProjectionRequest,
   type InviteMemberRequest,
   type IssueMemberInvitationResponse,
   type KnowledgeBase,
   type KnowledgeBaseIndexReadiness,
   type KnowledgeBaseListResponse,
+  type EnsureKnowledgeFoldersRequest,
+  type KnowledgeFolderListResponse,
+  type KnowledgeEmbeddingIndexVersion,
+  type KnowledgeEmbeddingIndexVersionListResponse,
   type KnowledgeDocumentChunkListResponse,
   type KnowledgeDocument,
+  type KnowledgeDocumentGovernancePolicy,
   type KnowledgeDocumentVersionDetail,
+  type InspectKnowledgeUploadRequest,
+  type KnowledgeUploadInspection,
+  type KnowledgeStructuredDocumentPreview,
+  type KnowledgeParseReviewQueueResponse,
   type KnowledgeEmbeddingRebuildResponse,
+  type KnowledgeGraphRebuildResponse,
+  type KnowledgeGraphOverview,
+  type KnowledgeGraphConflict,
+  type KnowledgeGraphCorrection,
+  type KnowledgeGraphGovernanceOverview,
+  type KnowledgeGraphQuery,
+  type KnowledgeGraphResponse,
+  type KnowledgeOntology,
+  type KnowledgeOntologyVersion,
   type KnowledgeRetrievalTestRequest,
   type KnowledgeRetrievalTestResponse,
+  type ImportKnowledgeWebDocumentRequest,
+  type ReviewKnowledgeDocumentParseRequest,
+  type ReviewKnowledgeDocumentGovernanceRequest,
+  type UpdateKnowledgeDocumentVersionGovernanceRequest,
+  type UpdateKnowledgeDocumentAccessRequest,
+  type TransitionKnowledgeGraphCorrectionRequest,
+  type TransitionKnowledgeGraphCorrectionBatchRequest,
+  type KnowledgeGraphCorrectionBatchResult,
+  type CreateLexiangConnectionRequest,
+  type DiscoverLexiangConnectionRequest,
+  type KnowledgeProviderConnectionResponse,
+  type BindLexiangUserRequest,
+  type KnowledgeProviderUserBindingsResponse,
+  type KnowledgeProviderHealthCheckResponse,
+  type LexiangConnectionDiscoveryResponse,
+  type LexiangSpaceSyncResponse,
+  type TransitionKnowledgeOntologyVersionRequest,
   type LoginRequest,
+  type MfaLoginVerifyRequest,
+  type OidcLoginCallbackRequest,
+  type OidcLoginStartRequest,
+  type OidcLoginStartResponse,
+  type OidcPublicProviderListResponse,
   type MemberInvitation,
   type RegisterTenantRequest,
   type RequestPasswordResetRequest,
   type RequestPasswordResetResponse,
   type ResetMemberPasswordRequest,
   type ResetMemberPasswordResponse,
+  type CreateRoleBlueprintRequest,
+  type CreateRoleVersionDraftRequest,
+  type ReviewRoleVersionRequest,
+  type RoleBlueprint,
+  type RoleBlueprintListResponse,
+  type RoleAssignmentCandidateListResponse,
+  type RoleAssignment,
+  type RoleAssignmentListResponse,
+  type RoleVersion,
+  type PublishRoleVersionRequest,
+  type RoleVersionTransitionRequest,
+  type RollbackRoleVersionRequest,
+  type RollbackRoleVersionResponse,
+  type CreateRoleAssignmentRequest,
+  type RevokeRoleAssignmentRequest,
   type RollbackKnowledgeDocumentVersionRequest,
+  type PublishKnowledgeDocumentVersionRequest,
   type UpdateKnowledgeBaseRequest,
   type UpdateKnowledgeDocumentRequest,
+  type CreateKnowledgeSourceConnectorRequest,
+  type UpdateKnowledgeSourceConnectorRequest,
+  type KnowledgeSourceConnector,
+  type KnowledgeSourceConnectorListResponse,
+  type KnowledgeSourceSyncRun,
   type UpdateMemberRequest,
   type UpdateAdminAgentRequest,
   type UpdateAgentUsageLimitsRequest,
   type UpdateOrganizationRequest,
   type UpdateOrgUnitRequest,
+  type UpdateRoleBlueprintRequest,
+  type UpdateRoleVersionDraftRequest,
+  type ToolDefinition,
+  type ToolDefinitionDetail,
+  type ToolDefinitionListResponse,
+  type ToolVersion,
+  type ToolVersionLifecycleRequest,
 } from '@enterprise/contracts';
 import { z } from 'zod';
 
-import { request } from './client';
+import { request, requestBlob, type BinaryApiResponse } from './client';
 
 const mutationResponseSchema = z.unknown();
+const experienceListResponseSchema = z
+  .object({
+    items: z.array(experienceCandidateSchema),
+    nextCursor: z.string().nullable(),
+  })
+  .strict();
 
-export function login(input: LoginRequest): Promise<AuthSessionResponse> {
-  return request('/auth/login', {
+export interface ExperienceListResponse {
+  readonly items: readonly ExperienceCandidate[];
+  readonly nextCursor: string | null;
+}
+
+export function login(input: LoginRequest): Promise<BrowserLoginResult> {
+  return request('/auth/browser/login', {
     method: 'POST',
     body: loginRequestSchema.parse({ ...input, sessionLabel: '管理后台' }),
-    schema: authSessionResponseSchema,
+    schema: browserLoginResultSchema,
     authenticated: false,
   });
 }
 
-export function registerTenant(input: RegisterTenantRequest): Promise<AuthSessionResponse> {
-  return request('/auth/register-tenant', {
+export function completeMfaLogin(
+  input: MfaLoginVerifyRequest,
+): Promise<BrowserAuthSessionResponse> {
+  return request('/auth/browser/mfa/login/verify', {
+    method: 'POST',
+    body: mfaLoginVerifyRequestSchema.parse(input),
+    schema: browserAuthSessionResponseSchema,
+    authenticated: false,
+  });
+}
+
+export function listOidcLoginProviders(
+  tenantSlug: string,
+): Promise<OidcPublicProviderListResponse> {
+  return request(`/auth/oidc/providers/${encodeURIComponent(tenantSlug.trim().toLowerCase())}`, {
+    schema: oidcPublicProviderListResponseSchema,
+    authenticated: false,
+  });
+}
+
+export function startOidcLogin(input: OidcLoginStartRequest): Promise<OidcLoginStartResponse> {
+  return request('/auth/oidc/start', {
+    method: 'POST',
+    body: oidcLoginStartRequestSchema.parse(input),
+    schema: oidcLoginStartResponseSchema,
+    authenticated: false,
+  });
+}
+
+export function completeOidcLogin(
+  input: OidcLoginCallbackRequest,
+): Promise<BrowserAuthSessionResponse> {
+  return request('/auth/browser/oidc/callback', {
+    method: 'POST',
+    body: oidcLoginCallbackRequestSchema.parse(input),
+    schema: browserAuthSessionResponseSchema,
+    authenticated: false,
+  });
+}
+
+export function registerTenant(input: RegisterTenantRequest): Promise<BrowserAuthSessionResponse> {
+  return request('/auth/browser/register-tenant', {
     method: 'POST',
     body: registerTenantRequestSchema.parse({ ...input, sessionLabel: '管理后台' }),
-    schema: authSessionResponseSchema,
+    schema: browserAuthSessionResponseSchema,
     authenticated: false,
   });
 }
 
-export function logout(refreshToken: string): Promise<unknown> {
-  return request('/auth/logout', {
+export function currentBrowserSession(): Promise<BrowserAuthSessionResponse> {
+  return request('/auth/me', {
+    schema: currentSessionResponseSchema,
+  }).then((account: CurrentSessionResponse) => ({ account }));
+}
+
+export function logout(): Promise<unknown> {
+  return request('/auth/browser/logout', {
     method: 'POST',
-    body: { refreshToken },
     schema: mutationResponseSchema,
   });
 }
@@ -179,10 +408,38 @@ export function getFeishuOrganizationSyncStatus(
   });
 }
 
-export function startFeishuOrganizationSync(): Promise<FeishuOrganizationSyncStatus> {
-  return request('/admin/integrations/feishu/organization-sync', {
+export function getFeishuDirectoryPreview(
+  signal?: AbortSignal,
+): Promise<FeishuDirectoryPreview | null> {
+  return request('/admin/integrations/feishu/organization-sync/preview', {
+    schema: feishuDirectoryPreviewSchema.nullable(),
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function createFeishuDirectoryPreview(): Promise<FeishuDirectoryPreview> {
+  return request('/admin/integrations/feishu/organization-sync/preview', {
     method: 'POST',
-    schema: feishuOrganizationSyncStatusSchema,
+    schema: feishuDirectoryPreviewSchema,
+  });
+}
+
+export function applyFeishuDirectoryPreview(
+  input: ApplyFeishuDirectoryPreviewRequest,
+): Promise<FeishuDirectorySyncRunDetail> {
+  return request('/admin/integrations/feishu/organization-sync/runs', {
+    method: 'POST',
+    body: applyFeishuDirectoryPreviewRequestSchema.parse(input),
+    schema: feishuDirectorySyncRunDetailSchema,
+  });
+}
+
+export function listFeishuDirectorySyncRuns(
+  signal?: AbortSignal,
+): Promise<FeishuDirectorySyncRunList> {
+  return request('/admin/integrations/feishu/organization-sync/runs', {
+    schema: feishuDirectorySyncRunListSchema,
+    ...(signal ? { signal } : {}),
   });
 }
 
@@ -194,6 +451,80 @@ export function bindFeishuOrganization(
     body: bindFeishuOrganizationRequestSchema.parse(input),
     schema: feishuOrganizationSyncStatusSchema,
   });
+}
+
+export function getLexiangKnowledgeConnection(
+  signal?: AbortSignal,
+): Promise<KnowledgeProviderConnectionResponse> {
+  return request('/admin/integrations/knowledge/lexiang/connection', {
+    schema: knowledgeProviderConnectionResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function connectLexiangKnowledge(
+  input: CreateLexiangConnectionRequest,
+): Promise<KnowledgeProviderConnectionResponse> {
+  return request('/admin/integrations/knowledge/lexiang/connection', {
+    method: 'PUT',
+    body: createLexiangConnectionRequestSchema.parse(input),
+    schema: knowledgeProviderConnectionResponseSchema,
+  });
+}
+
+export function discoverLexiangKnowledgeConnection(
+  input: DiscoverLexiangConnectionRequest,
+): Promise<LexiangConnectionDiscoveryResponse> {
+  return request('/admin/integrations/knowledge/lexiang/discovery', {
+    method: 'POST',
+    body: discoverLexiangConnectionRequestSchema.parse(input),
+    schema: lexiangConnectionDiscoveryResponseSchema,
+  });
+}
+
+export function checkLexiangKnowledgeHealth(): Promise<KnowledgeProviderHealthCheckResponse> {
+  return request('/admin/integrations/knowledge/lexiang/health-check', {
+    method: 'POST',
+    schema: knowledgeProviderHealthCheckResponseSchema,
+  });
+}
+
+export function disableLexiangKnowledge(): Promise<KnowledgeProviderConnectionResponse> {
+  return request('/admin/integrations/knowledge/lexiang/connection', {
+    method: 'DELETE',
+    schema: knowledgeProviderConnectionResponseSchema,
+  });
+}
+
+export function getLexiangUserBindings(
+  signal?: AbortSignal,
+): Promise<KnowledgeProviderUserBindingsResponse> {
+  return request('/admin/integrations/knowledge/lexiang/user-bindings', {
+    schema: knowledgeProviderUserBindingsResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function bindLexiangUser(
+  input: BindLexiangUserRequest,
+): Promise<KnowledgeProviderUserBindingsResponse> {
+  return request('/admin/integrations/knowledge/lexiang/user-bindings', {
+    method: 'PUT',
+    body: bindLexiangUserRequestSchema.parse(input),
+    schema: knowledgeProviderUserBindingsResponseSchema,
+  });
+}
+
+export function disableLexiangUserBinding(
+  userId: string,
+): Promise<KnowledgeProviderUserBindingsResponse> {
+  return request(
+    `/admin/integrations/knowledge/lexiang/user-bindings/${encodeURIComponent(userId)}`,
+    {
+      method: 'DELETE',
+      schema: knowledgeProviderUserBindingsResponseSchema,
+    },
+  );
 }
 
 export function updateOrganization(input: UpdateOrganizationRequest): Promise<unknown> {
@@ -255,6 +586,15 @@ export function inviteMember(input: InviteMemberRequest): Promise<IssueMemberInv
   });
 }
 
+export function issueDirectoryMemberInvitation(
+  memberId: string,
+): Promise<IssueMemberInvitationResponse> {
+  return request(`/admin/members/${encodeURIComponent(memberId)}/invitation`, {
+    method: 'POST',
+    schema: issueMemberInvitationResponseSchema,
+  });
+}
+
 export function resendMemberInvitation(memberId: string): Promise<IssueMemberInvitationResponse> {
   return request(`/admin/members/${encodeURIComponent(memberId)}/invitation/resend`, {
     method: 'POST',
@@ -285,6 +625,14 @@ export function listAgents(signal?: AbortSignal): Promise<AdminAgentListResponse
   return request('/admin/agents', {
     schema: adminAgentListResponseSchema,
     ...(signal ? { signal } : {}),
+  });
+}
+
+export function createDepartmentAgent(input: CreateDepartmentAgentRequest): Promise<AdminAgent> {
+  return request('/admin/agents/departments', {
+    method: 'POST',
+    body: createDepartmentAgentRequestSchema.parse(input),
+    schema: adminAgentSchema,
   });
 }
 
@@ -320,11 +668,379 @@ export function updateAgent(id: string, input: UpdateAdminAgentRequest): Promise
   });
 }
 
+export function listRoleAssignments(signal?: AbortSignal): Promise<RoleAssignmentListResponse> {
+  return request('/admin/role-assignments', {
+    schema: roleAssignmentListResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function listExperienceCandidates(
+  input: { readonly status?: ExperienceCandidate['status']; readonly limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<ExperienceListResponse> {
+  const search = new URLSearchParams({ limit: String(input.limit ?? 100) });
+  if (input.status) search.set('status', input.status);
+  return request(`/admin/experiences?${search.toString()}`, {
+    schema: experienceListResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function getExperienceCandidate(
+  experienceId: string,
+  signal?: AbortSignal,
+): Promise<ExperienceCandidate> {
+  return request(`/admin/experiences/${encodeURIComponent(experienceId)}`, {
+    schema: experienceCandidateSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function createExperienceCandidate(
+  input: CreateExperienceCandidateRequest,
+): Promise<ExperienceCandidate> {
+  return request('/admin/experiences', {
+    method: 'POST',
+    body: createExperienceCandidateRequestSchema.parse(input),
+    schema: experienceCandidateSchema,
+  });
+}
+
+export function transitionExperienceCandidate(
+  experienceId: string,
+  input: ExperienceTransitionRequest,
+): Promise<ExperienceCandidate> {
+  return request(`/admin/experiences/${encodeURIComponent(experienceId)}/transitions`, {
+    method: 'POST',
+    body: experienceTransitionRequestSchema.parse(input),
+    schema: experienceCandidateSchema,
+  });
+}
+
+export function getExperienceKnowledgeProjection(
+  experienceId: string,
+  signal?: AbortSignal,
+): Promise<ExperienceKnowledgeProjection> {
+  return request(`/admin/experiences/${encodeURIComponent(experienceId)}/knowledge-projection`, {
+    schema: experienceKnowledgeProjectionSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function prepareExperienceKnowledgeProjection(
+  experienceId: string,
+  input: PrepareExperienceKnowledgeProjectionRequest,
+): Promise<ExperienceKnowledgeProjection> {
+  return request(`/admin/experiences/${encodeURIComponent(experienceId)}/knowledge-projection`, {
+    method: 'POST',
+    body: prepareExperienceKnowledgeProjectionRequestSchema.parse(input),
+    schema: experienceKnowledgeProjectionSchema,
+  });
+}
+
+export function listToolDefinitions(signal?: AbortSignal): Promise<ToolDefinitionListResponse> {
+  return request('/admin/tool-definitions', {
+    schema: toolDefinitionListResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function getToolDefinition(
+  toolId: string,
+  signal?: AbortSignal,
+): Promise<ToolDefinitionDetail> {
+  return request(`/admin/tool-definitions/${encodeURIComponent(toolId)}`, {
+    schema: toolDefinitionDetailSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function createToolDefinition(input: CreateToolDefinitionRequest): Promise<ToolDefinition> {
+  return request('/admin/tool-definitions', {
+    method: 'POST',
+    body: createToolDefinitionRequestSchema.parse(input),
+    schema: toolDefinitionSchema,
+  });
+}
+
+export function createToolVersion(
+  toolId: string,
+  input: CreateToolVersionRequest,
+): Promise<ToolVersion> {
+  return request(`/admin/tool-definitions/${encodeURIComponent(toolId)}/versions`, {
+    method: 'POST',
+    body: createToolVersionRequestSchema.parse(input),
+    schema: toolVersionSchema,
+  });
+}
+
+export function transitionToolVersion(
+  toolId: string,
+  toolVersionId: string,
+  input: ToolVersionLifecycleRequest,
+): Promise<ToolDefinitionDetail> {
+  return request(
+    `/admin/tool-definitions/${encodeURIComponent(toolId)}/versions/${encodeURIComponent(toolVersionId)}/lifecycle`,
+    {
+      method: 'POST',
+      body: toolVersionLifecycleRequestSchema.parse(input),
+      schema: toolDefinitionDetailSchema,
+    },
+  );
+}
+
+export function createRoleAssignment(input: CreateRoleAssignmentRequest): Promise<RoleAssignment> {
+  return request('/admin/role-assignments', {
+    method: 'POST',
+    body: createRoleAssignmentRequestSchema.parse(input),
+    schema: roleAssignmentSchema,
+  });
+}
+
+export function revokeRoleAssignment(
+  id: string,
+  input: RevokeRoleAssignmentRequest,
+): Promise<RoleAssignment> {
+  return request(`/admin/role-assignments/${encodeURIComponent(id)}/revoke`, {
+    method: 'POST',
+    body: revokeRoleAssignmentRequestSchema.parse(input),
+    schema: roleAssignmentSchema,
+  });
+}
+
+export function listRoleAssignmentCandidates(
+  signal?: AbortSignal,
+): Promise<RoleAssignmentCandidateListResponse> {
+  return request('/admin/role-blueprints/assignment-candidates', {
+    schema: roleAssignmentCandidateListResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function listRoleBlueprints(signal?: AbortSignal): Promise<RoleBlueprintListResponse> {
+  return request('/admin/role-blueprints', {
+    schema: roleBlueprintListResponseSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function createRoleBlueprint(input: CreateRoleBlueprintRequest): Promise<RoleBlueprint> {
+  return request('/admin/role-blueprints', {
+    method: 'POST',
+    body: createRoleBlueprintRequestSchema.parse(input),
+    schema: roleBlueprintSchema,
+  });
+}
+
+export function updateRoleBlueprint(
+  blueprintId: string,
+  input: UpdateRoleBlueprintRequest,
+): Promise<RoleBlueprint> {
+  return request(`/admin/role-blueprints/${encodeURIComponent(blueprintId)}`, {
+    method: 'PATCH',
+    body: updateRoleBlueprintRequestSchema.parse(input),
+    schema: roleBlueprintSchema,
+  });
+}
+
+export function createRoleVersionDraft(
+  blueprintId: string,
+  input: CreateRoleVersionDraftRequest,
+): Promise<RoleVersion> {
+  return request(`/admin/role-blueprints/${encodeURIComponent(blueprintId)}/versions`, {
+    method: 'POST',
+    body: createRoleVersionDraftRequestSchema.parse(input),
+    schema: roleVersionSchema,
+  });
+}
+
+export function updateRoleVersionDraft(
+  blueprintId: string,
+  versionId: string,
+  input: UpdateRoleVersionDraftRequest,
+): Promise<RoleVersion> {
+  return request(
+    `/admin/role-blueprints/${encodeURIComponent(blueprintId)}/versions/${encodeURIComponent(versionId)}`,
+    {
+      method: 'PATCH',
+      body: updateRoleVersionDraftRequestSchema.parse(input),
+      schema: roleVersionSchema,
+    },
+  );
+}
+
+export function submitRoleVersion(
+  blueprintId: string,
+  versionId: string,
+  input: RoleVersionTransitionRequest,
+): Promise<RoleVersion> {
+  return transitionRoleVersion(blueprintId, versionId, 'submit', input);
+}
+
+export function reviewRoleVersion(
+  blueprintId: string,
+  versionId: string,
+  input: ReviewRoleVersionRequest,
+): Promise<RoleVersion> {
+  return request(
+    `/admin/role-blueprints/${encodeURIComponent(blueprintId)}/versions/${encodeURIComponent(versionId)}/review`,
+    {
+      method: 'POST',
+      body: reviewRoleVersionRequestSchema.parse(input),
+      schema: roleVersionSchema,
+    },
+  );
+}
+
+export function publishRoleVersion(
+  blueprintId: string,
+  versionId: string,
+  input: PublishRoleVersionRequest,
+): Promise<RoleVersion> {
+  return request(
+    `/admin/role-blueprints/${encodeURIComponent(blueprintId)}/versions/${encodeURIComponent(versionId)}/publish`,
+    {
+      method: 'POST',
+      body: publishRoleVersionRequestSchema.parse(input),
+      schema: roleVersionSchema,
+    },
+  );
+}
+
+export function retireRoleVersion(
+  blueprintId: string,
+  versionId: string,
+  input: RoleVersionTransitionRequest,
+): Promise<RoleVersion> {
+  return transitionRoleVersion(blueprintId, versionId, 'retire', input);
+}
+
+export function rollbackRoleVersion(
+  blueprintId: string,
+  sourceVersionId: string,
+  input: RollbackRoleVersionRequest,
+): Promise<RollbackRoleVersionResponse> {
+  return request(
+    `/admin/role-blueprints/${encodeURIComponent(blueprintId)}/versions/${encodeURIComponent(sourceVersionId)}/rollback`,
+    {
+      method: 'POST',
+      body: rollbackRoleVersionRequestSchema.parse(input),
+      schema: rollbackRoleVersionResponseSchema,
+    },
+  );
+}
+
+function transitionRoleVersion(
+  blueprintId: string,
+  versionId: string,
+  action: 'submit' | 'retire',
+  input: RoleVersionTransitionRequest,
+): Promise<RoleVersion> {
+  return request(
+    `/admin/role-blueprints/${encodeURIComponent(blueprintId)}/versions/${encodeURIComponent(versionId)}/${action}`,
+    {
+      method: 'POST',
+      body: roleVersionTransitionRequestSchema.parse(input),
+      schema: roleVersionSchema,
+    },
+  );
+}
+
 export function listKnowledgeBases(signal?: AbortSignal): Promise<KnowledgeBaseListResponse> {
   return request('/admin/knowledge-bases', {
     schema: knowledgeBaseListResponseSchema,
     ...(signal ? { signal } : {}),
   });
+}
+
+export function listKnowledgeEmbeddingIndexVersions(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeEmbeddingIndexVersionListResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/embedding-index-versions`,
+    {
+      schema: knowledgeEmbeddingIndexVersionListResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function createKnowledgeEmbeddingIndexVersion(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeEmbeddingIndexVersionRequest,
+): Promise<KnowledgeEmbeddingIndexVersion> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/embedding-index-versions`,
+    {
+      method: 'POST',
+      body: createKnowledgeEmbeddingIndexVersionRequestSchema.parse(input),
+      schema: knowledgeEmbeddingIndexVersionSchema,
+    },
+  );
+}
+
+export function activateKnowledgeEmbeddingIndexVersion(
+  knowledgeBaseId: string,
+  embeddingIndexVersionId: string,
+): Promise<KnowledgeBase> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/embedding-index-versions/${encodeURIComponent(embeddingIndexVersionId)}/activate`,
+    { method: 'POST', schema: knowledgeBaseSchema },
+  );
+}
+
+export function listKnowledgeSourceConnectors(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeSourceConnectorListResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors`,
+    {
+      schema: knowledgeSourceConnectorListResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function createKnowledgeSourceConnector(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeSourceConnectorRequest,
+): Promise<KnowledgeSourceConnector> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors`,
+    {
+      method: 'POST',
+      body: createKnowledgeSourceConnectorRequestSchema.parse(input),
+      schema: knowledgeSourceConnectorSchema,
+    },
+  );
+}
+
+export function updateKnowledgeSourceConnector(
+  knowledgeBaseId: string,
+  connectorId: string,
+  input: UpdateKnowledgeSourceConnectorRequest,
+): Promise<KnowledgeSourceConnector> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors/${encodeURIComponent(connectorId)}`,
+    {
+      method: 'PATCH',
+      body: updateKnowledgeSourceConnectorRequestSchema.parse(input),
+      schema: knowledgeSourceConnectorSchema,
+    },
+  );
+}
+
+export function syncKnowledgeSourceConnector(
+  knowledgeBaseId: string,
+  connectorId: string,
+): Promise<KnowledgeSourceSyncRun> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/source-connectors/${encodeURIComponent(connectorId)}/sync`,
+    { method: 'POST', schema: knowledgeSourceSyncRunSchema },
+  );
 }
 
 export function getKnowledgeBaseReadiness(
@@ -335,6 +1051,146 @@ export function getKnowledgeBaseReadiness(
     schema: knowledgeBaseIndexReadinessSchema,
     ...(signal ? { signal } : {}),
   });
+}
+
+export function getKnowledgeGraphOverview(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeGraphOverview> {
+  return request(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-overview`, {
+    schema: knowledgeGraphOverviewSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function getKnowledgeGraph(
+  knowledgeBaseId: string,
+  input: KnowledgeGraphQuery = { limit: 50 },
+  signal?: AbortSignal,
+): Promise<KnowledgeGraphResponse> {
+  const parsed = knowledgeGraphQuerySchema.parse(input);
+  const search = new URLSearchParams({ limit: String(parsed.limit) });
+  if (parsed.query) search.set('query', parsed.query);
+  if (parsed.entityType) search.set('entityType', parsed.entityType);
+  if (parsed.focusEntityId) search.set('focusEntityId', parsed.focusEntityId);
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph?${search.toString()}`,
+    {
+      schema: knowledgeGraphResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function getKnowledgeGraphGovernance(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeGraphGovernanceOverview> {
+  return request(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance`, {
+    schema: knowledgeGraphGovernanceOverviewSchema,
+    ...(signal ? { signal } : {}),
+  });
+}
+
+export function createKnowledgeOntology(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeOntologyRequest,
+): Promise<KnowledgeOntology> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/ontologies`,
+    {
+      method: 'POST',
+      body: createKnowledgeOntologyRequestSchema.parse(input),
+      schema: knowledgeOntologySchema,
+    },
+  );
+}
+
+export function createKnowledgeOntologyVersion(
+  knowledgeBaseId: string,
+  ontologyId: string,
+  input: CreateKnowledgeOntologyVersionRequest,
+): Promise<KnowledgeOntologyVersion> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/ontologies/${encodeURIComponent(ontologyId)}/versions`,
+    {
+      method: 'POST',
+      body: createKnowledgeOntologyVersionRequestSchema.parse(input),
+      schema: knowledgeOntologyVersionSchema,
+    },
+  );
+}
+
+export function transitionKnowledgeOntologyVersion(
+  knowledgeBaseId: string,
+  versionId: string,
+  input: TransitionKnowledgeOntologyVersionRequest,
+): Promise<KnowledgeOntologyVersion> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/ontology-versions/${encodeURIComponent(versionId)}/transitions`,
+    {
+      method: 'POST',
+      body: transitionKnowledgeOntologyVersionRequestSchema.parse(input),
+      schema: knowledgeOntologyVersionSchema,
+    },
+  );
+}
+
+export function createKnowledgeGraphConflict(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeGraphConflictRequest,
+): Promise<KnowledgeGraphConflict> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/conflicts`,
+    {
+      method: 'POST',
+      body: createKnowledgeGraphConflictRequestSchema.parse(input),
+      schema: knowledgeGraphConflictSchema,
+    },
+  );
+}
+
+export function createKnowledgeGraphCorrection(
+  knowledgeBaseId: string,
+  input: CreateKnowledgeGraphCorrectionRequest,
+): Promise<KnowledgeGraphCorrection> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/corrections`,
+    {
+      method: 'POST',
+      body: createKnowledgeGraphCorrectionRequestSchema.parse(input),
+      schema: knowledgeGraphCorrectionSchema,
+    },
+  );
+}
+
+export function transitionKnowledgeGraphCorrection(
+  knowledgeBaseId: string,
+  correctionId: string,
+  input: TransitionKnowledgeGraphCorrectionRequest,
+): Promise<KnowledgeGraphCorrection> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/corrections/${encodeURIComponent(correctionId)}/transitions`,
+    {
+      method: 'POST',
+      body: transitionKnowledgeGraphCorrectionRequestSchema.parse(input),
+      schema: knowledgeGraphCorrectionSchema,
+    },
+  );
+}
+
+export function transitionKnowledgeGraphRelationCorrectionBatch(
+  knowledgeBaseId: string,
+  input: TransitionKnowledgeGraphCorrectionBatchRequest,
+): Promise<KnowledgeGraphCorrectionBatchResult> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph-governance/relation-corrections/batch-transitions`,
+    {
+      method: 'POST',
+      body: transitionKnowledgeGraphCorrectionBatchRequestSchema.parse(input),
+      schema: knowledgeGraphCorrectionBatchResultSchema,
+    },
+  );
 }
 
 export function createKnowledgeBase(input: CreateKnowledgeBaseRequest): Promise<KnowledgeBase> {
@@ -354,6 +1210,42 @@ export function updateKnowledgeBase(
     body: updateKnowledgeBaseRequestSchema.parse(input),
     schema: mutationResponseSchema,
   });
+}
+
+export function deleteKnowledgeBase(id: string, expectedVersion: number): Promise<KnowledgeBase> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(id)}?expectedVersion=${encodeURIComponent(expectedVersion)}`,
+    { method: 'DELETE', schema: knowledgeBaseSchema },
+  );
+}
+
+export function syncExternalKnowledgeBase(id: string): Promise<KnowledgeBase> {
+  return request(`/admin/knowledge-bases/${encodeURIComponent(id)}/external-sync`, {
+    method: 'POST',
+    schema: knowledgeBaseSchema,
+  });
+}
+
+export function syncLexiangKnowledgeBases(): Promise<LexiangSpaceSyncResponse> {
+  return request('/admin/knowledge-bases/lexiang-sync', {
+    method: 'POST',
+    schema: lexiangSpaceSyncResponseSchema,
+  });
+}
+
+export function updateKnowledgeDocumentAccess(
+  knowledgeBaseId: string,
+  documentId: string,
+  input: UpdateKnowledgeDocumentAccessRequest,
+): Promise<KnowledgeDocument> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/access`,
+    {
+      method: 'PATCH',
+      body: updateKnowledgeDocumentAccessRequestSchema.parse(input),
+      schema: knowledgeDocumentSchema,
+    },
+  );
 }
 
 export function createKnowledgeDocument(
@@ -393,6 +1285,33 @@ export function getKnowledgeDocumentVersion(
       schema: knowledgeDocumentVersionDetailSchema,
       ...(signal ? { signal } : {}),
     },
+  );
+}
+
+export function getKnowledgeStructuredDocumentPreview(
+  knowledgeBaseId: string,
+  documentId: string,
+  documentVersionId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeStructuredDocumentPreview> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(documentVersionId)}/structured`,
+    {
+      schema: knowledgeStructuredDocumentPreviewSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function getKnowledgeDocumentSource(
+  knowledgeBaseId: string,
+  documentId: string,
+  documentVersionId: string,
+  signal?: AbortSignal,
+): Promise<BinaryApiResponse> {
+  return requestBlob(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(documentVersionId)}/source`,
+    signal,
   );
 }
 
@@ -444,12 +1363,22 @@ export function archiveKnowledgeDocument(
 
 export function uploadKnowledgeDocument(
   knowledgeBaseId: string,
-  input: { file: File; title: string; changeSummary?: string },
+  input: {
+    file: File;
+    title: string;
+    changeSummary?: string;
+    governance?: KnowledgeDocumentGovernancePolicy;
+    folderId?: string | null;
+  },
 ): Promise<KnowledgeDocument> {
   const body = new FormData();
   body.append('file', input.file, input.file.name);
   body.append('title', input.title.trim());
+  if (input.folderId !== undefined) body.append('folderId', input.folderId ?? 'null');
   if (input.changeSummary?.trim()) body.append('changeSummary', input.changeSummary.trim());
+  if (input.governance !== undefined) {
+    body.append('governance', JSON.stringify(input.governance));
+  }
 
   return request(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/upload`, {
     method: 'POST',
@@ -458,14 +1387,133 @@ export function uploadKnowledgeDocument(
   });
 }
 
+export function ensureKnowledgeFolders(
+  knowledgeBaseId: string,
+  input: EnsureKnowledgeFoldersRequest,
+): Promise<KnowledgeFolderListResponse> {
+  return request(`/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/folders/ensure`, {
+    method: 'POST',
+    body: ensureKnowledgeFoldersRequestSchema.parse(input),
+    schema: knowledgeFolderListResponseSchema,
+  });
+}
+
+export function deleteKnowledgeFolder(
+  knowledgeBaseId: string,
+  folderId: string,
+): Promise<KnowledgeFolderListResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/folders/${encodeURIComponent(folderId)}`,
+    { method: 'DELETE', schema: knowledgeFolderListResponseSchema },
+  );
+}
+
+export function inspectKnowledgeUpload(
+  knowledgeBaseId: string,
+  input: InspectKnowledgeUploadRequest,
+  signal?: AbortSignal,
+): Promise<KnowledgeUploadInspection> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/upload-inspection`,
+    {
+      method: 'POST',
+      body: inspectKnowledgeUploadRequestSchema.parse(input),
+      schema: knowledgeUploadInspectionSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function importKnowledgeWebDocument(
+  knowledgeBaseId: string,
+  input: ImportKnowledgeWebDocumentRequest,
+): Promise<KnowledgeDocument> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/import-web`,
+    {
+      method: 'POST',
+      body: importKnowledgeWebDocumentRequestSchema.parse(input),
+      schema: knowledgeDocumentSchema,
+    },
+  );
+}
+
+export function listPendingKnowledgeParseReviews(
+  knowledgeBaseId: string,
+  signal?: AbortSignal,
+): Promise<KnowledgeParseReviewQueueResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/parse-review-queue`,
+    {
+      schema: knowledgeParseReviewQueueResponseSchema,
+      ...(signal ? { signal } : {}),
+    },
+  );
+}
+
+export function reviewKnowledgeDocumentParse(
+  knowledgeBaseId: string,
+  documentId: string,
+  versionId: string,
+  input: ReviewKnowledgeDocumentParseRequest,
+): Promise<KnowledgeDocumentVersionDetail> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/parse-review`,
+    {
+      method: 'POST',
+      body: reviewKnowledgeDocumentParseRequestSchema.parse(input),
+      schema: knowledgeDocumentVersionDetailSchema,
+    },
+  );
+}
+
+export function updateKnowledgeDocumentVersionGovernance(
+  knowledgeBaseId: string,
+  documentId: string,
+  versionId: string,
+  input: UpdateKnowledgeDocumentVersionGovernanceRequest,
+): Promise<KnowledgeDocumentVersionDetail> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/governance`,
+    {
+      method: 'PATCH',
+      body: updateKnowledgeDocumentVersionGovernanceRequestSchema.parse(input),
+      schema: knowledgeDocumentVersionDetailSchema,
+    },
+  );
+}
+
+export function reviewKnowledgeDocumentGovernance(
+  knowledgeBaseId: string,
+  documentId: string,
+  versionId: string,
+  input: ReviewKnowledgeDocumentGovernanceRequest,
+): Promise<KnowledgeDocumentVersionDetail> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/governance-review`,
+    {
+      method: 'POST',
+      body: reviewKnowledgeDocumentGovernanceRequestSchema.parse(input),
+      schema: knowledgeDocumentVersionDetailSchema,
+    },
+  );
+}
+
 export function uploadKnowledgeDocumentVersion(
   knowledgeBaseId: string,
   documentId: string,
-  input: { file: File; changeSummary?: string },
+  input: {
+    file: File;
+    changeSummary?: string;
+    governance?: KnowledgeDocumentGovernancePolicy;
+  },
 ): Promise<KnowledgeDocument> {
   const body = new FormData();
   body.append('file', input.file, input.file.name);
   if (input.changeSummary?.trim()) body.append('changeSummary', input.changeSummary.trim());
+  if (input.governance !== undefined) {
+    body.append('governance', JSON.stringify(input.governance));
+  }
 
   return request(
     `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/upload`,
@@ -495,11 +1543,13 @@ export function publishKnowledgeDocumentVersion(
   knowledgeBaseId: string,
   documentId: string,
   versionId: string,
+  input: PublishKnowledgeDocumentVersionRequest,
 ): Promise<KnowledgeDocument> {
   return request(
     `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/publish`,
     {
       method: 'POST',
+      body: publishKnowledgeDocumentVersionRequestSchema.parse(input),
       schema: knowledgeDocumentSchema,
     },
   );
@@ -542,6 +1592,20 @@ export function rebuildKnowledgeDocumentEmbeddings(
     {
       method: 'POST',
       schema: knowledgeEmbeddingRebuildResponseSchema,
+    },
+  );
+}
+
+export function rebuildKnowledgeDocumentGraph(
+  knowledgeBaseId: string,
+  documentId: string,
+  versionId: string,
+): Promise<KnowledgeGraphRebuildResponse> {
+  return request(
+    `/admin/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}/versions/${encodeURIComponent(versionId)}/rebuild-graph`,
+    {
+      method: 'POST',
+      schema: knowledgeGraphRebuildResponseSchema,
     },
   );
 }

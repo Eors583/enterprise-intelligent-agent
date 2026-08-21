@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import type { DesktopAuthState } from '../../../shared/desktop-api';
 import { AuthScreen } from '../features/auth/AuthScreen';
-import { AccountSwitcher } from '../features/auth/AccountSwitcher';
+import { AccountSwitcher, type AccountMenuDestination } from '../features/auth/AccountSwitcher';
 import { PasswordChangeScreen } from '../features/auth/PasswordChangeScreen';
 import { BootstrapError, fetchBootstrap } from '../features/directory/bootstrap';
 import { DirectoryWorkspace } from '../features/directory/DirectoryWorkspace';
@@ -10,10 +10,23 @@ import { setExpectedDesktopSessionId } from '../shared/api/client';
 
 export function App(): React.JSX.Element {
   const queryClient = useQueryClient();
+  const desktopBridge = window.enterpriseDesktop;
   const [authState, setAuthState] = useState<DesktopAuthState | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
   const [showAddAccount, setShowAddAccount] = useState(false);
   const [showPasswordChange, setShowPasswordChange] = useState(false);
+  const [accountMenuRequest, setAccountMenuRequest] = useState(0);
+  const [workspaceNavigationRequest, setWorkspaceNavigationRequest] = useState<{
+    destination: AccountMenuDestination;
+    requestId: number;
+  } | null>(null);
+
+  const navigateFromAccountMenu = useCallback((destination: AccountMenuDestination): void => {
+    setWorkspaceNavigationRequest((current) => ({
+      destination,
+      requestId: (current?.requestId ?? 0) + 1,
+    }));
+  }, []);
 
   const acceptAuthState = useCallback(
     async (next: DesktopAuthState): Promise<void> => {
@@ -28,10 +41,15 @@ export function App(): React.JSX.Element {
   );
 
   useEffect(() => {
-    const unsubscribe = window.enterpriseDesktop.onAuthStateChanged((next) => {
+    if (!desktopBridge) {
+      setAuthError('桌面安全桥未加载，请重新启动应用；若问题持续，请联系管理员。');
+      return;
+    }
+
+    const unsubscribe = desktopBridge.onAuthStateChanged((next) => {
       void acceptAuthState(next);
     });
-    void window.enterpriseDesktop
+    void desktopBridge
       .getAuthState()
       .then(acceptAuthState)
       .catch((error: unknown) => setAuthError(readableError(error)));
@@ -39,7 +57,7 @@ export function App(): React.JSX.Element {
       unsubscribe();
       setExpectedDesktopSessionId(null);
     };
-  }, [acceptAuthState]);
+  }, [acceptAuthState, desktopBridge]);
 
   const activeAccount = useMemo(
     () => authState?.accounts.find((item) => item.sessionId === authState.activeSessionId) ?? null,
@@ -86,6 +104,7 @@ export function App(): React.JSX.Element {
           onStateChange={acceptAuthState}
           onAddAccount={() => setShowAddAccount(true)}
           onChangePassword={() => setShowPasswordChange(true)}
+          onNavigate={navigateFromAccountMenu}
         />
         <FailureScreen
           error={error}
@@ -113,12 +132,20 @@ export function App(): React.JSX.Element {
 
   return (
     <>
-      <DirectoryWorkspace payload={bootstrap.data} />
+      <DirectoryWorkspace
+        key={activeAccount.sessionId}
+        payload={bootstrap.data}
+        navigationRequest={workspaceNavigationRequest}
+        onOpenAccountMenu={() => setAccountMenuRequest((value) => value + 1)}
+        onChangePassword={() => setShowPasswordChange(true)}
+      />
       <AccountSwitcher
         state={authState}
+        openRequest={accountMenuRequest}
         onStateChange={acceptAuthState}
         onAddAccount={() => setShowAddAccount(true)}
         onChangePassword={() => setShowPasswordChange(true)}
+        onNavigate={navigateFromAccountMenu}
       />
       {showAddAccount && (
         <AuthScreen

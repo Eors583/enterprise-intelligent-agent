@@ -1,0 +1,124 @@
+:root {
+  /* Typography */
+  --font-family-sans:
+    Inter, 'SF Pro Display', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+  --font-family-display: Georgia, serif;
+  --font-family-mono: ui-monospace, 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  --font-size-2xs: 0.5rem;
+  --font-size-xs: 0.625rem;
+  --font-size-sm: 0.6875rem;
+  --font-size-md: 0.75rem;
+  --font-size-lg: 0.8125rem;
+  --font-size-xl: 1rem;
+  --font-size-heading: 1.5rem;
+  --font-size-2xl: 1.8125rem;
+  --font-size-hero: clamp(2.25rem, 4vw, 3.625rem);
+  --font-weight-regular: 450;
+  --font-weight-medium: 600;
+  --font-weight-semibold: 650;
+  --font-weight-bold: 700;
+  --font-weight-heavy: 800;
+  --line-height-tight: 1.35;
+  --line-height-normal: 1.6;
+
+  /* Spacing: the only spacing scale used by product components. */
+  --space-0: 0;
+  --space-1: 0.125rem;
+  --space-2: 0.25rem;
+  --space-3: 0.375rem;
+  --space-4: 0.5rem;
+  --space-5: 0.625rem;
+  --space-6: 0.75rem;
+  --space-7: 0.875rem;
+  --space-8: 1rem;
+  --space-9: 1.125rem;
+  --space-10: 1.25rem;
+  --space-12: 1.5rem;
+
+  /* Radius */
+  --radius-xs: 0.4375rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 0.875rem;
+  --radius-pill: 999px;
+
+  /* Primitive palette */
+  --color-white: #ffffff;
+  --color-ink-950: #172321;
+  --color-ink-800: #203c36;
+  --color-ink-700: #28443d;
+  --color-ink-600: #415b54;
+  --color-ink-500: #5c706a;
+  --color-ink-400: #5f716c;
+  --color-ink-300: #9aa8a4;
+  --color-brand-700: #08645d;
+  --color-brand-600: #087f73;
+  --color-brand-100: #e3f4f0;
+  --color-neutral-50: #fbfdfc;
+  --color-neutral-75: #f8fbfa;
+  --color-neutral-100: #f7faf9;
+  --color-neutral-150: #f4f8f7;
+  --color-neutral-200: #eef7f4;
+  --color-neutral-250: #eaf1ef;
+  --color-neutral-300: #dfe8e5;
+  --color-neutral-350: #dfe9e6;
+  --color-neutral-400: #cbd8d4;
+  --color-danger-600: #c73e4d;
+
+  /* Semantic colors */
+  --color-text-primary: var(--color-ink-950);
+  --color-text-secondary: var(--color-ink-500);
+  --color-text-tertiary: var(--color-ink-400);
+  --color-text-disabled: var(--color-ink-300);
+  --color-text-on-brand: var(--color-white);
+  --color-border-default: var(--color-neutral-300);
+  --color-border-strong: var(--color-neutral-400);
+  --color-border-subtle: var(--color-neutral-350);
+  --color-surface-page: #f4f7f6;
+  --color-surface-primary: var(--color-white);
+  --color-surface-subtle: var(--color-neutral-100);
+  --color-surface-muted: var(--color-neutral-75);
+  --color-surface-selected: var(--color-brand-100);
+  --color-action-primary: var(--color-brand-600);
+  --color-action-primary-hover: var(--color-brand-700);
+  --color-action-danger: var(--color-danger-600);
+  --color-focus-ring: rgb(8 127 115 / 18%);
+  --color-brand-shadow: rgb(8 127 115 / 8%);
+
+  /* Elevation and motion */
+  --shadow-sm: 0 1px 2px rgb(20 44 38 / 5%);
+  --shadow-md: 0 16px 50px rgb(20 44 38 / 10%);
+  --shadow-focus: 0 0 0 2px var(--color-brand-shadow);
+  --motion-fast: 140ms ease;
+  --motion-normal: 160ms ease;
+
+  /* Control and knowledge-module component tokens */
+  --control-font-family: var(--font-family-sans);
+  --control-font-size: var(--font-size-md);
+  --control-font-weight: var(--font-weight-regular);
+  --control-line-height: var(--line-height-normal);
+  --control-height-sm: 2.125rem;
+  --control-height-md: 2.25rem;
+  --knowledge-layout-gap: var(--space-9);
+  --knowledge-panel-gap: var(--space-9);
+  --knowledge-tree-width-min: 16.875rem;
+  --knowledge-content-width-min: 32.5rem;
+  --knowledge-tree-row-height: 3.375rem;
+  --knowledge-document-row-height: 4.125rem;
+  --knowledge-folder-card-min-height: 9rem;
+  --knowledge-tab-height: 2.75rem;
+  --knowledge-drop-zone-height: 11.125rem;
+
+  /* Backward-compatible aliases; new styles use semantic names above. */
+  --ink: var(--color-text-primary);
+  --muted: var(--color-text-secondary);
+  --line: var(--color-border-default);
+  --line-strong: var(--color-border-strong);
+  --surface: var(--color-surface-primary);
+  --surface-soft: var(--color-surface-subtle);
+  --brand: var(--color-action-primary);
+  --brand-dark: var(--color-action-primary-hover);
+  --brand-soft: var(--color-surface-selected);
+  --danger: var(--color-action-danger);
+}

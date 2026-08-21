@@ -31,6 +31,18 @@ param(
 
   [switch]$InitializeBackupDirectory,
 
+  [ValidateRange(1, 15)]
+  [int]$RpoObjectiveMinutes = 15,
+
+  [ValidateRange(1, 240)]
+  [int]$RtoObjectiveMinutes = 240,
+
+  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:/-]{2,255}$')]
+  [string]$OffsiteRestoreEvidenceReference = '',
+
+  [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.:/-]{2,255}$')]
+  [string]$PitrReplayEvidenceReference = '',
+
   [switch]$AllowSharedCluster
 )
 
@@ -74,6 +86,7 @@ $backup = ConvertFrom-TrailingJson -Output $backupOutput
 if ([string]$backup.status -ne 'backup-created') {
   throw 'The backup operation did not report success.'
 }
+$incidentDeclaredAtUtc = [DateTimeOffset]::UtcNow
 
 $restoreArguments = @{
   Container = $RestoreContainer
@@ -88,6 +101,27 @@ if ([string]$restore.status -ne 'restore-verified' -or $restore.cleanupVerified 
   throw 'The restore rehearsal did not report a verified restore.'
 }
 
+$disasterRecoveryArguments = @{
+  ManifestPath = [string]$backup.manifestPath
+  RestoreReportPath = [System.IO.Path]::ChangeExtension([string]$backup.manifestPath, '.restore-report.json')
+  IncidentDeclaredAtUtc = $incidentDeclaredAtUtc
+  RpoObjectiveMinutes = $RpoObjectiveMinutes
+  RtoObjectiveMinutes = $RtoObjectiveMinutes
+}
+if (-not [string]::IsNullOrWhiteSpace($OffsiteRestoreEvidenceReference)) {
+  $disasterRecoveryArguments.OffsiteRestoreEvidenceReference = $OffsiteRestoreEvidenceReference
+}
+if (-not [string]::IsNullOrWhiteSpace($PitrReplayEvidenceReference)) {
+  $disasterRecoveryArguments.PitrReplayEvidenceReference = $PitrReplayEvidenceReference
+}
+$disasterRecoveryOutput = @(
+  & (Join-Path $PSScriptRoot 'Publish-EnterpriseDisasterRecoveryReport.ps1') @disasterRecoveryArguments
+)
+$disasterRecovery = ConvertFrom-TrailingJson -Output $disasterRecoveryOutput
+if ([string]$disasterRecovery.status -ne 'database-objectives-met') {
+  throw 'The database restore rehearsal did not meet the configured RPO/RTO objectives.'
+}
+
 [ordered]@{
   status = 'backup-and-restore-verified'
   completedAtUtc = [DateTime]::UtcNow.ToString('o')
@@ -100,4 +134,9 @@ if ([string]$restore.status -ne 'restore-verified' -or $restore.cleanupVerified 
   restoreReportStatus = [string]$restore.status
   restoreCleanupVerified = [bool]$restore.cleanupVerified
   restoreChecks = $restore.checks
+  disasterRecoveryReportStatus = [string]$disasterRecovery.status
+  disasterRecoveryReportPath = [string]$disasterRecovery.reportPath
+  measuredRpoMinutes = [double]$disasterRecovery.rpoMinutes
+  measuredRtoMinutes = [double]$disasterRecovery.rtoMinutes
+  disasterRecoveryUnverifiedBoundaries = @($disasterRecovery.unverifiedBoundaries)
 } | ConvertTo-Json -Depth 7

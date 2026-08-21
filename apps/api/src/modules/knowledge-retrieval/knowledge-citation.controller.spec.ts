@@ -8,15 +8,17 @@ import { KnowledgeCitationService } from './knowledge-citation.service.js';
 
 const VERSION_ID = '00000000-0000-7000-8000-000000000501';
 const CHUNK_ID = '00000000-0000-7000-8000-000000000601';
+const MESSAGE_ID = '00000000-0000-7000-8000-000000000701';
 
 describe('KnowledgeCitationController', () => {
   let app: INestApplication;
   const getOriginal = vi.fn();
+  const getSourceFile = vi.fn();
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       controllers: [KnowledgeCitationController],
-      providers: [{ provide: KnowledgeCitationService, useValue: { getOriginal } }],
+      providers: [{ provide: KnowledgeCitationService, useValue: { getOriginal, getSourceFile } }],
     }).compile();
     app = module.createNestApplication();
     app.setGlobalPrefix('api/v1');
@@ -38,21 +40,69 @@ describe('KnowledgeCitationController', () => {
       chunkId: CHUNK_ID,
       headingPath: ['人事制度', '年假'],
       sourceType: 'MARKDOWN',
+      sourceFileName: null,
+      sourceMimeType: 'text/markdown',
+      sourceUri: null,
+      sourceDownloadAvailable: false,
+      sourceLocator: {
+        kind: 'SECTION',
+        pageStart: null,
+        pageEnd: null,
+        sheetName: null,
+        headingPath: ['人事制度', '年假'],
+      },
+      structuralContext: {
+        parent: {
+          id: '00000000-0000-7000-8000-000000000602',
+          headingPath: ['人事制度', '年假'],
+          excerpt: '年假申请需至少提前一天发起。',
+        },
+        previous: null,
+        next: null,
+      },
       content: '年假申请需至少提前一天发起。',
       updatedAt: '2026-07-20T02:00:00.000Z',
     });
 
     const response = await request(app.getHttpServer())
-      .get(`/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}`)
+      .get(`/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}?messageId=${MESSAGE_ID}`)
       .expect(200);
 
     expect(knowledgeCitationDetailSchema.safeParse(response.body).success).toBe(true);
-    expect(getOriginal).toHaveBeenCalledWith(VERSION_ID, CHUNK_ID);
+    expect(getOriginal).toHaveBeenCalledWith(MESSAGE_ID, VERSION_ID, CHUNK_ID);
   });
 
   it('rejects malformed resource identifiers before invoking the service', async () => {
     await request(app.getHttpServer())
-      .get(`/api/v1/knowledge-citations/not-a-uuid/chunks/${CHUNK_ID}`)
+      .get(`/api/v1/knowledge-citations/not-a-uuid/chunks/${CHUNK_ID}?messageId=${MESSAGE_ID}`)
       .expect(400);
+  });
+
+  it('requires a message-bound citation context', async () => {
+    await request(app.getHttpServer())
+      .get(`/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}`)
+      .expect(400);
+  });
+
+  it('streams the authorized original file with a UTF-8 filename', async () => {
+    getSourceFile.mockResolvedValueOnce({
+      body: Buffer.from('source file'),
+      size: 11,
+      mimeType: 'application/pdf',
+      fileName: '员工制度.pdf',
+    });
+
+    const response = await request(app.getHttpServer())
+      .get(
+        `/api/v1/knowledge-citations/${VERSION_ID}/chunks/${CHUNK_ID}/source?messageId=${MESSAGE_ID}`,
+      )
+      .expect(200);
+
+    expect(response.headers['content-type']).toContain('application/pdf');
+    expect(response.headers['content-disposition']).toContain(
+      `filename*=UTF-8''${encodeURIComponent('员工制度.pdf')}`,
+    );
+    expect(response.body).toEqual(Buffer.from('source file'));
+    expect(getSourceFile).toHaveBeenCalledWith(MESSAGE_ID, VERSION_ID, CHUNK_ID);
   });
 });

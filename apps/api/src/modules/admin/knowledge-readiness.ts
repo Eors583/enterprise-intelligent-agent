@@ -71,12 +71,6 @@ export function deriveKnowledgeBaseIndexReadiness(
     semanticCoverage,
     input.embedding,
   );
-  const activationBlockers: KnowledgeReadinessReason[] = [];
-  if (documents.processing > 0) activationBlockers.push('DOCUMENTS_PROCESSING');
-  if (documents.failed > 0) activationBlockers.push('DOCUMENTS_FAILED');
-  if (semanticBlocker !== null) activationBlockers.push(semanticBlocker);
-  const rerankBlocker = rerankBlockerFor(input.rerank);
-  if (rerankBlocker !== null) activationBlockers.push(rerankBlocker);
 
   return {
     knowledgeBaseId: input.knowledgeBaseId,
@@ -88,8 +82,6 @@ export function deriveKnowledgeBaseIndexReadiness(
     rerank: input.rerank,
     retrievalMode: semanticBlocker === null ? 'HYBRID' : 'LEXICAL',
     degradedReason: semanticBlocker,
-    activationAllowed: activationBlockers.length === 0,
-    activationBlockers,
   };
 }
 
@@ -104,16 +96,5 @@ function semanticBlockerFor(
   if (capability.status === 'NOT_READY') return 'EMBEDDING_PROVIDER_NOT_READY';
   if (capability.model === null) return 'EMBEDDING_MODEL_UNAVAILABLE';
   if (semanticCoverage < 1) return 'EMBEDDING_COVERAGE_INCOMPLETE';
-  return null;
-}
-
-function rerankBlockerFor(
-  capability: KnowledgeCapabilityReadiness,
-): KnowledgeReadinessReason | null {
-  if (capability.status === 'DISABLED') return 'RERANK_DISABLED';
-  if (capability.status === 'UNAVAILABLE') return 'RERANK_PROVIDER_UNAVAILABLE';
-  if (capability.status === 'NOT_READY' || capability.model === null) {
-    return 'RERANK_PROVIDER_NOT_READY';
-  }
   return null;
 }

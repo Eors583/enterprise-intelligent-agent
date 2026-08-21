@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 
-import type { MemberAgent } from '../../domain/agent.models.js';
+import type { DepartmentAgent, MemberAgent } from '../../domain/agent.models.js';
 import { AgentRepository } from '../../domain/agent.repository.js';
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000001';
@@ -17,6 +17,8 @@ export class DevAgentRepository extends AgentRepository {
       status: 'online',
       versionStatus: 'published',
       visibility: 'tenant',
+      assignedToPrincipal: false,
+      requiresActiveAssignment: false,
       summary: '可协助查询产品路线、需求背景和会议结论。',
     },
     {
@@ -27,11 +29,23 @@ export class DevAgentRepository extends AgentRepository {
       status: 'online',
       versionStatus: 'published',
       visibility: 'tenant',
+      assignedToPrincipal: false,
+      requiresActiveAssignment: false,
       summary: '可协助定位系统模块、接口约定和研发进度。',
     },
   ];
 
-  async listMemberAgents(tenantId: string): Promise<readonly MemberAgent[]> {
+  async listMemberAgents(
+    tenantId: string,
+    _principalUserId: string,
+  ): Promise<readonly MemberAgent[]> {
     return this.agents.filter((agent) => agent.tenantId === tenantId);
+  }
+
+  async listDepartmentAgents(
+    _tenantId: string,
+    _principalUserId: string,
+  ): Promise<readonly DepartmentAgent[]> {
+    return [];
   }
 }

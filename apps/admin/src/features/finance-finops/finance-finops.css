@@ -1,0 +1,390 @@
+.finops-page {
+  display: grid;
+  gap: 20px;
+  color: #17233b;
+}
+
+.finops-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 26px 28px;
+  color: #f8fbff;
+  border-radius: 22px;
+  background:
+    radial-gradient(circle at 92% 5%, rgba(51, 211, 173, 0.23), transparent 32%),
+    linear-gradient(135deg, #101d39, #193a5d 62%, #16596b);
+  box-shadow: 0 18px 44px rgba(15, 39, 72, 0.18);
+}
+
+.finops-hero h1 {
+  margin: 4px 0 8px;
+  color: #fff;
+  font-size: clamp(26px, 3vw, 38px);
+}
+
+.finops-hero p {
+  max-width: 780px;
+  margin: 0;
+  color: #dbe8f4;
+  line-height: 1.65;
+}
+
+.finops-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.finops-toolbar label {
+  display: grid;
+  gap: 5px;
+  color: #dbe8f4;
+  font-size: 12px;
+}
+
+.finops-toolbar select {
+  min-width: 92px;
+  padding: 9px 12px;
+  color: #17233b;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 10px;
+  background: #fff;
+}
+
+.finops-kpis {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  gap: 12px;
+}
+
+.finops-kpi {
+  display: grid;
+  gap: 8px;
+  padding: 17px 18px;
+  border: 1px solid #dce6ef;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 8px 22px rgba(24, 50, 82, 0.06);
+}
+
+.finops-kpi span {
+  color: #69778c;
+  font-size: 12px;
+}
+
+.finops-kpi strong {
+  overflow: hidden;
+  font-size: 20px;
+  text-overflow: ellipsis;
+}
+
+.finops-kpi.alert strong {
+  color: #b33c37;
+}
+
+.finops-tabs {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 5px;
+  border: 1px solid #dbe6ef;
+  border-radius: 14px;
+  background: #f7fafc;
+}
+
+.finops-tabs button {
+  min-width: 104px;
+  padding: 10px 14px;
+  color: #58677b;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.finops-tabs button.active {
+  color: #123a52;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(22, 58, 82, 0.1);
+  font-weight: 700;
+}
+
+.finops-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.finops-card {
+  min-width: 0;
+  padding: 20px;
+  border: 1px solid #dce6ef;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 8px 26px rgba(24, 50, 82, 0.05);
+}
+
+.finops-card.span-two {
+  grid-column: span 2;
+}
+
+.finops-card-title {
+  margin-bottom: 16px;
+}
+
+.finops-card-title h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
+.finops-card-title p {
+  margin: 0;
+  color: #6b788b;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.finops-table-wrap {
+  overflow-x: auto;
+}
+
+.finops-page table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.finops-page th,
+.finops-page td {
+  padding: 11px 10px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid #edf1f5;
+}
+
+.finops-page th {
+  color: #667589;
+  background: #f7fafc;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.finops-page td small,
+.finops-list small {
+  display: block;
+  margin-top: 3px;
+  color: #7b8798;
+  font-size: 11px;
+}
+
+.finops-status {
+  display: inline-flex;
+  padding: 4px 7px;
+  color: #38546a;
+  border: 1px solid #cddbe6;
+  border-radius: 999px;
+  background: #f3f7fa;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.finops-status.status-approved,
+.finops-status.status-active,
+.finops-status.status-confirmed,
+.finops-status.status-computed,
+.finops-status.status-verified {
+  color: #146044;
+  border-color: #b9dfd0;
+  background: #eaf8f2;
+}
+
+.finops-status.status-rejected,
+.finops-status.status-invalid_zero_cost,
+.finops-status.status-hard_limit_exceeded {
+  color: #9c3732;
+  border-color: #efc9c6;
+  background: #fff0ef;
+}
+
+.finops-inline-form {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 14px;
+  border: 1px dashed #cbd9e4;
+  border-radius: 14px;
+  background: #f8fbfd;
+}
+
+.finops-review {
+  min-width: 14rem;
+  margin-top: 0.45rem;
+}
+
+.finops-review summary {
+  color: #4f46e5;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.finops-review-form {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid #dbe2ea;
+  border-radius: 0.75rem;
+  background: #f8fafc;
+}
+
+.finops-review-form label {
+  display: grid;
+  gap: 0.25rem;
+  color: #475569;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.finops-review-form input,
+.finops-review-form select,
+.finops-review-form textarea {
+  width: 100%;
+}
+
+.finops-form-error {
+  color: #b91c1c;
+  font-weight: 700;
+}
+
+.finops-form {
+  display: grid;
+  gap: 11px;
+}
+
+.finops-inline-form label,
+.finops-form label {
+  display: grid;
+  gap: 5px;
+  color: #5f6d80;
+  font-size: 11px;
+}
+
+.finops-inline-form input,
+.finops-inline-form select,
+.finops-form input,
+.finops-form select {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  color: #17233b;
+  border: 1px solid #ccd9e4;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.finops-inline-form button {
+  align-self: end;
+}
+
+.finops-action {
+  padding: 6px 9px;
+  color: #0b5367;
+  border: 1px solid #a8cfd7;
+  border-radius: 8px;
+  background: #eef9fa;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.finops-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.finops-list {
+  display: grid;
+  gap: 9px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.finops-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid #e2e9ef;
+  border-radius: 11px;
+  background: #fafcfd;
+}
+
+.finops-list li > span:last-child {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.finops-error {
+  padding: 12px 14px;
+  color: #8f302c;
+  border: 1px solid #efc3c0;
+  border-radius: 12px;
+  background: #fff1f0;
+}
+
+.finops-loading,
+.finops-empty {
+  color: #718095;
+}
+
+.finops-empty {
+  display: grid;
+  gap: 5px;
+  padding: 20px;
+  text-align: center;
+}
+
+.finops-empty strong {
+  color: #425168;
+}
+
+@media (max-width: 1050px) {
+  .finops-kpis {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .finops-inline-form {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .finops-hero {
+    display: grid;
+  }
+
+  .finops-toolbar {
+    align-items: stretch;
+  }
+
+  .finops-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .finops-card.span-two {
+    grid-column: span 1;
+  }
+
+  .finops-inline-form {
+    grid-template-columns: 1fr;
+  }
+}

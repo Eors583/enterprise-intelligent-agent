@@ -59,10 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-no-answer-accuracy", type=float, default=0.9)
     parser.add_argument("--max-p95-ms", type=float, default=3_000.0)
     parser.add_argument("--max-acl-leaks", type=int, default=0)
-    parser.add_argument("--min-cases", type=int, default=30)
-    parser.add_argument("--min-answerable", type=int, default=20)
-    parser.add_argument("--min-no-answer", type=int, default=5)
-    parser.add_argument("--min-acl-cases", type=int, default=5)
+    parser.add_argument("--min-cases", type=int, default=200)
+    parser.add_argument("--min-answerable", type=int, default=150)
+    parser.add_argument("--min-no-answer", type=int, default=25)
+    parser.add_argument("--min-acl-cases", type=int, default=25)
     return parser
 
 

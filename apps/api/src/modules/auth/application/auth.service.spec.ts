@@ -1,10 +1,12 @@
 import { UnauthorizedException } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
+import type { AuthSessionResponse, LoginResult } from '@enterprise/contracts';
 
 import type { EnvironmentVariables } from '../../../config/environment.js';
 import type { AuthPrismaService } from '../../../database/auth-prisma.service.js';
 import type { AuthenticatedPrincipal } from '../domain/authenticated-principal.js';
 import { AuthService } from './auth.service.js';
+import type { MfaService } from './mfa.service.js';
 import type { PasswordHasher } from './password-hasher.js';
 import { TokenService } from './token.service.js';
 
@@ -205,17 +207,19 @@ describe('AuthService password changes', () => {
 });
 
 describe('AuthService work-email login', () => {
-  it('uses one non-terminated employment when no local email identity exists', async () => {
+  it('uses one active employment when no local email identity exists', async () => {
     const { service, transaction } = loginSetup({
       localUser: null,
       candidateUserIds: ['external'],
     });
 
-    const result = await service.login({
-      tenantSlug: 'test-workspace',
-      email: 'employee@example.test',
-      password: '1234567890',
-    });
+    const result = requireAuthenticatedLogin(
+      await service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    );
 
     expect(result.account.userId).toBe('external');
     expect(result.account.email).toBe('external@external.invalid');
@@ -224,7 +228,7 @@ describe('AuthService work-email login', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           workEmail: { equals: 'employee@example.test', mode: 'insensitive' },
-          status: { not: 'TERMINATED' },
+          status: 'ACTIVE',
         }),
         take: 2,
       }),
@@ -238,14 +242,34 @@ describe('AuthService work-email login', () => {
       candidateUserIds: ['external'],
     });
 
-    const result = await service.login({
-      tenantSlug: 'test-workspace',
-      email: 'employee@example.test',
-      password: '1234567890',
-    });
+    const result = requireAuthenticatedLogin(
+      await service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    );
 
     expect(result.account.userId).toBe('local');
     expect(transaction.employment.groupBy).not.toHaveBeenCalled();
+  });
+
+  it('rejects a credentialless Feishu identity found by work email even when the submitted password matches a former shared default', async () => {
+    const { service, transaction, passwords } = loginSetup({
+      localUser: null,
+      candidateUserIds: ['external'],
+      externalHasCredential: false,
+    });
+
+    await expect(
+      service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(passwords.verify).toHaveBeenCalledOnce();
+    expect(transaction.authSession.create).not.toHaveBeenCalled();
   });
 
   it('does not create a session when the password changed after verification', async () => {
@@ -264,7 +288,150 @@ describe('AuthService work-email login', () => {
     ).rejects.toThrow(UnauthorizedException);
     expect(transaction.authSession.create).not.toHaveBeenCalled();
   });
+
+  it('does not create a session when the work-email alias changed while password verification waited', async () => {
+    const { service, transaction } = loginSetup({
+      localUser: null,
+      candidateUserIds: ['external'],
+    });
+    transaction.employment.groupBy
+      .mockResolvedValueOnce([{ userId: 'external' }])
+      .mockResolvedValueOnce([]);
+
+    await expect(
+      service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(transaction.authSession.create).not.toHaveBeenCalled();
+  });
+
+  it('does not create a session when the account was disabled while password verification waited', async () => {
+    const localUser = loginUser('local', 'employee@example.test', true);
+    const { service, transaction } = loginSetup({
+      localUser,
+      candidateUserIds: [],
+    });
+    transaction.user.findFirst.mockImplementation(({ where }: { where: { id?: string } }) =>
+      Promise.resolve(where.id === undefined ? localUser : null),
+    );
+
+    await expect(
+      service.login({
+        tenantSlug: 'test-workspace',
+        email: 'employee@example.test',
+        password: '1234567890',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(transaction.authSession.create).not.toHaveBeenCalled();
+  });
+
+  it('never accepts an internal external.invalid placeholder as a login identifier', async () => {
+    const { service, transaction, passwords } = loginSetup({
+      localUser: loginUser('external', 'external@external.invalid', true),
+      candidateUserIds: ['external'],
+    });
+
+    await expect(
+      service.login({
+        tenantSlug: 'test-workspace',
+        email: 'external@external.invalid',
+        password: '1234567890',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(passwords.verify).toHaveBeenCalledOnce();
+    expect(transaction.user.findFirst).not.toHaveBeenCalled();
+    expect(transaction.employment.groupBy).not.toHaveBeenCalled();
+    expect(transaction.authSession.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects an MFA challenge bound to an email that is no longer an active alias', async () => {
+    const config = authConfig();
+    const transaction = {
+      $queryRaw: vi.fn().mockResolvedValue([{ locked: 1 }]),
+      tenant: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: principal.tenantId,
+          slug: principal.tenantSlug,
+          name: principal.tenantName,
+          status: 'ACTIVE',
+        }),
+      },
+      user: {
+        findUnique: vi.fn().mockResolvedValue({
+          id: 'external',
+          email: 'new@example.test',
+          displayName: 'External member',
+          role: 'MEMBER',
+          status: 'ACTIVE',
+          passwordCredential: {
+            passwordHash: 'scrypt$encoded',
+            mustChangePassword: false,
+          },
+        }),
+        findFirst: vi.fn(),
+      },
+      employment: {
+        findMany: vi.fn().mockResolvedValue([{ workEmail: 'new@example.test' }]),
+        groupBy: vi.fn(),
+      },
+      authSession: { create: vi.fn() },
+    };
+    const mfa = {
+      completeLogin: vi
+        .fn()
+        .mockImplementation(
+          async (
+            _request: unknown,
+            createSession: (
+              value: typeof transaction,
+              verified: Record<string, unknown>,
+            ) => unknown,
+          ) =>
+            createSession(transaction, {
+              tenantId: principal.tenantId,
+              userId: 'external',
+              factorId: '00000000-0000-7000-8000-000000000301',
+              method: 'TOTP',
+              verifiedAt: new Date(),
+              credentialBinding: 'credential:scrypt$encoded',
+              loginIdentifierBinding: 'identifier:old@example.test',
+            }),
+        ),
+      credentialBinding: vi.fn((hash: string) => `credential:${hash}`),
+      loginIdentifierBinding: vi.fn((email: string) => `identifier:${email}`),
+    } as unknown as MfaService;
+    const prisma = {
+      enabled: true,
+      withAuth: <T>(operation: (value: typeof transaction) => Promise<T>) => operation(transaction),
+    } as unknown as AuthPrismaService;
+    const service = new AuthService(
+      prisma,
+      {} as PasswordHasher,
+      new TokenService(config),
+      config,
+      mfa,
+    );
+
+    await expect(
+      service.completeMfaLogin({
+        challenge: `ea_mfa_${'x'.repeat(43)}`,
+        code: '123456',
+        method: 'TOTP',
+      }),
+    ).rejects.toThrow(UnauthorizedException);
+    expect(transaction.authSession.create).not.toHaveBeenCalled();
+  });
 });
+
+function requireAuthenticatedLogin(result: LoginResult): AuthSessionResponse {
+  if ('kind' in result) {
+    throw new Error('Expected an authenticated session, received an MFA challenge.');
+  }
+  return result;
+}
 
 const principal: AuthenticatedPrincipal = {
   sessionId: '00000000-0000-7000-8000-000000000010',
@@ -285,6 +452,7 @@ function loginSetup(options: {
   readonly localUser: ReturnType<typeof loginUser> | null;
   readonly candidateUserIds: readonly string[];
   readonly lockedPasswordHash?: string;
+  readonly externalHasCredential?: boolean;
 }) {
   const config = authConfig();
   const transaction = {
@@ -298,11 +466,31 @@ function loginSetup(options: {
       }),
     },
     user: {
-      findFirst: vi.fn().mockResolvedValue(options.localUser),
+      findFirst: vi
+        .fn()
+        .mockImplementation(({ where }: { where: { id?: string } }) =>
+          Promise.resolve(
+            where.id === undefined
+              ? options.localUser
+              : loginUser(
+                  where.id,
+                  options.localUser?.email ?? 'external@external.invalid',
+                  true,
+                  options.externalHasCredential ?? true,
+                ),
+          ),
+        ),
       findUnique: vi
         .fn()
         .mockImplementation(({ where }: { where: { tenantId_id: { id: string } } }) =>
-          Promise.resolve(loginUser(where.tenantId_id.id, 'external@external.invalid', true)),
+          Promise.resolve(
+            loginUser(
+              where.tenantId_id.id,
+              'external@external.invalid',
+              true,
+              options.externalHasCredential ?? true,
+            ),
+          ),
         ),
     },
     employment: {
@@ -311,7 +499,7 @@ function loginSetup(options: {
     passwordCredential: {
       findUnique: vi.fn().mockResolvedValue({
         passwordHash: options.lockedPasswordHash ?? 'scrypt$encoded',
-        mustChangePassword: options.localUser?.passwordCredential.mustChangePassword ?? true,
+        mustChangePassword: options.localUser?.passwordCredential?.mustChangePassword ?? true,
       }),
     },
     authSession: {
@@ -329,17 +517,20 @@ function loginSetup(options: {
   return {
     service: new AuthService(prisma, passwords, new TokenService(config), config),
     transaction,
+    passwords,
   };
 }
 
-function loginUser(id: string, email: string, mustChangePassword: boolean) {
+function loginUser(id: string, email: string, mustChangePassword: boolean, hasCredential = true) {
   return {
     id,
     email,
     displayName: id,
     role: 'MEMBER' as const,
     status: 'ACTIVE' as const,
-    passwordCredential: { passwordHash: 'scrypt$encoded', mustChangePassword },
+    passwordCredential: hasCredential
+      ? { passwordHash: 'scrypt$encoded', mustChangePassword }
+      : null,
   };
 }
 

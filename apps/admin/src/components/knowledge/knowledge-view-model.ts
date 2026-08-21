@@ -9,7 +9,7 @@ import {
   latestKnowledgeVersion,
 } from './knowledge-ingestion-outcome';
 
-export type KnowledgeDocumentSourceFilter = 'ALL' | 'FILE' | 'TEXT' | 'MARKDOWN';
+export type KnowledgeDocumentSourceFilter = 'ALL' | 'FILE' | 'WEB' | 'TEXT' | 'MARKDOWN';
 export type KnowledgeDocumentStatusFilter =
   'ALL' | 'DRAFT' | 'PROCESSING' | 'READY' | 'FAILED' | 'ARCHIVED';
 
@@ -50,6 +50,7 @@ export function filterKnowledgeDocuments(
 ): KnowledgeDocumentSummary[] {
   const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN');
   return documents.filter((document) => {
+    if (document.status === 'ARCHIVED') return false;
     const matchesQuery =
       normalizedQuery.length === 0 ||
       document.title.toLocaleLowerCase('zh-CN').includes(normalizedQuery) ||

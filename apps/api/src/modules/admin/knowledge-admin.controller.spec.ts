@@ -9,6 +9,44 @@ const DOCUMENT_ID = '00000000-0000-7000-8000-000000000102';
 const DOCUMENT_VERSION_ID = '00000000-0000-7000-8000-000000000103';
 
 describe('KnowledgeAdminController uploads', () => {
+  it('delegates the controlled web import and parse-review lifecycle', async () => {
+    const importWebDocument = vi.fn().mockResolvedValue({ id: DOCUMENT_ID });
+    const listPendingParseReviews = vi.fn().mockResolvedValue({ items: [] });
+    const reviewDocumentVersionParse = vi.fn().mockResolvedValue({ id: DOCUMENT_VERSION_ID });
+    const controller = createController({
+      importWebDocument,
+      listPendingParseReviews,
+      reviewDocumentVersionParse,
+    });
+    const importRequest = {
+      url: 'https://docs.example.com/security',
+      title: 'Security policy',
+    };
+    const reviewRequest = {
+      decision: 'REJECT' as const,
+      expectedReviewRevision: 2,
+      note: 'The parser omitted a table.',
+    };
+
+    await controller.importWebDocument(KNOWLEDGE_BASE_ID, importRequest);
+    await controller.listPendingParseReviews(KNOWLEDGE_BASE_ID);
+    await controller.reviewDocumentVersionParse(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+      reviewRequest,
+    );
+
+    expect(importWebDocument).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID, importRequest);
+    expect(listPendingParseReviews).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID);
+    expect(reviewDocumentVersionParse).toHaveBeenCalledWith(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+      reviewRequest,
+    );
+  });
+
   it('delegates lightweight-list follow-up reads to document detail endpoints', async () => {
     const getDocument = vi.fn().mockResolvedValue({ id: DOCUMENT_ID });
     const getDocumentVersion = vi.fn().mockResolvedValue({ id: 'version-id' });
@@ -51,16 +89,86 @@ describe('KnowledgeAdminController uploads', () => {
     );
   });
 
-  it('delegates tenant-scoped enterprise readiness reads to the admin service', async () => {
+  it('streams an authorized original source inline with its UTF-8 filename', async () => {
+    const getDocumentVersionSource = vi.fn().mockResolvedValue({
+      body: Buffer.from('source file'),
+      size: 11,
+      mimeType: 'application/pdf',
+      fileName: '员工制度.pdf',
+    });
+    const controller = createController({ getDocumentVersionSource });
+
+    const response = await controller.getDocumentVersionSource(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+    );
+
+    expect(getDocumentVersionSource).toHaveBeenCalledWith(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+    );
+    expect(response.getHeaders()).toMatchObject({
+      type: 'application/pdf',
+      disposition: `inline; filename*=UTF-8''${encodeURIComponent('员工制度.pdf')}`,
+      length: 11,
+    });
+  });
+
+  it('delegates tenant-scoped retrieval diagnostics to the admin service', async () => {
     const readiness = vi.fn().mockResolvedValue({
       knowledgeBaseId: KNOWLEDGE_BASE_ID,
-      activationAllowed: false,
+      retrievalMode: 'LEXICAL',
     });
     const controller = createController({ readiness });
 
     await controller.readiness(KNOWLEDGE_BASE_ID);
 
     expect(readiness).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID);
+  });
+
+  it('delegates graph readiness and bounded graph browsing to the admin service', async () => {
+    const graphOverview = vi.fn().mockResolvedValue({
+      knowledgeBaseId: KNOWLEDGE_BASE_ID,
+      status: 'READY',
+    });
+    const graph = vi.fn().mockResolvedValue({
+      knowledgeBaseId: KNOWLEDGE_BASE_ID,
+      entities: [],
+      relations: [],
+    });
+    const controller = createController({ graphOverview, graph });
+    const query = { query: '审批', entityType: 'TOPIC', limit: 25 };
+
+    await controller.graphOverview(KNOWLEDGE_BASE_ID);
+    await controller.graph(KNOWLEDGE_BASE_ID, query);
+
+    expect(graphOverview).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID);
+    expect(graph).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID, query);
+  });
+
+  it('delegates relation-index rebuilds for existing document versions', async () => {
+    const rebuildDocumentVersionGraph = vi.fn().mockResolvedValue({
+      documentVersionId: DOCUMENT_VERSION_ID,
+      entityCount: 3,
+      relationCount: 2,
+      mentionCount: 4,
+      evidenceCount: 2,
+    });
+    const controller = createController({ rebuildDocumentVersionGraph });
+
+    await controller.rebuildDocumentVersionGraph(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+    );
+
+    expect(rebuildDocumentVersionGraph).toHaveBeenCalledWith(
+      KNOWLEDGE_BASE_ID,
+      DOCUMENT_ID,
+      DOCUMENT_VERSION_ID,
+    );
   });
 
   it('uses the filename as the title and resolves a safe MIME type from the extension', async () => {
@@ -253,8 +361,25 @@ describe('KnowledgeAdminController uploads', () => {
     ).toThrow(BadRequestException);
     expect(uploadDocument).not.toHaveBeenCalled();
   });
+
+  it('forwards a validated upload inspection request', async () => {
+    const inspection = {
+      decision: 'NEW_DOCUMENT' as const,
+      matchingDocument: null,
+    };
+    const inspectUpload = vi.fn().mockResolvedValue(inspection);
+    const controller = createController({ inspectUpload });
+    const request = {
+      fileName: 'employee-handbook.pdf',
+      size: 2048,
+      sha256: 'a'.repeat(64),
+    };
+
+    await expect(controller.inspectUpload(KNOWLEDGE_BASE_ID, request)).resolves.toEqual(inspection);
+    expect(inspectUpload).toHaveBeenCalledWith(KNOWLEDGE_BASE_ID, request);
+  });
 });
 
 function createController(overrides: Record<string, unknown>): KnowledgeAdminController {
-  return new KnowledgeAdminController(overrides as unknown as KnowledgeAdminService);
+  return new KnowledgeAdminController(overrides as unknown as KnowledgeAdminService, {} as never);
 }

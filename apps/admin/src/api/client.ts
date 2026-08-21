@@ -1,11 +1,8 @@
-import {
-  apiErrorResponseSchema,
-  authSessionResponseSchema,
-  refreshSessionRequestSchema,
-} from '@enterprise/contracts';
+import { apiErrorResponseSchema } from '@enterprise/contracts/api-error';
+import { browserAuthSessionResponseSchema } from '@enterprise/contracts/auth-session';
 import type { ZodType } from 'zod';
 
-import { readSession, writeSession } from '@/auth/session';
+import { writeSession } from '@/auth/session';
 
 type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
@@ -72,16 +69,18 @@ async function parseError(response: Response): Promise<ApiError> {
 let refreshInFlight: Promise<boolean> | null = null;
 
 async function refreshAccessToken(): Promise<boolean> {
-  const current = readSession();
-  if (!current) return false;
-
-  const payload = refreshSessionRequestSchema.parse({ refreshToken: current.refreshToken });
+  const csrfToken = browserCsrfToken();
+  if (csrfToken === null) return false;
   let response: Response;
   try {
-    response = await fetch(apiUrl('/auth/refresh'), {
+    response = await fetch(apiUrl('/auth/browser/refresh'), {
       method: 'POST',
-      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload),
+      credentials: 'include',
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': csrfToken,
+      },
     });
   } catch {
     return false;
@@ -92,7 +91,7 @@ async function refreshAccessToken(): Promise<boolean> {
   }
 
   try {
-    const parsed = authSessionResponseSchema.safeParse(await response.json());
+    const parsed = browserAuthSessionResponseSchema.safeParse(await response.json());
     if (!parsed.success) return false;
     writeSession(parsed.data);
     return true;
@@ -124,15 +123,18 @@ export async function request<T>(path: string, options: RequestOptions<T>): Prom
   const authenticated = options.authenticated !== false;
 
   const execute = async (): Promise<Response> => {
-    const session = authenticated ? readSession() : null;
     const body = options.body;
     const multipart = isFormDataBody(body);
+    const method = options.method ?? 'GET';
+    const csrfToken =
+      authenticated && !['GET', 'HEAD'].includes(method) ? browserCsrfToken() : null;
     const init: RequestInit = {
-      method: options.method ?? 'GET',
+      method,
+      credentials: 'include',
       headers: {
         Accept: 'application/json',
         ...(body === undefined || multipart ? {} : { 'Content-Type': 'application/json' }),
-        ...(session ? { Authorization: `Bearer ${session.accessToken}` } : {}),
+        ...(csrfToken === null ? {} : { 'X-CSRF-Token': csrfToken }),
       },
     };
     if (body !== undefined) {
@@ -173,6 +175,70 @@ export async function request<T>(path: string, options: RequestOptions<T>): Prom
     });
   }
   return parsed.data;
+}
+
+export interface BinaryApiResponse {
+  readonly blob: Blob;
+  readonly fileName: string | null;
+  readonly mimeType: string;
+}
+
+export async function requestBlob(path: string, signal?: AbortSignal): Promise<BinaryApiResponse> {
+  const execute = async (): Promise<Response> => {
+    try {
+      return await fetch(apiUrl(path), {
+        method: 'GET',
+        credentials: 'include',
+        headers: { Accept: '*/*' },
+        ...(signal ? { signal } : {}),
+      });
+    } catch (cause) {
+      throw new ApiError('无法连接管理服务，请检查网络或服务是否已启动。', { cause });
+    }
+  };
+
+  let response = await execute();
+  if (response.status === 401 && (await refreshOnce())) response = await execute();
+  if (!response.ok) {
+    const error = await parseError(response);
+    if (error.status === 401) writeSession(null);
+    throw error;
+  }
+  const mimeType =
+    response.headers.get('content-type')?.split(';')[0]?.trim() || 'application/octet-stream';
+  return {
+    blob: await response.blob(),
+    fileName: responseFileName(response.headers.get('content-disposition')),
+    mimeType,
+  };
+}
+
+function responseFileName(contentDisposition: string | null): string | null {
+  if (contentDisposition === null) return null;
+  const encoded = /filename\*=UTF-8''([^;]+)/iu.exec(contentDisposition)?.[1];
+  if (encoded !== undefined) {
+    try {
+      return decodeURIComponent(encoded.replace(/^"|"$/gu, ''));
+    } catch {
+      return null;
+    }
+  }
+  return /filename="?([^";]+)"?/iu.exec(contentDisposition)?.[1]?.trim() ?? null;
+}
+
+function browserCsrfToken(): string | null {
+  if (typeof document === 'undefined') return null;
+  const matches = document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith('ea_csrf='))
+    .map((part) => part.slice('ea_csrf='.length));
+  if (matches.length !== 1 || matches[0] === '') return null;
+  try {
+    return decodeURIComponent(matches[0]!);
+  } catch {
+    return null;
+  }
 }
 
 export function messageFromError(error: unknown): string {

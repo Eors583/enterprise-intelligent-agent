@@ -1,9 +1,11 @@
 import JSZip from 'jszip';
+import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
 
 import { DocumentParserAdapter, DocumentParsingError } from './document-parser.adapter.js';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
 
 describe('DocumentParserAdapter', () => {
   it('decodes and normalizes UTF-8 plain text', async () => {
@@ -23,6 +25,12 @@ describe('DocumentParserAdapter', () => {
         byteLength: 31,
         characterCount: 22,
       },
+      structuredContent: {
+        schemaVersion: 'enterprise-knowledge-document/v1',
+        kind: 'document',
+        mimeType: 'text/plain',
+        text: 'First line\nSecond line',
+      },
     });
   });
 
@@ -34,6 +42,28 @@ describe('DocumentParserAdapter', () => {
 
     expect(result.metadata.sourceType).toBe('MARKDOWN');
     expect(result.text).toBe('# Policy\n\nContent');
+  });
+
+  it('extracts visible main HTML text while dropping active and navigation content', async () => {
+    const result = await new DocumentParserAdapter().parse({
+      bytes: Buffer.from(
+        '<html><head><style>.secret{}</style><script>token()</script></head>' +
+          '<body><nav>Menu</nav><main><h1>Security policy</h1><p>Use MFA.</p></main>' +
+          '<footer>Legal</footer></body></html>',
+        'utf8',
+      ),
+      mimeType: 'text/html',
+    });
+
+    expect(result.text).toContain('Security policy');
+    expect(result.text).toContain('Use MFA.');
+    expect(result.text).not.toContain('token');
+    expect(result.text).not.toContain('Menu');
+    expect(result.metadata).toMatchObject({
+      mimeType: 'text/html',
+      sourceType: 'TEXT',
+      parser: 'linkedom-v0.18',
+    });
   });
 
   it('extracts text and page metadata from a PDF', async () => {
@@ -74,6 +104,32 @@ describe('DocumentParserAdapter', () => {
 
     expect(result.text).toBe('Hello DOCX');
     expect(result.metadata.mimeType).toBe(DOCX_MIME);
+  });
+
+  it('extracts bounded sheet and cell content from an XLSX workbook', async () => {
+    const workbook = new ExcelJS.Workbook();
+    const employees = workbook.addWorksheet('员工');
+    employees.addRow(['姓名', '部门', '目标']);
+    employees.addRow(['林晓', '研发中心', '企业知识检索']);
+    const metrics = workbook.addWorksheet('指标');
+    metrics.addRow(['指标', '值']);
+    metrics.addRow(['引用完整率', '100%']);
+
+    const result = await new DocumentParserAdapter().parse({
+      bytes: Buffer.from(await workbook.xlsx.writeBuffer()),
+      mimeType: XLSX_MIME,
+      fileName: 'enterprise.xlsx',
+    });
+
+    expect(result.text).toContain('# 工作表：员工');
+    expect(result.text).toContain('林晓\t研发中心\t企业知识检索');
+    expect(result.text).toContain('# 工作表：指标');
+    expect(result.text).toContain('引用完整率\t100%');
+    expect(result.metadata).toMatchObject({
+      mimeType: XLSX_MIME,
+      sourceType: 'MARKDOWN',
+      parser: 'exceljs-v4',
+    });
   });
 
   it.each([
@@ -118,6 +174,12 @@ describe('DocumentParserAdapter', () => {
         bytes: Buffer.from('PK\u0003\u0004not a docx', 'binary'),
         mimeType: DOCX_MIME,
         fileName: 'private-customer-name.docx',
+      }),
+    ).rejects.toEqual(new DocumentParsingError('DOCUMENT_PARSE_FAILED'));
+    await expect(
+      parser.parse({
+        bytes: Buffer.from('PK\u0003\u0004not an xlsx', 'binary'),
+        mimeType: XLSX_MIME,
       }),
     ).rejects.toEqual(new DocumentParsingError('DOCUMENT_PARSE_FAILED'));
   });

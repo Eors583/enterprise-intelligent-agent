@@ -18,10 +18,24 @@ export interface KnowledgeDocumentChunkingOptions {
 
 export interface KnowledgeDocumentChunk {
   headingPath: string[];
+  parentIndex: number;
   chunkIndex: number;
   content: string;
   tokenCount: number;
   contentHash: string;
+}
+
+export interface KnowledgeDocumentParentChunk {
+  headingPath: string[];
+  parentIndex: number;
+  content: string;
+  tokenCount: number;
+  contentHash: string;
+}
+
+export interface KnowledgeDocumentChunkHierarchy {
+  parents: KnowledgeDocumentParentChunk[];
+  chunks: KnowledgeDocumentChunk[];
 }
 
 interface MarkdownSection {
@@ -53,9 +67,21 @@ export function chunkKnowledgeDocument(
   input: KnowledgeDocumentChunkingInput,
   options: KnowledgeDocumentChunkingOptions = {},
 ): KnowledgeDocumentChunk[] {
+  return chunkKnowledgeDocumentWithParents(input, options).chunks;
+}
+
+/**
+ * Builds an explicit two-level hierarchy. A Markdown section (or the complete
+ * plain-text input) is the parent block; child ordering is global and
+ * deterministic and retains the configured overlap across the section.
+ */
+export function chunkKnowledgeDocumentWithParents(
+  input: KnowledgeDocumentChunkingInput,
+  options: KnowledgeDocumentChunkingOptions = {},
+): KnowledgeDocumentChunkHierarchy {
   const resolvedOptions = resolveOptions(options);
   const normalizedContent = normalizeLineEndings(input.content);
-  if (normalizedContent.trim().length === 0) return [];
+  if (normalizedContent.trim().length === 0) return { parents: [], chunks: [] };
 
   const sections =
     input.sourceType === 'MARKDOWN'
@@ -64,8 +90,17 @@ export function chunkKnowledgeDocument(
   const maximumCharacters = resolvedOptions.targetTokens * resolvedOptions.charactersPerToken;
   const overlapCharacters = resolvedOptions.overlapTokens * resolvedOptions.charactersPerToken;
 
+  const parents: KnowledgeDocumentParentChunk[] = [];
   const chunks: KnowledgeDocumentChunk[] = [];
   for (const section of sections) {
+    const parentIndex = parents.length;
+    parents.push({
+      headingPath: [...section.headingPath],
+      parentIndex,
+      content: section.content,
+      tokenCount: estimateTokenCount(section.content, resolvedOptions.charactersPerToken),
+      contentHash: hashContent(section.content),
+    });
     for (const content of splitSectionContent(
       section.content,
       maximumCharacters,
@@ -73,6 +108,7 @@ export function chunkKnowledgeDocument(
     )) {
       chunks.push({
         headingPath: [...section.headingPath],
+        parentIndex,
         chunkIndex: chunks.length,
         content,
         tokenCount: estimateTokenCount(content, resolvedOptions.charactersPerToken),
@@ -80,7 +116,7 @@ export function chunkKnowledgeDocument(
       });
     }
   }
-  return chunks;
+  return { parents, chunks };
 }
 
 /** Returns the same stable character-based approximation used by the chunker. */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseStoredSession } from './session';
+import { isSessionRoleAllowed, parseStoredSession } from './session';
 
 const STORED_SESSION = {
   accessToken: 'a'.repeat(32),
@@ -19,13 +19,13 @@ const STORED_SESSION = {
   },
 } as const;
 
-describe('stored admin session migration', () => {
-  it('adds a safe default for sessions stored before password change enforcement', () => {
+describe('legacy stored admin session disposal', () => {
+  it('keeps only the account projection and never returns bearer credentials', () => {
     const parsed = parseStoredSession(JSON.stringify(STORED_SESSION));
 
     expect(parsed?.account.passwordChangeRequired).toBe(false);
-    expect(parsed?.accessToken).toBe(STORED_SESSION.accessToken);
-    expect(parsed?.refreshToken).toBe(STORED_SESSION.refreshToken);
+    expect(parsed).not.toHaveProperty('accessToken');
+    expect(parsed).not.toHaveProperty('refreshToken');
   });
 
   it('preserves an explicit password change requirement', () => {
@@ -44,5 +44,17 @@ describe('stored admin session migration', () => {
     expect(
       parseStoredSession(JSON.stringify({ ...STORED_SESSION, accessToken: 'short' })),
     ).toBeNull();
+  });
+
+  it('rejects a regular employee from the management application shell', () => {
+    const parsed = parseStoredSession(
+      JSON.stringify({
+        ...STORED_SESSION,
+        account: { ...STORED_SESSION.account, role: 'MEMBER' },
+      }),
+    );
+
+    expect(parsed).not.toBeNull();
+    expect(parsed && isSessionRoleAllowed(parsed)).toBe(false);
   });
 });

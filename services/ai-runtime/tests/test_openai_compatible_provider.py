@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from uuid import UUID
 
 import httpx
@@ -22,7 +23,29 @@ from enterprise_ai_runtime.domain.errors import (
 )
 from enterprise_ai_runtime.domain.models import MessageRole, RunMessage
 from enterprise_ai_runtime.main import create_app
-from enterprise_ai_runtime.ports.provider import ProviderCompletionRequest
+from enterprise_ai_runtime.ports.provider import (
+    ProviderCompletionRequest,
+    ProviderStreamDelta,
+    ProviderStreamTerminal,
+)
+
+
+class FragmentedByteStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes, *, chunk_size: int = 7) -> None:
+        self._content = content
+        self._chunk_size = chunk_size
+
+    async def __aiter__(self):
+        for offset in range(0, len(self._content), self._chunk_size):
+            yield self._content[offset : offset + self._chunk_size]
+
+
+class SingleChunkByteStream(httpx.AsyncByteStream):
+    def __init__(self, content: bytes) -> None:
+        self._content = content
+
+    async def __aiter__(self):
+        yield self._content
 
 
 def completion_request() -> ProviderCompletionRequest:
@@ -35,6 +58,14 @@ def completion_request() -> ProviderCompletionRequest:
         request_id="req-provider-1",
         run_id=UUID("00000000-0000-4000-8000-000000000001"),
     )
+
+
+def _sse(*values: object) -> bytes:
+    frames = []
+    for value in values:
+        data = value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
+        frames.append(f"data: {data}\n\n")
+    return "".join(frames).encode()
 
 
 def test_provider_maps_structured_request_response_and_timeout() -> None:
@@ -165,9 +196,22 @@ def test_provider_rejects_reported_zero_tokens_for_a_successful_answer() -> None
     asyncio.run(scenario())
 
 
-def test_provider_maps_timeout() -> None:
+@pytest.mark.parametrize(
+    ("exception", "expected_error"),
+    [
+        (httpx.ReadTimeout, ProviderTimeoutError),
+        (httpx.ConnectError, ProviderUnavailableError),
+    ],
+)
+def test_provider_maps_sanitized_transport_errors(
+    exception: type[httpx.TransportError],
+    expected_error: type[Exception],
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("secret provider detail", request=request)
+        raise exception(
+            "Authorization: Bearer top-secret-key private transport detail",
+            request=request,
+        )
 
     async def scenario() -> None:
         client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -176,9 +220,24 @@ def test_provider_maps_timeout() -> None:
             api_key="top-secret-key",
             client=client,
         )
-        with pytest.raises(ProviderTimeoutError) as raised:
+        with pytest.raises(expected_error) as raised:
             await provider.complete(completion_request())
-        assert "secret" not in str(raised.value)
+        rendered = "".join(traceback.format_exception(raised.type, raised.value, raised.tb))
+        assert raised.value.__cause__ is None
+        assert "Authorization" not in rendered
+        assert "top-secret-key" not in rendered
+        await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_provider_owned_client_ignores_environment_proxies() -> None:
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+        )
+        assert provider._client.trust_env is False
         await provider.aclose()
 
     asyncio.run(scenario())
@@ -251,6 +310,231 @@ def test_provider_rejects_malformed_success_response() -> None:
         )
         with pytest.raises(ProviderResponseError):
             await provider.complete(completion_request())
+        await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_provider_streams_strict_sse_and_requires_trusted_terminal_usage() -> None:
+    captured: dict[str, object] = {}
+    body = _sse(
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {"content": "Hel"}, "finish_reason": None}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {"content": "lo"}, "finish_reason": None}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 2,
+                "total_tokens": 9,
+                "cost_micros": 42,
+            },
+        },
+        "[DONE]",
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["payload"] = json.loads(request.content)
+        captured["headers"] = request.headers
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream; charset=utf-8"},
+            stream=FragmentedByteStream(body),
+        )
+
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = [event async for event in provider.stream(completion_request())]
+        assert [event.content for event in events if isinstance(event, ProviderStreamDelta)] == [
+            "Hel",
+            "lo",
+        ]
+        terminal = events[-1]
+        assert isinstance(terminal, ProviderStreamTerminal)
+        assert terminal.mode == "live"
+        assert terminal.result.output.content == "Hello"
+        assert terminal.result.output.finish_reason == "stop"
+        assert terminal.result.usage.total_tokens == 9
+        assert terminal.result.usage.tokens_reported is True
+        await provider.aclose()
+
+    asyncio.run(scenario())
+    payload = captured["payload"]
+    assert isinstance(payload, dict)
+    assert payload["stream"] is True
+    assert payload["stream_options"] == {"include_usage": True}
+    headers = captured["headers"]
+    assert isinstance(headers, httpx.Headers)
+    assert headers["Accept"] == "text/event-stream"
+
+
+def test_provider_packages_tiny_sse_deltas_from_one_network_chunk() -> None:
+    body = _sse(
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {"content": "秒"}, "finish_reason": None}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [{"index": 0, "delta": {"content": "级"}, "finish_reason": "stop"}],
+        },
+        {
+            "id": "completion-stream-1",
+            "model": "model-a-20260728",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 7,
+                "completion_tokens": 2,
+                "total_tokens": 9,
+            },
+        },
+        "[DONE]",
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=SingleChunkByteStream(body),
+        )
+
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        events = [event async for event in provider.stream(completion_request())]
+        assert [event.content for event in events if isinstance(event, ProviderStreamDelta)] == [
+            "秒级"
+        ]
+        assert isinstance(events[-1], ProviderStreamTerminal)
+        assert events[-1].result.output.content == "秒级"
+        await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        _sse(
+            {
+                "id": "completion-stream-1",
+                "model": "model-a",
+                "choices": [{"index": 0, "delta": {"content": "Hi"}, "finish_reason": "stop"}],
+            },
+            "[DONE]",
+        ),
+        b"data: {malformed-json}\n\n",
+        b"data: "
+        + json.dumps(
+            {
+                "id": "completion-stream-1",
+                "model": "model-a",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"content": "x" * 16_385},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+        ).encode()
+        + b"\n\n",
+        b"data: " + (b"x" * 65_537) + b"\n\n",
+    ],
+    ids=["missing-usage", "malformed-json", "oversized-delta", "oversized-event"],
+)
+def test_provider_stream_rejects_malformed_or_unbounded_sse(body: bytes) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            stream=FragmentedByteStream(body),
+        )
+
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        with pytest.raises(ProviderResponseError):
+            _ = [event async for event in provider.stream(completion_request())]
+        await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+def test_provider_stream_maps_rate_limit_without_exposing_provider_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=b"top-secret-key private upstream response")
+
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        with pytest.raises(ProviderRateLimitError) as raised:
+            _ = [event async for event in provider.stream(completion_request())]
+        assert "top-secret-key" not in str(raised.value)
+        assert "private upstream response" not in str(raised.value)
+        await provider.aclose()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("exception", "expected_error"),
+    [
+        (httpx.ReadTimeout, ProviderTimeoutError),
+        (httpx.ConnectError, ProviderUnavailableError),
+    ],
+)
+def test_provider_stream_suppresses_transport_exception_context(
+    exception: type[httpx.TransportError],
+    expected_error: type[Exception],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise exception(
+            "Authorization: Bearer top-secret-key streamed transport detail",
+            request=request,
+        )
+
+    async def scenario() -> None:
+        provider = OpenAICompatibleProvider(
+            base_url="https://provider.example/v1",
+            api_key="top-secret-key",
+            client=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+        )
+        with pytest.raises(expected_error) as raised:
+            _ = [event async for event in provider.stream(completion_request())]
+        rendered = "".join(traceback.format_exception(raised.type, raised.value, raised.tb))
+        assert raised.value.__cause__ is None
+        assert "Authorization" not in rendered
+        assert "top-secret-key" not in rendered
         await provider.aclose()
 
     asyncio.run(scenario())

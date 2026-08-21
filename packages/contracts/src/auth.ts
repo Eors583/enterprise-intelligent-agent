@@ -1,6 +1,31 @@
 import { z } from 'zod';
 
-export const tenantRoleSchema = z.enum(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN', 'MEMBER']);
+import {
+  identityDeviceRegistrationSchema,
+  mfaLoginChallengeResponseSchema,
+} from './identity-governance.js';
+import {
+  authAccountSchema,
+  authSessionResponseSchema,
+  browserAuthSessionResponseSchema,
+} from './auth-session.js';
+
+export {
+  advancedSettingsRoleSchema,
+  adminConsoleRoleSchema,
+  authAccountSchema,
+  authSessionResponseSchema,
+  browserAuthSessionResponseSchema,
+  canAccessAdminConsole,
+  canAccessAdvancedSettings,
+  currentSessionResponseSchema,
+  tenantRoleSchema,
+  type AuthAccount,
+  type AuthSessionResponse,
+  type BrowserAuthSessionResponse,
+  type CurrentSessionResponse,
+  type TenantRole,
+} from './auth-session.js';
 
 export const registerTenantRequestSchema = z.object({
   tenantName: z.string().trim().min(2).max(200),
@@ -33,27 +58,18 @@ export const loginRequestSchema = z.object({
     .transform((value) => value.toLowerCase()),
   password: z.string().min(1).max(128),
   sessionLabel: z.string().trim().min(1).max(120).optional(),
+  device: identityDeviceRegistrationSchema.optional(),
 });
 
-export const authAccountSchema = z.object({
-  sessionId: z.uuid(),
-  tenantId: z.uuid(),
-  tenantSlug: z.string().min(1),
-  tenantName: z.string().min(1),
-  userId: z.uuid(),
-  email: z.email(),
-  displayName: z.string().min(1),
-  role: tenantRoleSchema,
-  passwordChangeRequired: z.boolean(),
-  accessExpiresAt: z.iso.datetime(),
-  refreshExpiresAt: z.iso.datetime(),
-});
+export const loginResultSchema = z.union([
+  authSessionResponseSchema,
+  mfaLoginChallengeResponseSchema,
+]);
 
-export const authSessionResponseSchema = z.object({
-  accessToken: z.string().min(32),
-  refreshToken: z.string().min(32),
-  account: authAccountSchema,
-});
+export const browserLoginResultSchema = z.union([
+  browserAuthSessionResponseSchema,
+  mfaLoginChallengeResponseSchema,
+]);
 
 export const refreshSessionRequestSchema = z.object({
   refreshToken: z.string().min(32).max(512),
@@ -128,13 +144,9 @@ export const acceptMemberInvitationResponseSchema = z.object({
   revokedSessionCount: z.number().int().nonnegative(),
 });
 
-export const currentSessionResponseSchema = authAccountSchema.omit({ sessionId: true }).extend({
-  sessionId: z.uuid(),
-});
-
-export type TenantRole = z.infer<typeof tenantRoleSchema>;
 export type RegisterTenantRequest = z.infer<typeof registerTenantRequestSchema>;
 export type LoginRequest = z.infer<typeof loginRequestSchema>;
+export type LoginResult = z.infer<typeof loginResultSchema>;
 export type RefreshSessionRequest = z.infer<typeof refreshSessionRequestSchema>;
 export type ChangePasswordRequest = z.infer<typeof changePasswordRequestSchema>;
 export type ChangePasswordResponse = z.infer<typeof changePasswordResponseSchema>;
@@ -144,6 +156,4 @@ export type CompletePasswordResetRequest = z.infer<typeof completePasswordResetR
 export type CompletePasswordResetResponse = z.infer<typeof completePasswordResetResponseSchema>;
 export type AcceptMemberInvitationRequest = z.infer<typeof acceptMemberInvitationRequestSchema>;
 export type AcceptMemberInvitationResponse = z.infer<typeof acceptMemberInvitationResponseSchema>;
-export type AuthAccount = z.infer<typeof authAccountSchema>;
-export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
-export type CurrentSessionResponse = z.infer<typeof currentSessionResponseSchema>;
+export type BrowserLoginResult = z.infer<typeof browserLoginResultSchema>;

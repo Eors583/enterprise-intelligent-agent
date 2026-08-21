@@ -65,6 +65,13 @@ export function createKnowledgeObjectStore(
       infer: true,
     }),
     prefix: config.get('KNOWLEDGE_OBJECT_STORE_S3_PREFIX', { infer: true }),
+    ...(config.get('KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID', { infer: true }) === undefined
+      ? {}
+      : {
+          kmsKeyId: config.get('KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID', {
+            infer: true,
+          }),
+        }),
     maxBytes,
   };
   return new S3KnowledgeObjectStore(options);

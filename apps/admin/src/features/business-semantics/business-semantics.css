@@ -1,0 +1,882 @@
+.business-semantics-page {
+  --semantic-purple: #6657a6;
+}
+
+.semantic-page-header {
+  align-items: center;
+}
+
+.semantic-chain {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: center;
+  overflow-x: auto;
+  padding: 10px 16px;
+  border: 1px solid #d7e3df;
+  border-radius: 12px;
+  color: #42615a;
+  background: linear-gradient(90deg, rgb(8 127 115 / 5%), rgb(102 87 166 / 5%)), #fff;
+  box-shadow: var(--shadow-sm);
+}
+
+.semantic-chain > span {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 7px;
+}
+
+.semantic-chain b {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 1px solid #bdd5cf;
+  border-radius: 9px;
+  color: var(--brand);
+  background: #f6fbf9;
+  font-size: 13px;
+}
+
+.semantic-chain small {
+  color: #61746f;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.semantic-chain i {
+  margin: 0 12px;
+  color: #9bb2ac;
+  font-style: normal;
+}
+
+.semantic-resource-tabs {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(110px, 1fr));
+  gap: 8px;
+}
+
+.semantic-resource-tabs > button {
+  display: grid;
+  min-height: 88px;
+  grid-template-columns: 30px minmax(0, 1fr);
+  grid-template-rows: auto 1fr;
+  align-items: center;
+  gap: 2px 9px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: #42534f;
+  text-align: left;
+  background: #fff;
+  cursor: pointer;
+}
+
+.semantic-resource-tabs > button > span {
+  display: grid;
+  width: 29px;
+  height: 29px;
+  grid-row: 1 / -1;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.semantic-resource-tabs > button strong {
+  font-size: 12px;
+}
+
+.semantic-resource-tabs > button small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.35;
+}
+
+.semantic-resource-tabs > button:hover {
+  border-color: #abc6c0;
+  background: #fbfefd;
+}
+
+.semantic-resource-tabs > button.active {
+  border-color: var(--brand);
+  color: #176b60;
+  background: #f3fbf8;
+  box-shadow: 0 0 0 2px rgb(8 127 115 / 8%);
+}
+
+.semantic-resource-layout {
+  display: grid;
+  min-height: 520px;
+  grid-template-columns: minmax(280px, 0.72fr) minmax(560px, 1.6fr);
+  align-items: start;
+  gap: 18px;
+}
+
+.semantic-entity-index {
+  position: sticky;
+  top: 18px;
+  overflow: hidden;
+}
+
+.semantic-entity-index > header {
+  display: grid;
+  padding: 16px;
+  border-bottom: 1px solid var(--line);
+  gap: 12px;
+}
+
+.semantic-entity-index > header > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.semantic-entity-index > header strong {
+  font-size: 14px;
+}
+
+.semantic-entity-index > header small {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.semantic-entity-list {
+  display: grid;
+  max-height: calc(100vh - 300px);
+  min-height: 180px;
+  overflow-y: auto;
+  padding: 8px;
+  gap: 3px;
+}
+
+.semantic-entity-list > button {
+  display: grid;
+  min-height: 76px;
+  grid-template-columns: 36px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 9px;
+  color: #253632;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.semantic-entity-list > button:hover {
+  background: #f5f9f8;
+}
+
+.semantic-entity-list > button.selected {
+  background: var(--brand-soft);
+}
+
+.semantic-list-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid #c7ddd8;
+  border-radius: 9px;
+  color: var(--brand);
+  background: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.semantic-entity-list > button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.semantic-entity-list strong,
+.semantic-entity-list code,
+.semantic-entity-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.semantic-entity-list strong {
+  font-size: 12px;
+}
+
+.semantic-entity-list code,
+.semantic-entity-list small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.semantic-no-match {
+  margin: 24px 12px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 11px;
+}
+
+.semantic-detail-stack {
+  display: grid;
+  min-width: 0;
+  gap: 18px;
+}
+
+.semantic-entity-detail,
+.semantic-child-panel {
+  overflow: hidden;
+}
+
+.semantic-detail-hero {
+  display: grid;
+  grid-template-columns: 50px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 15px;
+  padding: 21px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(135deg, #fbfefd, #f5f3fb);
+}
+
+.semantic-detail-mark {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  border: 1px solid #c3dcd6;
+  border-radius: 13px;
+  color: var(--brand);
+  background: #fff;
+  font-size: 17px;
+  font-weight: 800;
+  box-shadow: 0 5px 14px rgb(41 74 67 / 8%);
+}
+
+.semantic-detail-hero h2 {
+  margin: 4px 0 5px;
+  color: #172925;
+  font-size: 21px;
+}
+
+.semantic-detail-hero p {
+  max-width: 720px;
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.semantic-detail-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 11px;
+  gap: 7px;
+}
+
+.semantic-detail-statuses > span:not(.status-pill) {
+  padding: 4px 8px;
+  border: 1px solid #d9e4e1;
+  border-radius: 999px;
+  color: #5c6e69;
+  background: #fff;
+  font-size: 9px;
+}
+
+.semantic-detail-actions,
+.semantic-child-heading > div:last-child,
+.deliverable-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.semantic-governance-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  padding: 18px 21px;
+  border-bottom: 1px solid var(--line);
+  gap: 14px;
+}
+
+.semantic-governance-grid > div,
+.semantic-specific-section dl > div,
+.deliverable-detail > dl > div {
+  display: grid;
+  gap: 4px;
+}
+
+.semantic-governance-grid dt,
+.semantic-specific-section dt,
+.deliverable-detail dt {
+  color: #7b8d88;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.semantic-governance-grid dd,
+.semantic-specific-section dd,
+.deliverable-detail dd {
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: #2d413c;
+  font-size: 11px;
+}
+
+.semantic-permission-section,
+.semantic-association-section,
+.semantic-specific-section {
+  padding: 17px 21px;
+  border-bottom: 1px solid var(--line);
+}
+
+.semantic-association-section:last-child,
+.semantic-specific-section:last-child {
+  border-bottom: 0;
+}
+
+.semantic-permission-section > header,
+.semantic-association-section > header,
+.semantic-specific-section > header,
+.semantic-subsection > header,
+.acceptance-section > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
+.semantic-permission-section > header strong,
+.semantic-association-section > header strong,
+.semantic-specific-section > header strong,
+.semantic-subsection > header strong,
+.acceptance-section > header strong {
+  color: #293c37;
+  font-size: 12px;
+}
+
+.semantic-permission-section > header small,
+.semantic-association-section > header small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.semantic-permissions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.semantic-permissions code {
+  padding: 4px 7px;
+  border: 1px solid #c9ddd8;
+  border-radius: 6px;
+  color: #267166;
+  background: #f4fbf9;
+  font-size: 9px;
+}
+
+.semantic-permissions span {
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.semantic-specific-section dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  gap: 12px;
+}
+
+.semantic-association-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.semantic-association-grid > div {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  padding: 10px;
+  border: 1px solid #d7e4e1;
+  border-radius: 9px;
+  background: #fafdfc;
+  gap: 2px 8px;
+}
+
+.semantic-association-grid > div > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  grid-row: 1 / -1;
+  place-items: center;
+  border-radius: 50%;
+  color: #24755f;
+  background: #e7f7f1;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.semantic-association-grid > div.warning {
+  border-color: #ecdba6;
+  background: #fffcf2;
+}
+
+.semantic-association-grid > div.warning > span {
+  color: #9b6c0d;
+  background: #fff1c6;
+}
+
+.semantic-association-grid strong {
+  font-size: 10px;
+}
+
+.semantic-association-grid small {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.semantic-child-heading {
+  display: flex;
+  min-height: 78px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 17px 20px;
+  border-bottom: 1px solid var(--line);
+}
+
+.semantic-child-heading h3 {
+  margin: 3px 0;
+  color: #243732;
+  font-size: 15px;
+}
+
+.semantic-child-heading p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.semantic-child-panel > .notice {
+  margin: 12px 16px 0;
+}
+
+.semantic-version-list {
+  display: grid;
+  padding: 16px;
+  gap: 11px;
+}
+
+.semantic-version-card {
+  position: relative;
+  padding: 15px;
+  border: 1px solid #dce7e4;
+  border-radius: 10px;
+  background: #fbfdfc;
+}
+
+.semantic-version-card > header,
+.semantic-version-card > footer,
+.deliverable-detail > header,
+.acceptance-list article > header,
+.acceptance-list article > footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.semantic-version-card > header > div {
+  display: grid;
+  gap: 3px;
+}
+
+.semantic-version-card > header strong {
+  font-size: 14px;
+}
+
+.semantic-version-card > header small,
+.semantic-version-updated {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.semantic-version-card > p {
+  margin: 12px 0;
+  color: #42554f;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.semantic-version-card > dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 13px 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f1f6f4;
+  gap: 9px;
+}
+
+.semantic-version-card dt {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.semantic-version-card dd {
+  overflow-wrap: anywhere;
+  margin: 3px 0 0;
+  font-size: 9px;
+}
+
+.semantic-version-card > footer {
+  justify-content: flex-end;
+  margin-top: 13px;
+}
+
+.process-node-list {
+  display: flex;
+  overflow-x: auto;
+  padding: 10px 0 2px;
+  gap: 7px;
+}
+
+.process-node-list > span {
+  display: grid;
+  min-width: 130px;
+  grid-template-columns: 22px minmax(0, 1fr);
+  padding: 8px;
+  border: 1px solid #d6e3df;
+  border-radius: 8px;
+  background: #fff;
+  gap: 2px 6px;
+}
+
+.process-node-list i {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  grid-row: 1 / -1;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: var(--brand);
+  font-size: 8px;
+  font-style: normal;
+}
+
+.process-node-list strong {
+  font-size: 9px;
+}
+
+.process-node-list code,
+.process-node-list small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.semantic-relation-list {
+  display: grid;
+  padding: 14px 16px 17px;
+  gap: 8px;
+}
+
+.semantic-relation-list > article {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  padding: 11px;
+  border: 1px solid #dce7e4;
+  border-radius: 9px;
+  background: #fbfdfc;
+  gap: 10px;
+}
+
+.semantic-relation-list > article > div:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.semantic-relation-list > article > div:last-child {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.semantic-relation-list strong {
+  font-size: 10px;
+}
+
+.semantic-relation-list code,
+.semantic-relation-list small,
+.semantic-relation-list p {
+  overflow-wrap: anywhere;
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.semantic-relation-list p {
+  margin: 3px 0 0;
+}
+
+.semantic-link-direction {
+  min-width: 48px;
+  padding: 5px 7px;
+  border-radius: 999px;
+  color: #266b60;
+  background: #eaf7f3;
+  text-align: center;
+  font-size: 8px;
+  font-weight: 800;
+}
+
+.semantic-link-direction.removed,
+.semantic-link-direction.retired {
+  color: #76837f;
+  background: #edf1f0;
+}
+
+.semantic-subsection {
+  padding: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.semantic-subsection:first-of-type {
+  border-top: 0;
+}
+
+.semantic-subsection > header > span,
+.acceptance-section > header > span {
+  display: grid;
+  min-width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 999px;
+  color: #45635c;
+  background: #edf4f2;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.semantic-subsection-empty {
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.deliverable-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.62fr) minmax(340px, 1.38fr);
+  overflow: hidden;
+  border: 1px solid #dce7e4;
+  border-radius: 10px;
+}
+
+.deliverable-list {
+  display: grid;
+  align-content: start;
+  padding: 6px;
+  border-right: 1px solid #dce7e4;
+  background: #f7faf9;
+  gap: 3px;
+}
+
+.deliverable-list > button {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  padding: 8px;
+  border: 0;
+  border-radius: 8px;
+  color: #334640;
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+  gap: 8px;
+}
+
+.deliverable-list > button.selected {
+  background: #fff;
+  box-shadow: 0 2px 10px rgb(24 48 42 / 8%);
+}
+
+.deliverable-list > button > span:first-child {
+  display: grid;
+  width: 27px;
+  height: 27px;
+  place-items: center;
+  border-radius: 7px;
+  color: var(--brand);
+  background: var(--brand-soft);
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.deliverable-list > button > span:last-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.deliverable-list strong {
+  font-size: 9px;
+}
+
+.deliverable-list code,
+.deliverable-list small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 7px;
+}
+
+.deliverable-detail {
+  min-width: 0;
+  padding: 14px;
+  background: #fff;
+}
+
+.deliverable-detail h4 {
+  margin: 3px 0;
+  font-size: 13px;
+}
+
+.deliverable-detail > header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.deliverable-detail > dl {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 14px 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: #f5f8f7;
+  gap: 8px;
+}
+
+.deliverable-actions {
+  justify-content: flex-start;
+}
+
+.acceptance-section {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.acceptance-list {
+  display: grid;
+  gap: 7px;
+}
+
+.acceptance-list > article {
+  padding: 10px;
+  border: 1px solid #dce7e4;
+  border-radius: 8px;
+  background: #fbfdfc;
+}
+
+.acceptance-list p {
+  margin: 7px 0;
+  color: #455952;
+  font-size: 9px;
+}
+
+.acceptance-list small {
+  color: var(--muted);
+  font-size: 8px;
+}
+
+.acceptance-list footer {
+  justify-content: flex-end;
+  margin-top: 9px;
+}
+
+.semantic-json-editor textarea {
+  min-height: min(52vh, 520px);
+  tab-size: 2;
+  color: #263b35;
+  background: #f8fbfa;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+@media (max-width: 1180px) {
+  .semantic-resource-tabs {
+    grid-template-columns: repeat(4, minmax(130px, 1fr));
+  }
+
+  .semantic-resource-layout {
+    grid-template-columns: minmax(240px, 0.7fr) minmax(460px, 1.3fr);
+  }
+
+  .semantic-specific-section dl,
+  .semantic-version-card > dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 840px) {
+  .semantic-chain {
+    justify-content: flex-start;
+  }
+
+  .semantic-resource-tabs {
+    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  }
+
+  .semantic-resource-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .semantic-entity-index {
+    position: static;
+  }
+
+  .semantic-entity-list {
+    max-height: 320px;
+  }
+
+  .semantic-detail-hero {
+    grid-template-columns: 44px minmax(0, 1fr);
+  }
+
+  .semantic-detail-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .semantic-governance-grid,
+  .semantic-association-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .deliverable-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .deliverable-list {
+    border-right: 0;
+    border-bottom: 1px solid #dce7e4;
+  }
+}

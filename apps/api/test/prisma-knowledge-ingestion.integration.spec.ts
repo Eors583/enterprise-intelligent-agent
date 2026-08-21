@@ -5,17 +5,21 @@ import {
   authSessionResponseSchema,
   knowledgeBaseSchema,
   knowledgeDocumentSchema,
+  knowledgeGraphOverviewSchema,
+  knowledgeGraphResponseSchema,
   knowledgeRetrievalTestResponseSchema,
 } from '@enterprise/contracts';
 import request from 'supertest';
 
 import { validateEnvironment, type EnvironmentVariables } from '../src/config/environment.js';
 import { OutboxPrismaService } from '../src/database/outbox-prisma.service.js';
+import { KnowledgeIngestionAvailabilityService } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion-availability.service.js';
 import { KnowledgeIngestionProcessor } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.service.js';
 import { KnowledgeIngestionWorker } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.worker.js';
 import { PrismaKnowledgeIngestionJobRepository } from '../src/modules/knowledge-ingestion/infrastructure/prisma-knowledge-ingestion-job.repository.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
 import { LocalKnowledgeObjectStore } from '../src/modules/knowledge-ingestion/infrastructure/local-knowledge-object.store.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantSlug = 'knowledge-ingestion-integration';
@@ -34,6 +38,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       createWorkerConfig(),
       new PrismaKnowledgeIngestionJobRepository(queueClient),
       app.get(KnowledgeIngestionProcessor),
+      app.get(KnowledgeIngestionAvailabilityService),
     );
   });
 
@@ -59,7 +64,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       .expect(201);
     const session = authSessionResponseSchema.parse(registration.body);
     const authorization = { Authorization: `Bearer ${session.accessToken}` };
-
+    const tenantId = session.account.tenantId;
     const knowledgeBase = knowledgeBaseSchema.parse(
       (
         await request(app.getHttpServer())
@@ -75,23 +80,21 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .expect(201)
       ).body,
     );
-
-    const draft = knowledgeDocumentSchema.parse(
-      (
-        await request(app.getHttpServer())
-          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
-          .set(authorization)
-          .send({
-            title: '待审核草稿',
-            sourceType: 'MARKDOWN',
-            contentText: '# 草稿\n\nLEGACYPOLICYALPHA 尚未发布的内容。',
-            status: 'DRAFT',
-          })
-          .expect(201)
-      ).body,
-    );
-    expect(draft).toMatchObject({ status: 'DRAFT', currentVersionId: null });
-    expect(draft.versions[0]).toMatchObject({
+    const draftResponse = await request(app.getHttpServer())
+      .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+      .set(authorization)
+      .send({
+        title: '待审核草稿',
+        sourceType: 'MARKDOWN',
+        contentText: '# 草稿\n\nLEGACYPOLICYALPHA 尚未发布的内容。',
+        status: 'DRAFT',
+      });
+    if (draftResponse.status !== 201) {
+      throw new Error(`Draft creation failed: ${JSON.stringify(draftResponse.body)}`);
+    }
+    const unpublishedDraft = knowledgeDocumentSchema.parse(draftResponse.body);
+    expect(unpublishedDraft).toMatchObject({ status: 'DRAFT', currentVersionId: null });
+    expect(unpublishedDraft.versions[0]).toMatchObject({
       status: 'DRAFT',
       chunkCount: 0,
       ingestionJob: null,
@@ -106,27 +109,49 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .expect(201)
       ).body,
     );
-    expect(beforeDraftPublish.items.some((item) => item.documentId === draft.id)).toBe(false);
+    expect(beforeDraftPublish.items.some((item) => item.documentId === unpublishedDraft.id)).toBe(
+      false,
+    );
 
     const firstQueued = knowledgeDocumentSchema.parse(
       (
         await request(app.getHttpServer())
-          .post(
-            `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${draft.id}/versions/${draft.versions[0]?.id}/publish`,
-          )
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
           .set(authorization)
+          /*
+          .send({
+            title: '寰呭鏍歌崏绋?,
+            sourceType: 'MARKDOWN',
+            contentText: '# 鑽夌\n\nLEGACYPOLICYALPHA 灏氭湭鍙戝竷鐨勫唴瀹广€?,
+            status: 'READY',
+          })
+          */
+          .send({
+            title: 'Published policy draft',
+            sourceType: 'MARKDOWN',
+            contentText:
+              '# Legacy policy\n\nLEGACYPOLICYALPHA is visible only after governed publication.',
+            status: 'READY',
+          })
           .expect(201)
       ).body,
     );
+    const draft = firstQueued;
     expect(firstQueued.versions[0]).toMatchObject({
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    const firstPublished = await processDocument(
+    const firstIndexed = await processDocument(
       authorization,
       knowledgeBase.id,
       draft.id,
-      draft.versions[0]?.id,
+      firstQueued.versions[0]?.id,
+    );
+    const firstPublished = await publishIndexedDocument(
+      authorization,
+      knowledgeBase.id,
+      draft.id,
+      firstIndexed.versions[0]?.id,
     );
     const firstPublishedVersion = firstPublished.versions.find(
       (version) => version.id === firstPublished.currentVersionId,
@@ -137,20 +162,281 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       chunkCount: 1,
       ingestionJob: { status: 'SUCCEEDED' },
     });
-
-    await request(app.getHttpServer())
-      .patch(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}`)
-      .set(authorization)
-      .send({ status: 'ACTIVE', expectedVersion: knowledgeBase.version })
-      .expect(409);
-    // This ingestion/RLS fixture deliberately runs without an external
-    // Embedding or Reranker provider, so the enterprise readiness gate must
-    // reject API activation. Promote only the isolated fixture directly to
-    // continue exercising lexical retrieval and version publication below.
-    await administrator.knowledgeBase.update({
-      where: { id: knowledgeBase.id },
-      data: { status: 'ACTIVE' },
+    const firstGraphOverview = knowledgeGraphOverviewSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/graph-overview`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    expect(firstGraphOverview).toMatchObject({
+      status: 'DEGRADED',
+      publishedChunkCount: 1,
+      linkedChunkCount: 1,
+      mentionCoverage: 1,
+      evidenceCoverage: 1,
+      diagnostics: expect.arrayContaining(['NO_PUBLISHED_ONTOLOGY', 'OPEN_GRAPH_CONFLICTS']),
     });
+    expect(firstGraphOverview.entityCount).toBeGreaterThan(0);
+    expect(firstGraphOverview.relationCount).toBeGreaterThan(0);
+    expect(firstGraphOverview.evidenceCount).toBeGreaterThan(0);
+    const firstGraph = knowledgeGraphResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/graph?limit=50`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    expect(firstGraph.entities.length).toBeGreaterThan(0);
+    expect(firstGraph.relations.length).toBeGreaterThan(0);
+
+    const activatedKnowledgeBase = knowledgeBaseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .patch(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}`)
+          .set(authorization)
+          .send({ status: 'ACTIVE', expectedVersion: knowledgeBase.version })
+          .expect(200)
+      ).body,
+    );
+    expect(activatedKnowledgeBase).toMatchObject({ status: 'ACTIVE', version: 2 });
+
+    const relationshipSeedQueued = knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+          .set(authorization)
+          .send({
+            title: '关系检索入口',
+            sourceType: 'MARKDOWN',
+            contentText:
+              '# 关系入口\n\n关系验收口令 GRAPHSEEDTOKEN2026。\n安全平台主管负责应急响应流程。',
+            status: 'READY',
+          })
+          .expect(201)
+      ).body,
+    );
+    const relationshipSeed = await processAndPublishDocument(
+      authorization,
+      knowledgeBase.id,
+      relationshipSeedQueued.id,
+      relationshipSeedQueued.versions[0]?.id,
+    );
+    const relationshipTargetQueued = knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+          .set(authorization)
+          .send({
+            title: '应急系统依赖',
+            sourceType: 'MARKDOWN',
+            contentText: '# 应急依赖\n\n应急响应流程依赖统一告警系统。',
+            status: 'READY',
+          })
+          .expect(201)
+      ).body,
+    );
+    const relationshipTarget = await processAndPublishDocument(
+      authorization,
+      knowledgeBase.id,
+      relationshipTargetQueued.id,
+      relationshipTargetQueued.versions[0]?.id,
+    );
+    const sameTitleDocuments = [];
+    for (const suffix of ['甲', '乙']) {
+      const queued = knowledgeDocumentSchema.parse(
+        (
+          await request(app.getHttpServer())
+            .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents`)
+            .set(authorization)
+            .send({
+              title: '同名管理制度',
+              sourceType: 'MARKDOWN',
+              contentText: `# 总则\n\n负责人：平台组\n同名制度${suffix}的专属内容。`,
+              status: 'READY',
+            })
+            .expect(201)
+        ).body,
+      );
+      sameTitleDocuments.push(
+        await processAndPublishDocument(
+          authorization,
+          knowledgeBase.id,
+          queued.id,
+          queued.versions[0]?.id,
+        ),
+      );
+    }
+    const sameTitleDocumentEntities = await administrator.$queryRaw<
+      Array<{ readonly externalKey: string | null }>
+    >`
+      SELECT entity."external_key" AS "externalKey"
+      FROM public."knowledge_entities" AS entity
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'DOCUMENT'
+        AND entity."canonical_name" = '同名管理制度'
+      ORDER BY entity."external_key"
+    `;
+    expect(sameTitleDocumentEntities.map((entity) => entity.externalKey)).toEqual(
+      sameTitleDocuments
+        .map((document) => `document:${document.id}`)
+        .sort((left, right) => left.localeCompare(right)),
+    );
+    const sameTitleSections = await administrator.$queryRaw<
+      Array<{ readonly externalKey: string | null }>
+    >`
+      SELECT entity."external_key" AS "externalKey"
+      FROM public."knowledge_entities" AS entity
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'SECTION'
+        AND entity."canonical_name" = '同名管理制度 / 总则'
+    `;
+    expect(sameTitleSections).toHaveLength(2);
+    expect(new Set(sameTitleSections.map((entity) => entity.externalKey)).size).toBe(2);
+    const sharedSemanticEntities = await administrator.$queryRaw<
+      Array<{ readonly id: string; readonly documentIds: string[] }>
+    >`
+      SELECT
+        entity."id"::text AS id,
+        array_agg(DISTINCT mention."document_id"::text ORDER BY mention."document_id"::text)
+          AS "documentIds"
+      FROM public."knowledge_entities" AS entity
+      JOIN public."knowledge_entity_mentions" AS mention
+        ON mention."tenant_id" = entity."tenant_id"
+       AND mention."knowledge_base_id" = entity."knowledge_base_id"
+       AND mention."entity_id" = entity."id"
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'PERSON'
+        AND entity."normalized_name" = '平台组'
+        AND entity."external_key" IS NULL
+      GROUP BY entity."id"
+    `;
+    expect(sharedSemanticEntities).toHaveLength(1);
+    expect(new Set(sharedSemanticEntities[0]?.documentIds)).toEqual(
+      new Set(sameTitleDocuments.map((document) => document.id)),
+    );
+
+    const sourceDocument = sameTitleDocuments[0];
+    if (sourceDocument === undefined) throw new Error('Expected a source document to rename.');
+    const renamedQueued = knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .patch(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${sourceDocument.id}`)
+          .set(authorization)
+          .send({
+            title: '同名管理制度（修订版）',
+            contentText: '# 总则\n\n负责人：平台组\n同名制度甲的修订内容。',
+            status: 'READY',
+            expectedVersion: sourceDocument.documentVersion,
+          })
+          .expect(200)
+      ).body,
+    );
+    const renamedVersion = renamedQueued.versions.find(
+      (version) => version.versionNumber === sourceDocument.documentVersion + 1,
+    );
+    await processAndPublishDocument(
+      authorization,
+      knowledgeBase.id,
+      sourceDocument.id,
+      renamedVersion?.id,
+    );
+    const renamedSourceEntities = await administrator.$queryRaw<
+      Array<{
+        readonly canonicalName: string;
+        readonly aliases: string[];
+      }>
+    >`
+      SELECT
+        entity."canonical_name" AS "canonicalName",
+        entity."aliases"
+      FROM public."knowledge_entities" AS entity
+      WHERE entity."tenant_id" = ${tenantId}::uuid
+        AND entity."knowledge_base_id" = ${knowledgeBase.id}::uuid
+        AND entity."entity_type" = 'DOCUMENT'
+        AND entity."external_key" = ${`document:${sourceDocument.id}`}
+    `;
+    expect(renamedSourceEntities).toEqual([
+      expect.objectContaining({
+        canonicalName: '同名管理制度（修订版）',
+        aliases: expect.arrayContaining(['同名管理制度']),
+      }),
+    ]);
+    const renamedAliases = renamedSourceEntities[0]?.aliases ?? [];
+    expect(renamedAliases).not.toContain('同名管理制度（修订版）');
+    expect(new Set(renamedAliases).size).toBe(renamedAliases.length);
+    expect(renamedAliases.length).toBeLessThanOrEqual(32);
+    expect(renamedAliases.every((alias) => alias.length <= 160)).toBe(true);
+
+    const relationshipRetrieval = knowledgeRetrievalTestResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/retrieval-test`)
+          .set(authorization)
+          .send({ query: 'GRAPHSEEDTOKEN2026 关联', limit: 8 })
+          .expect(201)
+      ).body,
+    );
+    expect(
+      relationshipRetrieval.relationshipCandidateCount,
+      JSON.stringify(relationshipRetrieval.diagnostics),
+    ).toBeGreaterThan(0);
+    expect(relationshipRetrieval.relationshipExpandedCount).toBeGreaterThan(0);
+    expect(relationshipRetrieval.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'RELATIONSHIP',
+          status: 'APPLIED',
+          code: 'KNOWLEDGE_RELATIONSHIP_EXPANSION_APPLIED',
+        }),
+      ]),
+    );
+    const relationshipSeedResult = relationshipRetrieval.items.find(
+      (item) => item.documentId === relationshipSeed.id,
+    );
+    expect(relationshipSeedResult).toMatchObject({
+      documentVersionId: relationshipSeed.currentVersionId,
+      relationshipScore: 0,
+      relationshipEvidence: [],
+    });
+    expect(relationshipSeed.currentVersionId).not.toBeNull();
+    expect(relationshipTarget.currentVersionId).not.toBeNull();
+
+    const aliasUpdate = await administrator.knowledgeEntity.updateMany({
+      where: {
+        tenantId,
+        knowledgeBaseId: knowledgeBase.id,
+        canonicalName: '安全平台主管',
+        status: 'ACTIVE',
+      },
+      data: { aliases: ['ROOTGRAPHALIAS-2026'] },
+    });
+    expect(aliasUpdate.count).toBeGreaterThan(0);
+    const directEntitySeedRetrieval = knowledgeRetrievalTestResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/retrieval-test`)
+          .set(authorization)
+          .send({ query: 'ROOTGRAPHALIAS-2026 关系', limit: 8 })
+          .expect(201)
+      ).body,
+    );
+    expect(directEntitySeedRetrieval.relationshipCandidateCount).toBeGreaterThan(0);
+    expect(directEntitySeedRetrieval.relationshipExpandedCount).toBeGreaterThan(0);
+    expect(directEntitySeedRetrieval.diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'RELATIONSHIP',
+          status: 'APPLIED',
+          code: 'KNOWLEDGE_RELATIONSHIP_EXPANSION_APPLIED',
+        }),
+      ]),
+    );
 
     const secondDraft = knowledgeDocumentSchema.parse(
       (
@@ -159,14 +445,18 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .set(authorization)
           .send({
             contentText: '# 新制度\n\nDRAFTPOLICYOMEGA 仅在发布后可检索。',
-            status: 'DRAFT',
+            status: 'READY',
             expectedVersion: firstPublished.documentVersion,
           })
           .expect(200)
       ).body,
     );
     const secondDraftVersion = secondDraft.versions.find((version) => version.versionNumber === 2);
-    expect(secondDraftVersion).toMatchObject({ status: 'DRAFT', chunkCount: 0 });
+    expect(secondDraftVersion).toMatchObject({
+      status: 'PROCESSING',
+      chunkCount: 0,
+      ingestionJob: { status: 'PENDING', attempts: 0 },
+    });
     if (secondDraftVersion === undefined || firstPublishedVersion === undefined) {
       throw new Error('Expected both publication test versions.');
     }
@@ -187,23 +477,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       beforeSecondPublish.items.some((item) => item.excerpt.includes('DRAFTPOLICYOMEGA')),
     ).toBe(false);
 
-    const secondQueued = knowledgeDocumentSchema.parse(
-      (
-        await request(app.getHttpServer())
-          .post(
-            `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${draft.id}/versions/${secondDraftVersion.id}/publish`,
-          )
-          .set(authorization)
-          .expect(201)
-      ).body,
-    );
-    expect(
-      secondQueued.versions.find((version) => version.id === secondDraftVersion.id),
-    ).toMatchObject({
-      status: 'PROCESSING',
-      ingestionJob: { status: 'PENDING', attempts: 0 },
-    });
-    const secondPublished = await processDocument(
+    const secondPublished = await processAndPublishDocument(
       authorization,
       knowledgeBase.id,
       draft.id,
@@ -233,7 +507,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       ]),
     );
 
-    const rolledBack = knowledgeDocumentSchema.parse(
+    const rollbackCandidateDocument = knowledgeDocumentSchema.parse(
       (
         await request(app.getHttpServer())
           .post(
@@ -243,6 +517,36 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
           .send({ expectedCurrentVersionId: secondDraftVersion.id })
           .expect(201)
       ).body,
+    );
+    expect(rollbackCandidateDocument).toMatchObject({
+      currentVersionId: secondDraftVersion.id,
+      documentVersion: 2,
+    });
+    const rollbackCandidate = rollbackCandidateDocument.versions.find(
+      (version) => version.versionNumber === 3,
+    );
+    if (rollbackCandidate === undefined) {
+      throw new Error('Expected a rollback candidate version.');
+    }
+    const [rollbackClock] = await administrator.$queryRaw<
+      Array<{ databaseDefaultClock: boolean; retrievalEligible: boolean }>
+    >`
+      SELECT
+        version."effective_from" = version."created_at" AS "databaseDefaultClock",
+        version."effective_from" <= statement_timestamp() AS "retrievalEligible"
+      FROM public."knowledge_document_versions" AS version
+      WHERE version."tenant_id" = ${tenantId}::uuid
+        AND version."id" = ${rollbackCandidate.id}::uuid
+    `;
+    expect(rollbackClock).toEqual({
+      databaseDefaultClock: true,
+      retrievalEligible: true,
+    });
+    const rolledBack = await publishIndexedDocument(
+      authorization,
+      knowledgeBase.id,
+      draft.id,
+      rollbackCandidate.id,
     );
     expect(rolledBack.documentVersion).toBe(3);
     expect(rolledBack.currentVersionId).not.toBe(firstPublishedVersion.id);
@@ -292,6 +596,30 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
     expect(
       afterRollbackNewContent.items.some((item) => item.excerpt.includes('DRAFTPOLICYOMEGA')),
     ).toBe(false);
+    const rebuiltGraph = await request(app.getHttpServer())
+      .post(
+        `/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${draft.id}/versions/${rolledBack.currentVersionId}/rebuild-graph`,
+      )
+      .set(authorization)
+      .expect(409);
+    expect(rebuiltGraph.body).toMatchObject({
+      code: 'CONFLICT',
+      message: 'An active graph projection is immutable. Create and govern a new document version.',
+    });
+    const rollbackGraph = knowledgeGraphResponseSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .get(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/graph?limit=50`)
+          .set(authorization)
+          .expect(200)
+      ).body,
+    );
+    expect(
+      rollbackGraph.relations
+        .flatMap((relation) => relation.evidence)
+        .filter((evidence) => evidence.documentId === draft.id)
+        .every((evidence) => evidence.documentVersionId === rolledBack.currentVersionId),
+    ).toBe(true);
 
     const uploadedQueued = knowledgeDocumentSchema.parse(
       (
@@ -316,7 +644,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    const uploaded = await processDocument(
+    const uploaded = await processAndPublishDocument(
       authorization,
       knowledgeBase.id,
       uploadedQueued.id,
@@ -377,7 +705,7 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    const revised = await processDocument(
+    const revised = await processAndPublishDocument(
       authorization,
       knowledgeBase.id,
       uploaded.id,
@@ -514,6 +842,36 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
     });
   });
 
+  async function processAndPublishDocument(
+    authorization: Record<string, string>,
+    knowledgeBaseId: string,
+    documentId: string,
+    documentVersionId: string | undefined,
+  ) {
+    await processDocument(authorization, knowledgeBaseId, documentId, documentVersionId);
+    return publishIndexedDocument(authorization, knowledgeBaseId, documentId, documentVersionId);
+  }
+
+  async function publishIndexedDocument(
+    authorization: Record<string, string>,
+    knowledgeBaseId: string,
+    documentId: string,
+    documentVersionId: string | undefined,
+  ) {
+    if (documentVersionId === undefined) throw new Error('Expected a document version id.');
+    return knowledgeDocumentSchema.parse(
+      (
+        await request(app.getHttpServer())
+          .post(
+            `/api/v1/admin/knowledge-bases/${knowledgeBaseId}/documents/${documentId}/versions/${documentVersionId}/publish`,
+          )
+          .set(authorization)
+          .send({})
+          .expect(201)
+      ).body,
+    );
+  }
+
   async function processDocument(
     authorization: Record<string, string>,
     knowledgeBaseId: string,
@@ -521,8 +879,11 @@ describe.runIf(enabled)('PostgreSQL knowledge ingestion HTTP integration', () =>
     documentVersionId: string | undefined,
   ) {
     if (documentVersionId === undefined) throw new Error('Expected a document version id.');
-    await expect(worker.runOnce()).resolves.toBe(1);
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      // The repository uses a separate worker connection. Poll the target
+      // version instead of assuming its just-committed queue row must be the
+      // first row visible to a single immediate claim.
+      await worker.runOnce();
       const document = knowledgeDocumentSchema.parse(
         (
           await request(app.getHttpServer())
@@ -578,36 +939,5 @@ async function cleanup(administrator: PrismaClient): Promise<void> {
     if (version.objectKey !== null) await objects.delete(version.objectKey);
   }
 
-  await administrator.directoryEmploymentBinding.deleteMany({ where: { tenantId } });
-  await administrator.directoryOrgUnitBinding.deleteMany({ where: { tenantId } });
-  await administrator.directoryUserBinding.deleteMany({ where: { tenantId } });
-  await administrator.directoryIntegration.deleteMany({ where: { tenantId } });
-  await administrator.agentRun.deleteMany({ where: { tenantId } });
-  await administrator.outboxEvent.deleteMany({ where: { tenantId } });
-  await administrator.message.deleteMany({ where: { tenantId } });
-  await administrator.conversationParticipant.deleteMany({ where: { tenantId } });
-  await administrator.conversation.deleteMany({ where: { tenantId } });
-  await administrator.agentInstance.deleteMany({ where: { tenantId } });
-  await administrator.agentVersion.deleteMany({ where: { tenantId } });
-  await administrator.agentTemplate.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeIngestionJob.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeChunk.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeDocument.updateMany({
-    where: { tenantId },
-    data: { currentVersionId: null },
-  });
-  await administrator.knowledgeDocumentVersion.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeDocument.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeBaseOrgUnit.deleteMany({ where: { tenantId } });
-  await administrator.knowledgeBase.deleteMany({ where: { tenantId } });
-  await administrator.auditEvent.deleteMany({ where: { tenantId } });
-  await administrator.managerRelation.deleteMany({ where: { tenantId } });
-  await administrator.employment.deleteMany({ where: { tenantId } });
-  await administrator.position.deleteMany({ where: { tenantId } });
-  await administrator.authSession.deleteMany({ where: { tenantId } });
-  await administrator.passwordCredential.deleteMany({ where: { tenantId } });
-  await administrator.orgUnit.deleteMany({ where: { tenantId } });
-  await administrator.organization.deleteMany({ where: { tenantId } });
-  await administrator.user.deleteMany({ where: { tenantId } });
-  await administrator.tenant.delete({ where: { id: tenantId } });
+  await cleanupDisposableTenants(administrator, [tenantId]);
 }

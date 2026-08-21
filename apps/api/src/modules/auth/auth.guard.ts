@@ -12,6 +12,7 @@ import type { Request } from 'express';
 
 import type { EnvironmentVariables } from '../../config/environment.js';
 import { AuthService } from './application/auth.service.js';
+import { BrowserSessionTransport, readBrowserAccessToken } from './browser-session.transport.js';
 import { IS_PUBLIC_ROUTE } from './public.decorator.js';
 
 @Injectable()
@@ -21,6 +22,8 @@ export class AuthGuard implements CanActivate {
     @Inject(AuthService) private readonly auth: AuthService,
     @Inject(ConfigService)
     private readonly config: ConfigService<EnvironmentVariables, true>,
+    @Inject(BrowserSessionTransport)
+    private readonly browserSession: BrowserSessionTransport,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -34,7 +37,8 @@ export class AuthGuard implements CanActivate {
     if (request.method === 'OPTIONS' || isHealthRequest(request)) return true;
 
     const authorization = request.header('authorization');
-    if (authorization === undefined) {
+    const cookieAccessToken = authorization === undefined ? readBrowserAccessToken(request) : null;
+    if (authorization === undefined && cookieAccessToken === null) {
       // Header identities remain available only as a local/test compatibility
       // bridge. Production traffic must carry an authenticated session unless
       // the existing trusted identity proxy is explicitly enabled.
@@ -47,15 +51,25 @@ export class AuthGuard implements CanActivate {
       throw unauthorized();
     }
 
-    const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization);
-    if (match === null) throw unauthorized();
+    const token =
+      authorization === undefined
+        ? cookieAccessToken
+        : /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization)?.[1];
+    if (token === null || token === undefined) throw unauthorized();
 
-    request.authPrincipal = await this.auth.authenticateAccessToken(match[1]!);
+    request.authPrincipal = await this.auth.authenticateAccessToken(token);
+    if (authorization === undefined && isMutationRequest(request)) {
+      this.browserSession.requireCsrf(request);
+    }
     if (request.authPrincipal.passwordChangeRequired && !isPasswordChangeFlowRequest(request)) {
       throw new ForbiddenException('Password change required.');
     }
     return true;
   }
+}
+
+function isMutationRequest(request: Request): boolean {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(request.method.toUpperCase());
 }
 
 function isPasswordChangeFlowRequest(request: Request): boolean {

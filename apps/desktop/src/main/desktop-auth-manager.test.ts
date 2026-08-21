@@ -5,7 +5,128 @@ import type { AccountStore } from './account-store';
 import { DesktopAuthManager } from './desktop-auth-manager';
 
 describe('DesktopAuthManager account isolation', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it('keeps MFA challenges out of storage and accepts a session only after verification', async () => {
+    const put = vi.fn(async () => undefined);
+    const store = {
+      load: vi.fn(async () => undefined),
+      get activeId() {
+        return null;
+      },
+      get: vi.fn(),
+      list: vi.fn(() => []),
+      put,
+      get persistentStorageAvailable() {
+        return true;
+      },
+    } as unknown as AccountStore;
+    const challenge = {
+      kind: 'MFA_REQUIRED' as const,
+      challenge: `ea_mfa_${'c'.repeat(52)}`,
+      expiresAt: '2031-01-01T00:05:00.000Z',
+      methods: ['TOTP', 'RECOVERY_CODE'] as const,
+    };
+    const bundle: AuthSessionResponse = {
+      accessToken: `ea_access_${'a'.repeat(43)}`,
+      refreshToken: `ea_refresh_${'b'.repeat(43)}`,
+      account: account(1),
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(challenge))
+      .mockResolvedValueOnce(jsonResponse(bundle));
+    vi.stubGlobal('fetch', fetchMock);
+    const manager = new DesktopAuthManager(store, 'http://127.0.0.1:3000');
+    await manager.initialize();
+
+    const result = await manager.login({
+      tenantSlug: 'example',
+      email: 'member@example.test',
+      password: 'password',
+      sessionLabel: '桌面应用',
+    });
+
+    expect(result).toEqual(challenge);
+    expect(put).not.toHaveBeenCalled();
+
+    const state = await manager.verifyMfaLogin({
+      challenge: challenge.challenge,
+      code: '123456',
+      method: 'TOTP',
+      sessionLabel: '桌面应用',
+    });
+
+    expect(put).toHaveBeenCalledWith(bundle.account, bundle.refreshToken);
+    expect(state.accounts).toEqual([]);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      'http://127.0.0.1:3000/api/v1/auth/login',
+      'http://127.0.0.1:3000/api/v1/auth/mfa/login/verify',
+    ]);
+  });
+
+  it('keeps OIDC discovery and authorization unauthenticated, then stores only the validated callback bundle', async () => {
+    const put = vi.fn(async () => undefined);
+    const store = {
+      load: vi.fn(async () => undefined),
+      get activeId() {
+        return null;
+      },
+      get: vi.fn(),
+      list: vi.fn(() => []),
+      put,
+      get persistentStorageAvailable() {
+        return true;
+      },
+    } as unknown as AccountStore;
+    const providers = {
+      items: [{ key: 'work-sso', displayName: 'Work SSO', protocol: 'OIDC' as const }],
+    };
+    const started = {
+      authorizationUrl: 'https://idp.example.test/authorize?state=opaque',
+      expiresAt: '2031-01-01T00:10:00.000Z',
+    };
+    const bundle: AuthSessionResponse = {
+      accessToken: `ea_access_${'a'.repeat(43)}`,
+      refreshToken: `ea_refresh_${'b'.repeat(43)}`,
+      account: account(1),
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(providers))
+      .mockResolvedValueOnce(jsonResponse(started))
+      .mockResolvedValueOnce(jsonResponse(bundle));
+    vi.stubGlobal('fetch', fetchMock);
+    const manager = new DesktopAuthManager(store, 'http://127.0.0.1:3000');
+    await manager.initialize();
+
+    await expect(manager.listOidcProviders('example')).resolves.toEqual(providers);
+    await expect(
+      manager.startOidcLogin({
+        tenantSlug: 'example',
+        providerKey: 'work-sso',
+        redirectUri: 'https://app.example.test/oidc/callback',
+        sessionLabel: '桌面应用',
+      }),
+    ).resolves.toEqual(started);
+    expect(put).not.toHaveBeenCalled();
+
+    await manager.completeOidcLogin({
+      state: 's'.repeat(32),
+      code: 'authorization-code',
+      sessionLabel: '桌面应用',
+    });
+
+    expect(put).toHaveBeenCalledWith(bundle.account, bundle.refreshToken);
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      'http://127.0.0.1:3000/api/v1/auth/oidc/providers/example',
+      'http://127.0.0.1:3000/api/v1/auth/oidc/start',
+      'http://127.0.0.1:3000/api/v1/auth/oidc/callback',
+    ]);
+  });
 
   it('uses the non-activating credential update path for a background refresh', async () => {
     const first = account(1);
@@ -190,7 +311,101 @@ describe('DesktopAuthManager account isolation', () => {
     const messageId = '50000000-0000-7000-8000-000000000001';
     const versionId = '60000000-0000-7000-8000-000000000001';
     const chunkId = '70000000-0000-7000-8000-000000000001';
+    const collaborationId = '80000000-0000-7000-8000-000000000001';
+    const correctionId = '90000000-0000-7000-8000-000000000001';
+    const memoryId = 'a0000000-0000-7000-8000-000000000001';
+    const invocationId = 'b0000000-0000-7000-8000-000000000001';
     const requests = [
+      { path: '/api/v1/role-assignments/me', method: 'GET' as const },
+      { path: '/api/v1/workbench/objectives', method: 'GET' as const },
+      { path: '/api/v1/workbench/tasks', method: 'GET' as const },
+      {
+        path: `/api/v1/workbench/tasks/${runId}/trace`,
+        method: 'GET' as const,
+      },
+      {
+        path: `/api/v1/workbench/tasks/${runId}/collaborations`,
+        method: 'GET' as const,
+      },
+      {
+        path: `/api/v1/workbench/tasks/${runId}/collaborations/${collaborationId}`,
+        method: 'GET' as const,
+      },
+      {
+        path: `/api/v1/workbench/tasks/${runId}/corrections`,
+        method: 'GET' as const,
+      },
+      {
+        path: `/api/v1/workbench/tasks/${runId}/corrections/${correctionId}/feedback`,
+        method: 'POST' as const,
+        body: { expectedRevision: 1, action: 'ACKNOWLEDGE' },
+      },
+      {
+        path: '/api/v1/workbench/people/me/personal-manual',
+        method: 'GET' as const,
+      },
+      {
+        path: '/api/v1/workbench/people/me/personal-manual',
+        method: 'PUT' as const,
+        body: { expectedUpdatedAt: null, manual: { faqs: [] } },
+      },
+      {
+        path: '/api/v1/workbench/people/me/work-availability',
+        method: 'GET' as const,
+      },
+      {
+        path: '/api/v1/workbench/people/me/work-availability',
+        method: 'PUT' as const,
+        body: {
+          expectedRevision: 0,
+          status: 'AVAILABLE',
+          startsAt: '2026-08-13T00:00:00.000Z',
+          endsAt: '2026-08-14T00:00:00.000Z',
+          disclosureScope: 'SELF_ONLY',
+        },
+      },
+      {
+        path: '/api/v1/workbench/memories?limit=100&scope=EMPLOYEE_PRIVATE&purpose=assist',
+        method: 'GET' as const,
+      },
+      { path: '/api/v1/workbench/memories', method: 'POST' as const, body: { scope: 'TASK' } },
+      { path: `/api/v1/workbench/memories/${memoryId}`, method: 'GET' as const },
+      {
+        path: `/api/v1/workbench/memories/${memoryId}/transitions`,
+        method: 'POST' as const,
+        body: { action: 'CONFIRM' },
+      },
+      { path: '/api/v1/workbench/experiences?limit=25', method: 'GET' as const },
+      {
+        path: '/api/v1/workbench/experiences',
+        method: 'POST' as const,
+        body: { sourceTaskId: runId },
+      },
+      {
+        path: `/api/v1/workbench/experience-sources?taskId=${runId}`,
+        method: 'GET' as const,
+      },
+      {
+        path: '/api/v1/workbench/ai-usage?groupLimit=25&from=2026-07-01T00%3A00%3A00.000Z&to=2026-07-28T00%3A00%3A00.000Z',
+        method: 'GET' as const,
+      },
+      { path: `/api/v1/workbench/tools?taskId=${runId}`, method: 'GET' as const },
+      { path: `/api/v1/workbench/tool-approvals?taskId=${runId}`, method: 'GET' as const },
+      { path: '/api/v1/workbench/tool-invocations', method: 'GET' as const },
+      {
+        path: '/api/v1/workbench/tool-invocations',
+        method: 'POST' as const,
+        body: { toolVersionId: versionId, taskId: runId },
+      },
+      {
+        path: `/api/v1/workbench/tool-invocations/${invocationId}`,
+        method: 'GET' as const,
+      },
+      {
+        path: `/api/v1/workbench/tool-invocations/${invocationId}/actions`,
+        method: 'POST' as const,
+        body: { action: 'CONFIRM' },
+      },
       { path: `/api/v1/messages/${messageId}/feedback`, method: 'GET' as const },
       {
         path: `/api/v1/messages/${messageId}/feedback`,
@@ -204,6 +419,10 @@ describe('DesktopAuthManager account isolation', () => {
       {
         path: `/api/v1/conversations/${conversationId}/runs/${runId}/retry`,
         method: 'POST' as const,
+      },
+      {
+        path: `/api/v1/conversations/${conversationId}/runs/${runId}/events?cursor=10001&limit=128`,
+        method: 'GET' as const,
       },
       {
         path: `/api/v1/knowledge-citations/${versionId}/chunks/${chunkId}`,
@@ -251,8 +470,99 @@ describe('DesktopAuthManager account isolation', () => {
     ).rejects.toThrow('The requested desktop API operation is not allowed.');
     await expect(
       manager.apiRequest({
+        path: '/api/v1/workbench/tools?taskId=not-a-uuid',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/memories?next=https://attacker.example',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/experiences?next=https://attacker.example',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/experience-sources?taskId=not-a-uuid',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/ai-usage?next=https://attacker.example',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/tasks/not-a-uuid/trace',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/tasks',
+        method: 'POST',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/tasks/40000000-0000-7000-8000-000000000001/collaborations',
+        method: 'POST',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/tasks/40000000-0000-7000-8000-000000000001/corrections/not-a-uuid/feedback',
+        method: 'POST',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/workbench/tasks/40000000-0000-7000-8000-000000000001/corrections/90000000-0000-7000-8000-000000000001/feedback',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
         path: '/api/v1/messages/50000000-0000-7000-8000-000000000001/feedback',
         method: 'DELETE',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/conversations/30000000-0000-7000-8000-000000000001/runs/40000000-0000-7000-8000-000000000001/events?cursor=17&limit=999',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/conversations/30000000-0000-7000-8000-000000000001/runs/40000000-0000-7000-8000-000000000001/events?cursor=10002&limit=128',
+        method: 'GET',
+        expectedSessionId: first.sessionId,
+      }),
+    ).rejects.toThrow('The requested desktop API operation is not allowed.');
+    await expect(
+      manager.apiRequest({
+        path: '/api/v1/conversations/30000000-0000-7000-8000-000000000001/runs/40000000-0000-7000-8000-000000000001/events?cursor=17&limit=128&next=https://attacker.example',
+        method: 'GET',
         expectedSessionId: first.sessionId,
       }),
     ).rejects.toThrow('The requested desktop API operation is not allowed.');
@@ -379,6 +689,68 @@ describe('DesktopAuthManager account isolation', () => {
       newAccessToken,
       newAccessToken,
     ]);
+  });
+
+  it('retries a transient realtime session failure without requiring a renderer reload', async () => {
+    vi.useFakeTimers();
+    const first = account(1);
+    const accessToken = `ea_access_${'a'.repeat(43)}`;
+    const store = {
+      load: vi.fn(async () => undefined),
+      get activeId() {
+        return first.sessionId;
+      },
+      get: vi.fn(() => ({ account: first, refreshToken: 'ea_refresh_previous' })),
+      list: vi.fn(() => [first]),
+      get persistentStorageAvailable() {
+        return true;
+      },
+    } as unknown as AccountStore;
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ message: 'Realtime is starting.' }), {
+          status: 503,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          available: false,
+          provider: 'local',
+          reason: 'REALTIME_NOT_CONFIGURED',
+        }),
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    const manager = new DesktopAuthManager(store, 'http://127.0.0.1:3000');
+    await manager.initialize();
+    const accessTokens = Reflect.get(manager, 'accessTokens') as Map<
+      string,
+      { token: string; expiresAt: number }
+    >;
+    accessTokens.set(first.sessionId, {
+      token: accessToken,
+      expiresAt: Date.now() + 60_000,
+    });
+    const emit = vi.fn();
+    const controller = new AbortController();
+
+    const running = manager.streamImRealtime(
+      { expectedSessionId: first.sessionId },
+      emit,
+      controller.signal,
+    );
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(250);
+    await expect(running).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(emit).toHaveBeenCalledWith({
+      kind: 'state',
+      state: 'reconnecting',
+      error: 'Realtime messaging connection was interrupted.',
+    });
+    expect(emit).toHaveBeenLastCalledWith({ kind: 'state', state: 'unavailable' });
   });
 });
 

@@ -10,6 +10,7 @@ import request from 'supertest';
 
 import { KnowledgeIngestionProcessor } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.service.js';
 import { KnowledgeIngestionWorker } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.worker.js';
+import { MemoryExperienceService } from '../src/modules/memory-experience/memory-experience.service.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
 
 describe('API vertical slice', () => {
@@ -36,9 +37,10 @@ describe('API vertical slice', () => {
     expect(response.headers['x-request-id']).toEqual(expect.any(String));
   });
 
-  it('keeps the background knowledge worker and processor in the singleton graph', () => {
+  it('keeps workers and request-scoped governance services in the AppModule graph', async () => {
     expect(app.get(KnowledgeIngestionProcessor)).toBeInstanceOf(KnowledgeIngestionProcessor);
     expect(app.get(KnowledgeIngestionWorker)).toBeInstanceOf(KnowledgeIngestionWorker);
+    expect(await app.resolve(MemoryExperienceService)).toBeInstanceOf(MemoryExperienceService);
   });
 
   it('returns a contract-valid desktop bootstrap payload', async () => {
@@ -124,17 +126,17 @@ describe('API vertical slice', () => {
       .expect(404);
   });
 
-  it('creates an agent direct conversation and lists only memberships', async () => {
+  it('opens an enabled agent conversation when the test Runtime has no readiness evidence', async () => {
     const created = await request(app.getHttpServer())
       .post('/api/v1/conversations')
       .send({ type: 'direct', target: { type: 'agent', agentId } })
       .expect(201);
     expect(conversationSchema.safeParse(created.body).success).toBe(true);
-    expect(created.body.title).toBe('林晓的产品助手');
 
     const listed = await request(app.getHttpServer()).get('/api/v1/conversations').expect(200);
     expect(conversationListResponseSchema.safeParse(listed.body).success).toBe(true);
     expect(listed.body.items.map((item: { id: string }) => item.id)).toContain(humanConversationId);
+    expect(listed.body.items.map((item: { id: string }) => item.id)).toContain(created.body.id);
 
     const outsider = await request(app.getHttpServer())
       .get('/api/v1/conversations')

@@ -1,28 +1,34 @@
 import type {
-  AdminOrgUnit,
+  AdminOrganizationResponse,
   KnowledgeBase,
   KnowledgeBaseIndexReadiness,
   KnowledgeBaseOrgUnitScope,
   KnowledgeDocument,
   KnowledgeDocumentSummary,
   KnowledgeDocumentVersionDetail,
+  KnowledgeGraphOverview,
 } from '@enterprise/contracts';
-import { useEffect, useId, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 
 import {
   archiveKnowledgeDocument,
   createKnowledgeBase,
   createKnowledgeDocument,
+  deleteKnowledgeBase,
   getKnowledgeDocument,
   getKnowledgeDocumentVersion,
+  getLexiangKnowledgeConnection,
   getOrganization,
   listKnowledgeBases,
+  syncExternalKnowledgeBase,
+  syncLexiangKnowledgeBases,
   updateKnowledgeBase,
   updateKnowledgeDocument,
 } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
 import { KnowledgeDocumentsPanel } from '@/components/knowledge/KnowledgeDocumentsPanel';
+import { KnowledgeEmbeddingIndexPanel } from '@/components/knowledge/KnowledgeEmbeddingIndexPanel';
 import { KnowledgeReadinessPanel } from '@/components/knowledge/KnowledgeReadinessPanel';
 import {
   KnowledgeImportModal,
@@ -31,7 +37,26 @@ import {
 import { latestEditableDraft } from '@/components/knowledge/knowledge-ingestion-outcome';
 import { KnowledgeRetrievalTestPanel } from '@/components/knowledge/KnowledgeRetrievalTestPanel';
 import { knowledgeReadinessRefreshToken } from '@/components/knowledge/knowledge-readiness-view';
-import { orgUnitPath } from '@/components/knowledge/knowledge-view-model';
+import {
+  KnowledgeAccessPicker,
+  knowledgeAccessError,
+  knowledgeAccessMode,
+  knowledgeAccessSummary,
+  type KnowledgeAccessMode,
+} from './KnowledgeAccessPicker';
+import {
+  companyKnowledgeSpaceDraft,
+  KnowledgeSpacePicker,
+  knowledgeSpaceDraftError,
+  knowledgeSpaceDraftFromBase,
+  knowledgeSpaceSelectionFromDraft,
+  type KnowledgeSpaceDraft,
+} from './KnowledgeSpacePicker';
+import {
+  buildKnowledgeSpaceTree,
+  knowledgeSpaceRootLabel,
+  visibleKnowledgeBases,
+} from './knowledge-space-tree';
 import {
   EmptyState,
   ErrorState,
@@ -67,15 +92,20 @@ interface DocumentDetailState {
   readonly error: string | null;
 }
 
-type KnowledgeVisibilityMode = 'ENTERPRISE' | 'DEPARTMENTS';
-
-export function KnowledgePage(): ReactNode {
+export function KnowledgePage({
+  currentUserId,
+  currentUserName,
+}: {
+  currentUserId: string;
+  currentUserName: string;
+}): ReactNode {
   const [items, setItems] = useState<KnowledgeBase[]>([]);
-  const [units, setUnits] = useState<AdminOrgUnit[]>([]);
+  const [organization, setOrganization] = useState<AdminOrganizationResponse | null>(null);
   const [organizationLoading, setOrganizationLoading] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [organizationError, setOrganizationError] = useState<string | null>(null);
+  const [lexiangReady, setLexiangReady] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -86,6 +116,8 @@ export function KnowledgePage(): ReactNode {
   const [documentDetailState, setDocumentDetailState] = useState<DocumentDetailState | null>(null);
   const documentDetailRequestId = useRef(0);
   const [notice, setNotice] = useState<string | null>(null);
+  const [lexiangSyncing, setLexiangSyncing] = useState(false);
+  const [lexiangSyncError, setLexiangSyncError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -93,7 +125,7 @@ export function KnowledgePage(): ReactNode {
     void getOrganization(controller.signal)
       .then((organization) => {
         setOrganizationError(null);
-        setUnits(organization.orgUnits);
+        setOrganization(organization);
       })
       .catch((caught: unknown) => {
         if (!controller.signal.aborted) setOrganizationError(messageFromError(caught));
@@ -106,14 +138,30 @@ export function KnowledgePage(): ReactNode {
 
   useEffect(() => {
     const controller = new AbortController();
+    void getLexiangKnowledgeConnection(controller.signal)
+      .then(({ connection }) => {
+        setLexiangReady(
+          connection?.status === 'ACTIVE' &&
+            connection.credentialsConfigured &&
+            connection.teamId !== null &&
+            connection.operatorStaffId !== null,
+        );
+      })
+      .catch(() => setLexiangReady(false));
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
     setLoading(true);
     setError(null);
     void listKnowledgeBases(controller.signal)
       .then((knowledge) => {
-        setItems(knowledge.items);
+        const visibleItems = visibleKnowledgeBases(knowledge.items);
+        setItems(visibleItems);
         setSelectedId((current) => {
-          if (current && knowledge.items.some((item) => item.id === current)) return current;
-          return knowledge.items[0]?.id ?? null;
+          if (current && visibleItems.some((item) => item.id === current)) return current;
+          return visibleItems[0]?.id ?? null;
         });
       })
       .catch((caught: unknown) => {
@@ -163,6 +211,26 @@ export function KnowledgePage(): ReactNode {
 
   const reload = (): void => setReloadKey((value) => value + 1);
 
+  const syncLexiang = async (): Promise<void> => {
+    setLexiangSyncing(true);
+    setLexiangSyncError(null);
+    try {
+      const result = await syncLexiangKnowledgeBases();
+      const privacyReview =
+        result.requiresPrivacyReview === 0
+          ? ''
+          : `；${result.requiresPrivacyReview} 个知识库仍继承乐享侧权限，已停止检索，请先在乐享设为不可见且不继承团队权限`;
+      setNotice(
+        `已发现 ${result.discovered} 个乐享知识库，新导入 ${result.imported} 个，更新 ${result.updated} 个；同步 ${result.foldersSynchronized} 个文件夹、发现 ${result.documentsDiscovered} 篇文档（新增 ${result.documentsImported}、更新 ${result.documentsUpdated}、归档 ${result.documentsArchived}）${privacyReview}。新导入知识库以草稿保存，默认仅当前管理员可访问，请确认本系统权限后再启用。`,
+      );
+      reload();
+    } catch (caught) {
+      setLexiangSyncError(messageFromError(caught));
+    } finally {
+      setLexiangSyncing(false);
+    }
+  };
+
   const closeDocumentDetail = (): void => {
     documentDetailRequestId.current += 1;
     setDocumentDetailState(null);
@@ -194,15 +262,8 @@ export function KnowledgePage(): ReactNode {
 
   const selected = items.find((item) => item.id === selectedId) ?? null;
   const organizationReady = !organizationLoading && organizationError === null;
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLowerCase();
-    return items.filter(
-      (item) =>
-        !normalized ||
-        item.name.toLowerCase().includes(normalized) ||
-        item.key.toLowerCase().includes(normalized),
-    );
-  }, [items, query]);
+  const units = organization?.orgUnits ?? [];
+  const spaceTree = useMemo(() => buildKnowledgeSpaceTree(items, query), [items, query]);
 
   const completeImport = (result: KnowledgeImportResult): void => {
     setImportOpen(false);
@@ -212,7 +273,9 @@ export function KnowledgePage(): ReactNode {
         ? `，其中 ${result.failedCount} 份处理失败，可在列表中查看原因并重试`
         : '';
     setNotice(
-      `“${result.knowledgeBase.name}”已由 ${result.uploadedCount} 份文件创建为草稿知识库${failureCopy}。`,
+      result.createdKnowledgeBase
+        ? `“${result.knowledgeBase.name}”已由 ${result.uploadedCount} 份文件创建为草稿知识库${failureCopy}。`
+        : `已向“${result.knowledgeBase.name}”上传 ${result.uploadedCount} 份文件${failureCopy}。`,
     );
     reload();
   };
@@ -232,18 +295,34 @@ export function KnowledgePage(): ReactNode {
           <button
             className="button secondary"
             type="button"
-            onClick={() => setCreateOpen(true)}
-            disabled={loading}
+            onClick={() => void syncLexiang()}
+            disabled={!lexiangReady || loading || lexiangSyncing}
+            title={lexiangReady ? undefined : '请先在“知识来源”完成乐享验证并连接'}
           >
-            <Icon name="plus" size={17} /> 新建空库
+            <Icon name="refresh" size={17} />
+            {lexiangSyncing ? '正在同步乐享…' : '同步乐享知识库'}
           </button>
           <button
             className="button primary"
             type="button"
             onClick={() => setImportOpen(true)}
+            disabled={
+              loading ||
+              selected?.status === 'ARCHIVED' ||
+              (selected?.storageProvider === 'LEXIANG' &&
+                selected.externalSpace?.status !== 'ACTIVE')
+            }
+          >
+            <span aria-hidden="true">↑</span>{' '}
+            {selected === null ? '上传资料并新建库' : '上传到当前库'}
+          </button>
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => setCreateOpen(true)}
             disabled={loading}
           >
-            <span aria-hidden="true">↑</span> 上传资料
+            <Icon name="plus" size={17} /> 新建空库
           </button>
         </div>
       </header>
@@ -258,34 +337,18 @@ export function KnowledgePage(): ReactNode {
           组织架构暂时无法读取，部门可见范围暂不可编辑：{organizationError}
         </Notice>
       ) : null}
+      {lexiangSyncError ? (
+        <Notice tone="error" onClose={() => setLexiangSyncError(null)}>
+          乐享知识库同步失败：{lexiangSyncError}
+        </Notice>
+      ) : null}
       {error && items.length > 0 ? (
         <Notice tone="info">刷新处理状态失败，正在保留上次结果并继续重试：{error}</Notice>
       ) : null}
       {loading && items.length === 0 ? <LoadingPanel label="正在读取知识资产…" /> : null}
       {error && items.length === 0 ? <ErrorState message={error} onRetry={reload} /> : null}
 
-      {!loading && !error && items.length === 0 ? (
-        <EmptyState
-          title="上传企业资料，创建第一个知识库"
-          description="支持 PDF、Word（DOCX）、TXT 和 Markdown。选择文件后会自动创建草稿知识库，并完成解析、切片和索引。"
-          action={
-            <div className="knowledge-empty-actions">
-              <button className="button primary" type="button" onClick={() => setImportOpen(true)}>
-                <span aria-hidden="true">↑</span> 选择文件并导入
-              </button>
-              <button
-                className="button secondary"
-                type="button"
-                onClick={() => setCreateOpen(true)}
-              >
-                仅新建空库
-              </button>
-            </div>
-          }
-        />
-      ) : null}
-
-      {items.length > 0 ? (
+      {(!loading && !error) || items.length > 0 ? (
         <div className="knowledge-layout">
           <aside className="card knowledge-list-card">
             <div className="knowledge-list-header">
@@ -299,25 +362,56 @@ export function KnowledgePage(): ReactNode {
                 />
               </div>
             </div>
-            <div className="knowledge-list">
-              {filtered.map((item) => (
-                <button
-                  type="button"
-                  key={item.id}
-                  className={selectedId === item.id ? 'selected' : ''}
-                  onClick={() => setSelectedId(item.id)}
-                >
-                  <span className="knowledge-glyph">知</span>
-                  <span className="knowledge-list-copy">
-                    <strong>{item.name}</strong>
-                    <small>
-                      {item.key} · {item.documentCount} 篇文档
-                    </small>
-                  </span>
-                  <StatusPill value={item.status} />
-                </button>
+            <div className="knowledge-space-tree" role="tree" aria-label="知识空间树">
+              {spaceTree.map((root) => (
+                <details className="knowledge-space-root" key={root.type} open>
+                  <summary>
+                    <span className="knowledge-space-root-glyph" aria-hidden="true">
+                      {root.glyph}
+                    </span>
+                    <span>
+                      <strong>{root.label}</strong>
+                      <small>{root.description}</small>
+                    </span>
+                    <span className="knowledge-space-count">{root.itemCount}</span>
+                  </summary>
+                  <div className="knowledge-space-groups">
+                    {root.groups.map((group) => (
+                      <details className="knowledge-space-group" key={group.targetId} open>
+                        <summary>
+                          <span>{group.targetName}</span>
+                          <small>{group.items.length} 个知识库</small>
+                        </summary>
+                        <div className="knowledge-list">
+                          {group.items.map((item) => (
+                            <button
+                              type="button"
+                              key={item.id}
+                              className={selectedId === item.id ? 'selected' : ''}
+                              onClick={() => setSelectedId(item.id)}
+                            >
+                              <span className="knowledge-glyph">知</span>
+                              <span className="knowledge-list-copy">
+                                <strong>{item.name}</strong>
+                                <small>{item.documentCount} 篇文档</small>
+                              </span>
+                              <StatusPill
+                                value={item.status}
+                                {...(item.status === 'ARCHIVED' ? { label: '已删除' } : {})}
+                              />
+                            </button>
+                          ))}
+                        </div>
+                      </details>
+                    ))}
+                    {root.groups.length === 0 ? (
+                      <p className="knowledge-space-empty">
+                        {query.trim().length > 0 ? '没有匹配内容' : '尚未创建'}
+                      </p>
+                    ) : null}
+                  </div>
+                </details>
               ))}
-              {filtered.length === 0 ? <p className="inline-empty">没有匹配的知识库</p> : null}
             </div>
           </aside>
 
@@ -325,8 +419,11 @@ export function KnowledgePage(): ReactNode {
             {selected ? (
               <KnowledgeBaseEditor
                 key={`${selected.id}-${selected.version}`}
+                currentUserId={currentUserId}
+                currentUserName={currentUserName}
                 item={selected}
-                units={units}
+                organization={organization}
+                knowledgeBases={items}
                 organizationReady={organizationReady}
                 onCreateDocument={() => setDocumentCreateOpen(true)}
                 onEditDocument={(document) => void openDocument(document)}
@@ -336,7 +433,34 @@ export function KnowledgePage(): ReactNode {
                 }}
               />
             ) : (
-              <EmptyState title="请选择知识库" description="从左侧选择需要维护的知识库。" />
+              <EmptyState
+                title={items.length === 0 ? '为四类知识空间添加第一份资料' : '请选择知识库'}
+                description={
+                  items.length === 0
+                    ? '公司、部门、项目和成员知识是四个并列根节点。上传时选择存放位置，归属账号自动使用当前登录账号。'
+                    : '从左侧分层树中选择需要维护的知识库。'
+                }
+                action={
+                  items.length === 0 ? (
+                    <div className="knowledge-empty-actions">
+                      <button
+                        className="button primary"
+                        type="button"
+                        onClick={() => setImportOpen(true)}
+                      >
+                        <span aria-hidden="true">↑</span> 选择存放位置并导入
+                      </button>
+                      <button
+                        className="button secondary"
+                        type="button"
+                        onClick={() => setCreateOpen(true)}
+                      >
+                        仅新建空库
+                      </button>
+                    </div>
+                  ) : undefined
+                }
+              />
             )}
           </section>
         </div>
@@ -344,18 +468,36 @@ export function KnowledgePage(): ReactNode {
 
       {createOpen ? (
         <CreateKnowledgeBaseModal
-          units={units}
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          organization={organization}
+          knowledgeBases={items}
           organizationReady={organizationReady}
+          lexiangReady={lexiangReady}
           onClose={() => setCreateOpen(false)}
-          onCreated={() => {
+          onCreated={(created) => {
             setCreateOpen(false);
-            setNotice('知识库已创建。');
+            setNotice(
+              created.externalSpace?.status === 'ACTIVE'
+                ? '知识库已在腾讯乐享创建并完成本地绑定。'
+                : created.storageProvider === 'LEXIANG'
+                  ? '本地记录已创建，但乐享同步需要重试。'
+                  : '知识库已创建。',
+            );
             reload();
           }}
         />
       ) : null}
       {importOpen ? (
-        <KnowledgeImportModal onClose={() => setImportOpen(false)} onImported={completeImport} />
+        <KnowledgeImportModal
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          organization={organization}
+          knowledgeBases={items}
+          {...(selected === null ? {} : { targetKnowledgeBase: selected })}
+          onClose={() => setImportOpen(false)}
+          onImported={completeImport}
+        />
       ) : null}
       {documentCreateOpen && selected ? (
         <CreateDocumentModal
@@ -400,152 +542,69 @@ export function KnowledgePage(): ReactNode {
   );
 }
 
-function ScopePicker({
-  units,
-  scopes,
-  mode,
-  disabled,
-  onModeChange,
-  onChange,
-}: {
-  units: ReadonlyArray<AdminOrgUnit>;
-  scopes: ReadonlyArray<KnowledgeBaseOrgUnitScope>;
-  mode: KnowledgeVisibilityMode;
-  disabled: boolean;
-  onModeChange: (mode: KnowledgeVisibilityMode) => void;
-  onChange: (scopes: KnowledgeBaseOrgUnitScope[]) => void;
-}): ReactNode {
-  const groupName = useId();
-  const toggle = (id: string): void => {
-    const selected = scopes.some((scope) => scope.orgUnitId === id);
-    onChange(
-      selected
-        ? scopes.filter((scope) => scope.orgUnitId !== id)
-        : [...scopes, { orgUnitId: id, includeChildren: true }],
-    );
-  };
-  const setIncludeChildren = (id: string, includeChildren: boolean): void => {
-    onChange(
-      scopes.map((scope) => (scope.orgUnitId === id ? { ...scope, includeChildren } : scope)),
-    );
-  };
-  const activeUnits = units
-    .filter((unit) => unit.status === 'ACTIVE')
-    .sort((left, right) =>
-      orgUnitPath(units, left.id).localeCompare(orgUnitPath(units, right.id), 'zh-CN'),
-    );
-  return (
-    <fieldset className="scope-picker" disabled={disabled}>
-      <legend>可见部门范围</legend>
-      <p>必须明确选择全企业或指定部门；员工检索时还会再次执行服务端权限校验。</p>
-      <div className="scope-mode-options">
-        <label>
-          <input
-            type="radio"
-            name={groupName}
-            checked={mode === 'ENTERPRISE'}
-            onChange={() => {
-              onModeChange('ENTERPRISE');
-              onChange([]);
-            }}
-          />
-          <span>全企业可见</span>
-        </label>
-        <label>
-          <input
-            type="radio"
-            name={groupName}
-            checked={mode === 'DEPARTMENTS'}
-            onChange={() => onModeChange('DEPARTMENTS')}
-          />
-          <span>仅指定部门可见</span>
-        </label>
-      </div>
-      {disabled ? (
-        <span className="inline-empty">组织架构尚未就绪，当前范围不会被改写。</span>
-      ) : mode === 'DEPARTMENTS' && activeUnits.length === 0 ? (
-        <span className="inline-empty">当前没有可选部门</span>
-      ) : mode === 'DEPARTMENTS' ? (
-        <div className="checkbox-grid">
-          {activeUnits.map((unit) => {
-            const scope = scopes.find((candidate) => candidate.orgUnitId === unit.id);
-            return (
-              <div className="scope-picker-row" key={unit.id}>
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={scope !== undefined}
-                    onChange={() => toggle(unit.id)}
-                  />
-                  <span>{orgUnitPath(units, unit.id)}</span>
-                </label>
-                {scope ? (
-                  <label className="scope-picker-children">
-                    <input
-                      type="checkbox"
-                      checked={scope.includeChildren}
-                      onChange={(event) => setIncludeChildren(unit.id, event.target.checked)}
-                    />
-                    <span>包含下级部门</span>
-                  </label>
-                ) : null}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        <span className="form-hint">该知识库启用后，企业内所有员工均可在权限范围内检索。</span>
-      )}
-    </fieldset>
-  );
-}
-
 function CreateKnowledgeBaseModal({
-  units,
+  currentUserId,
+  currentUserName,
+  organization,
+  knowledgeBases,
   organizationReady,
+  lexiangReady,
   onClose,
   onCreated,
 }: {
-  units: ReadonlyArray<AdminOrgUnit>;
+  currentUserId: string;
+  currentUserName: string;
+  organization: AdminOrganizationResponse | null;
+  knowledgeBases: ReadonlyArray<KnowledgeBase>;
   organizationReady: boolean;
+  lexiangReady: boolean;
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (knowledgeBase: KnowledgeBase) => void;
 }): ReactNode {
   const [name, setName] = useState('');
-  const [key, setKey] = useState('');
   const [description, setDescription] = useState('');
-  const [status, setStatus] = useState<'DRAFT' | 'ACTIVE'>('DRAFT');
-  const [visibilityMode, setVisibilityMode] = useState<KnowledgeVisibilityMode>('ENTERPRISE');
+  const [space, setSpace] = useState<KnowledgeSpaceDraft>(() =>
+    companyKnowledgeSpaceDraft(organization),
+  );
+  const [accessMode, setAccessMode] = useState<KnowledgeAccessMode>('ENTERPRISE');
   const [orgUnitScopes, setOrgUnitScopes] = useState<KnowledgeBaseOrgUnitScope[]>([]);
+  const [memberUserIds, setMemberUserIds] = useState<string[]>([]);
+  const [storageProvider, setStorageProvider] = useState<'LOCAL' | 'LEXIANG'>(() =>
+    lexiangReady ? 'LEXIANG' : 'LOCAL',
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     if (!organizationReady) {
-      setError('组织架构尚未读取完成，暂不能保存知识库可见范围。');
+      setError('组织架构尚未读取完成，暂不能保存知识存放位置和可见范围。');
       return;
     }
-    if (visibilityMode === 'DEPARTMENTS' && orgUnitScopes.length === 0) {
-      setError('请选择至少一个可见部门，或改为全企业可见。');
+    const spaceError = knowledgeSpaceDraftError(space);
+    if (spaceError !== null) {
+      setError(spaceError);
       return;
     }
-    if (status === 'ACTIVE') {
-      setError('新知识库尚无已发布且已建立索引的文档，请先以草稿状态创建。');
+    const accessError = knowledgeAccessError(accessMode, orgUnitScopes, memberUserIds);
+    if (accessError !== null) {
+      setError(accessError);
       return;
     }
     setSubmitting(true);
     setError(null);
     try {
-      await createKnowledgeBase({
-        key,
+      const created = await createKnowledgeBase({
         name,
         description: description || null,
-        status,
+        status: 'ACTIVE',
+        space: knowledgeSpaceSelectionFromDraft(space),
         orgUnitIds: [],
         orgUnitScopes,
+        memberUserIds,
+        storageProvider,
       });
-      onCreated();
+      onCreated(created);
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -555,30 +614,20 @@ function CreateKnowledgeBaseModal({
   return (
     <Modal
       title="新建知识库"
-      description="知识库标识创建后不可修改，请使用稳定的业务名称。"
+      description="空知识库会自动生成内部标识并以草稿创建；更推荐直接上传资料。"
       onClose={onClose}
       size="wide"
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
-        <div className="form-grid two">
-          <label>
-            <span>知识库名称</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="例如 产品知识中心"
-            />
-          </label>
-          <label>
-            <span>唯一标识</span>
-            <input
-              value={key}
-              onChange={(event) => setKey(event.target.value.toLowerCase())}
-              placeholder="product-knowledge"
-            />
-          </label>
-        </div>
+        <label>
+          <span>知识库名称</span>
+          <input
+            autoFocus
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            placeholder="例如 产品知识中心"
+          />
+        </label>
         <label>
           <span>说明</span>
           <textarea
@@ -588,25 +637,44 @@ function CreateKnowledgeBaseModal({
             placeholder="说明知识来源、维护责任和适用场景"
           />
         </label>
+        <p className="form-hint">
+          创建后上传资料；系统完成解析、切片和索引后，资料会自动对员工可用。
+        </p>
         <label>
-          <span>初始状态</span>
+          <span>知识库存储</span>
           <select
-            value={status}
-            onChange={(event) => setStatus(event.target.value as typeof status)}
+            value={storageProvider}
+            onChange={(event) => setStorageProvider(event.target.value as 'LOCAL' | 'LEXIANG')}
           >
-            <option value="DRAFT">草稿（暂不提供使用）</option>
-            <option value="ACTIVE" disabled>
-              启用（需先发布至少一篇已建立索引的文档）
+            <option value="LOCAL">本系统知识库</option>
+            <option value="LEXIANG" disabled={!lexiangReady}>
+              {lexiangReady ? '腾讯乐享知识库' : '腾讯乐享（请先完成知识来源配置）'}
             </option>
           </select>
         </label>
-        <ScopePicker
-          units={units}
-          scopes={orgUnitScopes}
-          mode={visibilityMode}
+        {storageProvider === 'LEXIANG' ? (
+          <Notice tone="info">
+            远端知识库将设为不可见，团队成员不继承权限；员工访问继续由本系统下方的可见范围控制。
+          </Notice>
+        ) : null}
+        <KnowledgeSpacePicker
+          currentUserId={currentUserId}
+          currentUserName={currentUserName}
+          organization={organization}
+          knowledgeBases={knowledgeBases}
+          value={space}
           disabled={!organizationReady}
-          onModeChange={setVisibilityMode}
-          onChange={setOrgUnitScopes}
+          onChange={setSpace}
+        />
+        <KnowledgeAccessPicker
+          organization={organization}
+          mode={accessMode}
+          orgUnitScopes={orgUnitScopes}
+          memberUserIds={memberUserIds}
+          disabled={!organizationReady}
+          onModeChange={setAccessMode}
+          onOrgUnitScopesChange={setOrgUnitScopes}
+          onMemberUserIdsChange={setMemberUserIds}
         />
         <FieldError message={error} />
         <div className="modal-actions">
@@ -627,15 +695,21 @@ function CreateKnowledgeBaseModal({
 }
 
 function KnowledgeBaseEditor({
+  currentUserId,
+  currentUserName,
   item,
-  units,
+  organization,
+  knowledgeBases,
   organizationReady,
   onCreateDocument,
   onEditDocument,
   onChanged,
 }: {
+  currentUserId: string;
+  currentUserName: string;
   item: KnowledgeBase;
-  units: ReadonlyArray<AdminOrgUnit>;
+  organization: AdminOrganizationResponse | null;
+  knowledgeBases: ReadonlyArray<KnowledgeBase>;
   organizationReady: boolean;
   onCreateDocument: () => void;
   onEditDocument: (document: KnowledgeDocumentSummary) => void;
@@ -643,35 +717,41 @@ function KnowledgeBaseEditor({
 }): ReactNode {
   const [name, setName] = useState(item.name);
   const [description, setDescription] = useState(item.description ?? '');
-  const [status, setStatus] = useState(item.status);
-  const [visibilityMode, setVisibilityMode] = useState<KnowledgeVisibilityMode>(
-    item.orgUnitScopes.length > 0 ? 'DEPARTMENTS' : 'ENTERPRISE',
+  const [space, setSpace] = useState<KnowledgeSpaceDraft>(() => knowledgeSpaceDraftFromBase(item));
+  const [retrievalConfig, setRetrievalConfig] = useState(item.retrievalConfig);
+  const [chunkingConfig, setChunkingConfig] = useState(item.chunkingConfig);
+  const [accessMode, setAccessMode] = useState<KnowledgeAccessMode>(() =>
+    knowledgeAccessMode(item.orgUnitScopes, item.memberUserIds),
   );
   const [orgUnitScopes, setOrgUnitScopes] = useState<KnowledgeBaseOrgUnitScope[]>([
     ...item.orgUnitScopes,
   ]);
+  const [memberUserIds, setMemberUserIds] = useState<string[]>([...item.memberUserIds]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'documents' | 'retrieval' | 'settings'>('documents');
+  const [activeTab, setActiveTab] = useState<'documents' | 'retrieval' | 'readiness' | 'settings'>(
+    'documents',
+  );
   const [enterpriseReadiness, setEnterpriseReadiness] =
     useState<KnowledgeBaseIndexReadiness | null>(null);
-  const activationRequested = status === 'ACTIVE' && item.status !== 'ACTIVE';
-  const activationBlocked =
-    activationRequested && (enterpriseReadiness === null || !enterpriseReadiness.activationAllowed);
+  const [enterpriseGraphOverview, setEnterpriseGraphOverview] =
+    useState<KnowledgeGraphOverview | null>(null);
   const readinessRefreshToken = knowledgeReadinessRefreshToken(item.documents);
 
   const submit = async (event: FormEvent): Promise<void> => {
     event.preventDefault();
     if (!organizationReady) {
-      setError('组织架构尚未读取完成，暂不能保存可见范围。');
+      setError('组织架构尚未读取完成，暂不能保存知识存放位置和可见范围。');
       return;
     }
-    if (visibilityMode === 'DEPARTMENTS' && orgUnitScopes.length === 0) {
-      setError('请选择至少一个可见部门，或改为全企业可见。');
+    const spaceError = knowledgeSpaceDraftError(space);
+    if (spaceError !== null) {
+      setError(spaceError);
       return;
     }
-    if (activationBlocked) {
-      setError('企业就绪度检查尚未通过，请先处理上方列出的索引或模型阻断项。');
+    const accessError = knowledgeAccessError(accessMode, orgUnitScopes, memberUserIds);
+    if (accessError !== null) {
+      setError(accessError);
       return;
     }
     setSubmitting(true);
@@ -680,11 +760,51 @@ function KnowledgeBaseEditor({
       await updateKnowledgeBase(item.id, {
         name,
         description: description || null,
-        ...(status === item.status ? {} : { status }),
+        space: knowledgeSpaceSelectionFromDraft(space),
+        retrievalConfig,
+        chunkingConfig,
         orgUnitScopes,
+        memberUserIds,
         expectedVersion: item.version,
       });
       onChanged('知识库设置已更新。');
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const removeKnowledgeBase = async (): Promise<void> => {
+    const managedByLexiang = item.storageProvider === 'LEXIANG';
+    if (
+      !window.confirm(
+        managedByLexiang
+          ? `确认删除知识库“${item.name}”吗？系统会先删除腾讯乐享中的对应知识库，成功后再从本系统归档。`
+          : `确认删除知识库“${item.name}”吗？知识库及其中的资料将不再显示。`,
+      )
+    )
+      return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await deleteKnowledgeBase(item.id, item.version);
+      onChanged(
+        managedByLexiang ? '腾讯乐享中的对应知识库已删除，本系统记录已归档。' : '知识库已删除。',
+      );
+    } catch (caught) {
+      setError(messageFromError(caught));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const retryExternalSync = async (): Promise<void> => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await syncExternalKnowledgeBase(item.id);
+      onChanged('腾讯乐享知识库已重新同步。');
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -701,11 +821,18 @@ function KnowledgeBaseEditor({
             <span>
               <h2>{item.name}</h2>
               <p>
-                {item.key} · 更新于 {formatDate(item.updatedAt)}
+                {knowledgeSpaceRootLabel(item.space.type)} / {item.space.targetName} · 更新于{' '}
+                {formatDate(item.updatedAt)}
               </p>
+              <small className="knowledge-access-summary">
+                {knowledgeAccessSummary(item.orgUnitScopes, item.memberUserIds)}
+              </small>
             </span>
           </div>
-          <StatusPill value={item.status} />
+          <StatusPill
+            value={item.status}
+            {...(item.status === 'ARCHIVED' ? { label: '已删除' } : {})}
+          />
         </header>
         <nav className="knowledge-tabs" aria-label="知识库管理视图">
           <button
@@ -725,6 +852,13 @@ function KnowledgeBaseEditor({
           </button>
           <button
             type="button"
+            className={activeTab === 'readiness' ? 'active' : ''}
+            onClick={() => setActiveTab('readiness')}
+          >
+            运行状态
+          </button>
+          <button
+            type="button"
             className={activeTab === 'settings' ? 'active' : ''}
             onClick={() => setActiveTab('settings')}
           >
@@ -733,16 +867,21 @@ function KnowledgeBaseEditor({
         </nav>
       </section>
 
-      <KnowledgeReadinessPanel
-        knowledgeBaseId={item.id}
-        refreshToken={readinessRefreshToken}
-        onReadinessChange={setEnterpriseReadiness}
-        onReviewFailures={() => setActiveTab('documents')}
-      />
+      {activeTab === 'readiness' ? (
+        <KnowledgeReadinessPanel
+          knowledgeBaseId={item.id}
+          refreshToken={readinessRefreshToken}
+          onReadinessChange={setEnterpriseReadiness}
+          onGraphOverviewChange={setEnterpriseGraphOverview}
+          onReviewFailures={() => setActiveTab('documents')}
+        />
+      ) : null}
 
       {activeTab === 'documents' ? (
         <KnowledgeDocumentsPanel
           item={item}
+          organization={organization}
+          organizationReady={organizationReady}
           onCreateDocument={onCreateDocument}
           onEditDocument={onEditDocument}
           onChanged={onChanged}
@@ -750,7 +889,12 @@ function KnowledgeBaseEditor({
       ) : null}
 
       {activeTab === 'retrieval' ? (
-        <KnowledgeRetrievalTestPanel knowledgeBaseId={item.id} knowledgeBaseStatus={item.status} />
+        <KnowledgeRetrievalTestPanel
+          knowledgeBaseId={item.id}
+          knowledgeBaseStatus={item.status}
+          storageProvider={item.storageProvider}
+          documents={item.documents}
+        />
       ) : null}
 
       {activeTab === 'settings' ? (
@@ -761,24 +905,80 @@ function KnowledgeBaseEditor({
           <header className="card-header">
             <div>
               <h2>知识库设置</h2>
-              <p>维护名称、生命周期状态和部门可见范围。</p>
+              <p>维护知识存放位置、名称、生命周期状态和智能体可访问范围。</p>
             </div>
           </header>
-          <div className="form-grid two">
+          {item.externalSpace ? (
+            <>
+              <div className="integration-overview" aria-label="腾讯乐享知识库绑定信息">
+                <div>
+                  <span>存储位置</span>
+                  <strong>腾讯乐享</strong>
+                </div>
+                <div>
+                  <span>同步状态</span>
+                  <strong>{externalSpaceStatusLabel(item.externalSpace.status)}</strong>
+                </div>
+                <div>
+                  <span>乐享团队 ID</span>
+                  <strong>{item.externalSpace.externalTeamId}</strong>
+                </div>
+                <div>
+                  <span>乐享知识库 ID</span>
+                  <strong>{item.externalSpace.externalSpaceId ?? '等待创建'}</strong>
+                </div>
+                <div>
+                  <span>乐享根目录 ID</span>
+                  <strong>{item.externalSpace.externalRootEntryId ?? '等待获取'}</strong>
+                </div>
+                <div>
+                  <span>最近同步</span>
+                  <strong>
+                    {item.externalSpace.lastSyncedAt
+                      ? formatDate(item.externalSpace.lastSyncedAt)
+                      : '尚未完成'}
+                  </strong>
+                </div>
+              </div>
+              <Notice
+                tone={
+                  item.externalSpace.status === 'ACTIVE' &&
+                  item.externalSpace.visibleType === 0 &&
+                  item.externalSpace.managerInheritType === 'none' &&
+                  item.externalSpace.memberInheritType === 'none'
+                    ? 'info'
+                    : 'error'
+                }
+              >
+                乐享侧固定为私有且不继承团队权限；员工能否访问由本系统下方的组织与成员范围决定。
+                {item.externalSpace.lastErrorCode
+                  ? ` 最近一次同步错误：${item.externalSpace.lastErrorCode}。`
+                  : ''}
+              </Notice>
+              {item.externalSpace.status === 'SYNC_FAILED' ||
+              item.externalSpace.status === 'PROVISIONING' ? (
+                <div className="page-actions">
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={submitting}
+                    onClick={() => void retryExternalSync()}
+                  >
+                    重新同步乐享知识库
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
+          <KnowledgeEmbeddingIndexPanel
+            knowledgeBase={item}
+            readiness={enterpriseReadiness}
+            onChanged={onChanged}
+          />
+          <div className="form-grid">
             <label>
               <span>知识库名称</span>
               <input value={name} onChange={(event) => setName(event.target.value)} />
-            </label>
-            <label>
-              <span>状态</span>
-              <select
-                value={status}
-                onChange={(event) => setStatus(event.target.value as typeof status)}
-              >
-                <option value="DRAFT">草稿</option>
-                <option value="ACTIVE">启用</option>
-                <option value="ARCHIVED">归档</option>
-              </select>
             </label>
           </div>
           <label>
@@ -789,32 +989,213 @@ function KnowledgeBaseEditor({
               onChange={(event) => setDescription(event.target.value)}
             />
           </label>
-          {activationBlocked ? (
-            <Notice tone="info">
-              企业就绪度门禁未通过，不能启用知识库。请先完成文档处理、当前模型向量覆盖及 Reranker
-              配置。
-            </Notice>
-          ) : enterpriseReadiness ? (
+          <KnowledgeSpacePicker
+            currentUserId={currentUserId}
+            currentUserName={currentUserName}
+            organization={organization}
+            knowledgeBases={knowledgeBases}
+            value={space}
+            disabled={!organizationReady}
+            onChange={setSpace}
+          />
+          <section className="form-stack">
+            <header className="card-header">
+              <div>
+                <h3>知识检索</h3>
+                <p>默认方案兼顾关键词与语义理解，通常无需调整高级参数。</p>
+              </div>
+            </header>
+            <div className="form-grid two">
+              <label>
+                <span>检索模式</span>
+                <select
+                  value={retrievalConfig.mode}
+                  onChange={(event) =>
+                    setRetrievalConfig((current) => ({
+                      ...current,
+                      mode: event.target.value as typeof current.mode,
+                    }))
+                  }
+                >
+                  <option value="HYBRID">混合检索（推荐）</option>
+                  <option value="VECTOR">向量检索</option>
+                  <option value="FULL_TEXT">全文检索</option>
+                </select>
+              </label>
+              <label>
+                <span>模型重排</span>
+                <select
+                  value={retrievalConfig.rerankEnabled ? 'ENABLED' : 'DISABLED'}
+                  onChange={(event) =>
+                    setRetrievalConfig((current) => ({
+                      ...current,
+                      rerankEnabled: event.target.value === 'ENABLED',
+                    }))
+                  }
+                >
+                  <option value="ENABLED">启用（推荐）</option>
+                  <option value="DISABLED">停用</option>
+                </select>
+              </label>
+            </div>
+          </section>
+          <details className="knowledge-advanced-settings">
+            <summary>高级检索参数（通常无需修改）</summary>
+            <div className="form-stack">
+              <Notice tone="info">
+                这些参数会影响召回数量、相关度门槛和新文档切分。没有真实评测结果时建议保留当前值。
+              </Notice>
+              <section className="form-stack">
+                <header className="card-header">
+                  <div>
+                    <h3>召回与排序</h3>
+                    <p>用于检索调优和问题集对比。</p>
+                  </div>
+                </header>
+                <div className="form-grid two">
+                  <label>
+                    <span>最多返回切片</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={20}
+                      value={retrievalConfig.topK}
+                      onChange={(event) =>
+                        setRetrievalConfig((current) => ({
+                          ...current,
+                          topK: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>最低相关度</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.01}
+                      value={retrievalConfig.scoreThreshold}
+                      onChange={(event) =>
+                        setRetrievalConfig((current) => ({
+                          ...current,
+                          scoreThreshold: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>语义权重（关键词权重自动补足）</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={1}
+                      step={0.05}
+                      value={retrievalConfig.semanticWeight}
+                      disabled={retrievalConfig.mode !== 'HYBRID'}
+                      onChange={(event) => {
+                        const semanticWeight = Number(event.target.value);
+                        setRetrievalConfig((current) => ({
+                          ...current,
+                          semanticWeight,
+                          keywordWeight: Number((1 - semanticWeight).toFixed(4)),
+                        }));
+                      }}
+                    />
+                  </label>
+                  <label>
+                    <span>单篇文档最多切片</span>
+                    <input
+                      type="number"
+                      min={1}
+                      max={10}
+                      value={retrievalConfig.maxChunksPerDocument}
+                      onChange={(event) =>
+                        setRetrievalConfig((current) => ({
+                          ...current,
+                          maxChunksPerDocument: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+              </section>
+              <section className="form-stack">
+                <header className="card-header">
+                  <div>
+                    <h3>新文档分块</h3>
+                    <p>仅影响之后新建或重新索引的版本，不改写已经发布的切片。</p>
+                  </div>
+                </header>
+                <div className="form-grid two">
+                  <label>
+                    <span>目标 Token 数</span>
+                    <input
+                      type="number"
+                      min={100}
+                      max={2000}
+                      value={chunkingConfig.targetTokens}
+                      onChange={(event) =>
+                        setChunkingConfig((current) => ({
+                          ...current,
+                          targetTokens: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>相邻重叠 Token 数</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={500}
+                      value={chunkingConfig.overlapTokens}
+                      onChange={(event) =>
+                        setChunkingConfig((current) => ({
+                          ...current,
+                          overlapTokens: Number(event.target.value),
+                        }))
+                      }
+                    />
+                  </label>
+                </div>
+              </section>
+            </div>
+          </details>
+          {enterpriseReadiness ? (
             <Notice tone="info">
               当前有 {enterpriseReadiness.documents.ready} 篇就绪文档、
               {enterpriseReadiness.publishedChunkCount} 个已发布切片，语义覆盖率为{' '}
-              {Math.round(enterpriseReadiness.semanticCoverage * 100)}%。
+              {Math.round(enterpriseReadiness.semanticCoverage * 100)}%；关系图谱包含{' '}
+              {enterpriseGraphOverview?.entityCount ?? 0} 个实体和{' '}
+              {enterpriseGraphOverview?.relationCount ?? 0}{' '}
+              条关系。这些状态仅用于诊断，不影响启用知识库。
             </Notice>
           ) : null}
-          <ScopePicker
-            units={units}
-            scopes={orgUnitScopes}
-            mode={visibilityMode}
+          <KnowledgeAccessPicker
+            organization={organization}
+            mode={accessMode}
+            orgUnitScopes={orgUnitScopes}
+            memberUserIds={memberUserIds}
             disabled={!organizationReady}
-            onModeChange={setVisibilityMode}
-            onChange={setOrgUnitScopes}
+            onModeChange={setAccessMode}
+            onOrgUnitScopesChange={setOrgUnitScopes}
+            onMemberUserIdsChange={setMemberUserIds}
           />
           <FieldError message={error} />
-          <div className="editor-footer align-end">
+          <div className="editor-footer">
+            <button
+              className="button danger-ghost"
+              type="button"
+              disabled={submitting}
+              onClick={() => void removeKnowledgeBase()}
+            >
+              删除知识库
+            </button>
             <button
               className="button primary"
               type="submit"
-              disabled={submitting || activationBlocked || !organizationReady}
+              disabled={submitting || !organizationReady}
             >
               {submitting ? <Spinner label="正在保存…" /> : '保存知识库设置'}
             </button>
@@ -823,6 +1204,25 @@ function KnowledgeBaseEditor({
       ) : null}
     </div>
   );
+}
+
+function externalSpaceStatusLabel(
+  status: NonNullable<KnowledgeBase['externalSpace']>['status'],
+): string {
+  switch (status) {
+    case 'PROVISIONING':
+      return '正在创建';
+    case 'ACTIVE':
+      return '同步正常';
+    case 'SYNC_FAILED':
+      return '同步失败';
+    case 'DELETING':
+      return '正在删除';
+    case 'DELETE_FAILED':
+      return '删除失败';
+    case 'DELETED':
+      return '已删除';
+  }
 }
 
 function CreateDocumentModal({
@@ -835,8 +1235,6 @@ function CreateDocumentModal({
   onCreated: (message: string) => void;
 }): ReactNode {
   const [title, setTitle] = useState('');
-  const [sourceType, setSourceType] = useState<'TEXT' | 'MARKDOWN'>('TEXT');
-  const [status, setStatus] = useState<'DRAFT' | 'READY'>('DRAFT');
   const [contentText, setContentText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -845,12 +1243,13 @@ function CreateDocumentModal({
     setSubmitting(true);
     setError(null);
     try {
-      await createKnowledgeDocument(knowledgeBase.id, { title, sourceType, status, contentText });
-      onCreated(
-        status === 'DRAFT'
-          ? '知识文档草稿已保存，尚未发布。'
-          : '知识文档已提交处理，解析、切片和索引完成后将自动发布。',
-      );
+      await createKnowledgeDocument(knowledgeBase.id, {
+        title,
+        sourceType: 'TEXT',
+        status: 'READY',
+        contentText,
+      });
+      onCreated('文本资料已保存，系统处理完成后会自动进入员工检索。');
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -859,38 +1258,22 @@ function CreateDocumentModal({
   };
   return (
     <Modal
-      title="新建知识文档"
-      description={`将文档添加到“${knowledgeBase.name}”`}
+      title="粘贴文本资料"
+      description={`这是“${knowledgeBase.name}”的辅助录入方式；正式资料建议使用文件上传。`}
       onClose={onClose}
       size="wide"
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
-        <div className="form-grid document-fields">
-          <label>
-            <span>文档标题</span>
-            <input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} />
-          </label>
-          <label>
-            <span>格式</span>
-            <select
-              value={sourceType}
-              onChange={(event) => setSourceType(event.target.value as typeof sourceType)}
-            >
-              <option value="TEXT">纯文本</option>
-              <option value="MARKDOWN">Markdown</option>
-            </select>
-          </label>
-          <label>
-            <span>状态</span>
-            <select
-              value={status}
-              onChange={(event) => setStatus(event.target.value as typeof status)}
-            >
-              <option value="DRAFT">草稿</option>
-              <option value="READY">可用</option>
-            </select>
-          </label>
-        </div>
+        <label>
+          <span>资料标题</span>
+          <input
+            autoFocus
+            required
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            placeholder="例如 售后服务处理规范"
+          />
+        </label>
         <label>
           <span>文档正文</span>
           <textarea
@@ -898,9 +1281,7 @@ function CreateDocumentModal({
             rows={15}
             value={contentText}
             onChange={(event) => setContentText(event.target.value)}
-            placeholder={
-              sourceType === 'MARKDOWN' ? '# 标题\n\n输入 Markdown 内容…' : '输入企业知识内容…'
-            }
+            placeholder="粘贴需要纳入知识库的正文内容…"
           />
         </label>
         <div className="content-counter">
@@ -912,7 +1293,7 @@ function CreateDocumentModal({
             取消
           </button>
           <button className="button primary" type="submit" disabled={submitting}>
-            {submitting ? <Spinner label="正在创建…" /> : '创建文档'}
+            {submitting ? <Spinner label="正在保存…" /> : '保存并启用'}
           </button>
         </div>
       </form>
@@ -933,13 +1314,6 @@ function EditDocumentModal({
 }): ReactNode {
   const [title, setTitle] = useState(document.title);
   const [contentText, setContentText] = useState(draft?.contentText ?? document.contentText ?? '');
-  const [status, setStatus] = useState<'DRAFT' | 'READY' | 'ARCHIVED'>(
-    draft !== null
-      ? 'DRAFT'
-      : document.status === 'READY' || document.status === 'ARCHIVED' || document.status === 'DRAFT'
-        ? document.status
-        : 'DRAFT',
-  );
   const [submitting, setSubmitting] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -952,14 +1326,10 @@ function EditDocumentModal({
       await updateKnowledgeDocument(document.knowledgeBaseId, document.id, {
         title,
         contentText,
-        status,
+        status: 'READY',
         expectedVersion: document.documentVersion,
       });
-      onChanged(
-        status === 'DRAFT'
-          ? '知识文档草稿已保存，尚未发布。'
-          : '新版本已提交处理，解析、切片和索引完成后将自动发布。',
-      );
+      onChanged('新版本已提交处理，解析、切片和索引完成后将自动可用。');
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -968,7 +1338,12 @@ function EditDocumentModal({
   };
 
   const archive = async (): Promise<void> => {
-    if (!window.confirm(`确认归档“${document.title}”吗？`)) return;
+    if (
+      !window.confirm(
+        `确认删除“${document.title}”吗？删除后不会再参与智能体检索，但历史版本和审计记录仍会保留。`,
+      )
+    )
+      return;
     setArchiving(true);
     setError(null);
     try {
@@ -977,7 +1352,7 @@ function EditDocumentModal({
         document.id,
         document.documentVersion,
       );
-      onChanged('知识文档已归档。');
+      onChanged('知识文档已删除，不再参与智能体检索。');
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -988,39 +1363,25 @@ function EditDocumentModal({
   return (
     <Modal
       title="编辑知识文档"
-      description={`${document.sourceType === 'MARKDOWN' ? 'Markdown' : '纯文本'} · ${draft ? `继续编辑草稿 v${draft.versionNumber}` : `当前发布版本 ${document.documentVersion}`}`}
+      description={`${document.sourceType === 'MARKDOWN' ? 'Markdown' : '纯文本'} · ${draft ? `继续编辑版本 v${draft.versionNumber}` : `当前可用版本 ${document.documentVersion}`}`}
       onClose={onClose}
       size="wide"
     >
       <form className="form-stack" onSubmit={(event) => void submit(event)}>
         {draft ? (
           <Notice tone="info">
-            已载入较新的草稿 v{draft.versionNumber}，不会用当前发布正文覆盖未完成内容。
+            已载入较新的编辑版本 v{draft.versionNumber}，保存后会自动替换当前可用版本。
           </Notice>
         ) : null}
-        <div className="form-grid document-edit-fields">
-          <label>
-            <span>文档标题</span>
-            <input
-              autoFocus
-              value={title}
-              onChange={(event) => setTitle(event.target.value)}
-              disabled={document.status === 'ARCHIVED'}
-            />
-          </label>
-          <label>
-            <span>状态</span>
-            <select
-              value={status}
-              onChange={(event) => setStatus(event.target.value as typeof status)}
-              disabled={document.status === 'ARCHIVED'}
-            >
-              <option value="DRAFT">草稿</option>
-              <option value="READY">可用</option>
-              <option value="ARCHIVED">归档</option>
-            </select>
-          </label>
-        </div>
+        <label>
+          <span>文档标题</span>
+          <input
+            autoFocus
+            value={title}
+            onChange={(event) => setTitle(event.target.value)}
+            disabled={document.status === 'ARCHIVED'}
+          />
+        </label>
         <label>
           <span>文档正文</span>
           <textarea
@@ -1043,7 +1404,7 @@ function EditDocumentModal({
               disabled={archiving || submitting}
               onClick={() => void archive()}
             >
-              {archiving ? '正在归档…' : '归档文档'}
+              {archiving ? '正在删除…' : '删除文档'}
             </button>
           ) : (
             <span />

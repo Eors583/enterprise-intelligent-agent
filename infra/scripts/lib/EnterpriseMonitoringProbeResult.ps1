@@ -102,7 +102,7 @@ function ConvertFrom-EnterpriseProbeProcessOutput {
     }
     $services = $parsed.services
     $serviceNames = @('apiLive', 'apiReady', 'admin', 'aiRuntime')
-    if (-not (Test-EnterpriseObjectProperties -Value $services -Names $serviceNames)) {
+    if (-not (Test-EnterpriseObjectProperties -Value $services -Names ($serviceNames + @('aiDependencies')))) {
       return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
     }
     $expectedServiceAlerts = [ordered]@{
@@ -128,6 +128,41 @@ function ConvertFrom-EnterpriseProbeProcessOutput {
       }
       if (-not [bool]$service.ready) { $derivedAlerts += [string]$expectedServiceAlerts[$serviceName] }
     }
+    $dependencies = $services.aiDependencies
+    if (-not (Test-EnterpriseObjectProperties -Value $dependencies -Names @('reachable', 'httpStatus', 'status', 'components'))) {
+      return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
+    }
+    if ([string]$dependencies.status -notin @('ready', 'degraded', 'unavailable')) {
+      return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
+    }
+    if ([string]$dependencies.status -eq 'unavailable') {
+      $derivedAlerts += 'AI_RUNTIME_DEPENDENCY_STATUS_UNAVAILABLE'
+    }
+    else {
+      $dependencyAlerts = [ordered]@{
+        run_store = 'AI_RUN_STORE_DEGRADED'
+        model = 'AI_MODEL_DEGRADED'
+        embedding = 'AI_EMBEDDING_DEGRADED'
+        reranker = 'AI_RERANKER_DEGRADED'
+      }
+      if (-not (Test-EnterpriseObjectProperties -Value $dependencies.components -Names @($dependencyAlerts.Keys))) {
+        return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
+      }
+      foreach ($componentName in $dependencyAlerts.Keys) {
+        $component = $dependencies.components.$componentName
+        if (
+          -not (Test-EnterpriseObjectProperties -Value $component -Names @('status', 'configured', 'externalConnectivityVerified', 'fallbackMode')) -or
+          [string]$component.status -notin @('ready', 'degraded', 'disabled') -or
+          $component.configured -isnot [bool] -or
+          $component.externalConnectivityVerified -isnot [bool]
+        ) {
+          return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
+        }
+        if ([string]$component.status -eq 'degraded') {
+          $derivedAlerts += [string]$dependencyAlerts[$componentName]
+        }
+      }
+    }
     $actualAlertFingerprint = @($alerts | Sort-Object) -join "`n"
     $derivedAlertFingerprint = @($derivedAlerts | Sort-Object) -join "`n"
     if ($actualAlertFingerprint -ne $derivedAlertFingerprint) {
@@ -141,7 +176,7 @@ function ConvertFrom-EnterpriseProbeProcessOutput {
   else {
     if (-not (Test-EnterpriseObjectProperties `
       -Value $parsed `
-      -Names @('healthStatus', 'database', 'semanticReadiness', 'signals', 'backupStatus', 'restoreStatus', 'readinessBlockers'))) {
+      -Names @('healthStatus', 'database', 'semanticReadiness', 'signals', 'backupStatus', 'restoreStatus', 'disasterRecoveryStatus', 'readinessBlockers'))) {
       return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
     }
     if ([string]::IsNullOrWhiteSpace([string]$parsed.database)) {
@@ -157,7 +192,11 @@ function ConvertFrom-EnterpriseProbeProcessOutput {
     if (-not (Test-EnterpriseObjectProperties `
       -Value $parsed.signals `
       -Names @(
-        'outboxUnknown', 'outboxStalePending', 'agentRunsStaleQueued', 'agentRunsStaleActive',
+        'outboxPending', 'outboxFailed', 'outboxUnknown', 'outboxStalePending',
+        'outboxOldestPendingAgeSeconds', 'outboxQuarantined',
+        'outboxRoutingIntegrityFailures',
+        'agentRunsStaleQueued', 'agentRunsStaleActive',
+        'agentRunsStaleQueuedOrphaned', 'agentRunsStaleQueuedTotal',
         'agentRunsUnknown', 'agentRunUnverifiedHolds', 'tenantQuotasNearLimit', 'blockedLoginBuckets',
         'ingestionFailures24h', 'currentKnowledgeChunks', 'currentChunksWithMatchingEmbeddings',
         'currentChunksMissingEmbeddings'
@@ -171,6 +210,7 @@ function ConvertFrom-EnterpriseProbeProcessOutput {
     }
     if ([string]$parsed.backupStatus -notin @('fresh', 'stale', 'invalid', 'missing') `
       -or [string]$parsed.restoreStatus -notin @('verified', 'stale-or-invalid', 'missing') `
+      -or [string]$parsed.disasterRecoveryStatus -notin @('verified', 'stale-or-invalid', 'missing') `
       -or [string]$parsed.healthStatus -notin @('healthy', 'alerting')) {
       return New-EnterpriseProbeFailureResult -Alert 'PROBE_SCHEMA_INVALID' -ExitCode $ExitCode
     }

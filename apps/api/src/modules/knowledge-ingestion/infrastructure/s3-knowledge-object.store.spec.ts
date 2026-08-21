@@ -8,6 +8,7 @@ import {
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 
+import type { S3KmsKeyReference } from '../../../config/environment.js';
 import {
   KnowledgeObjectConflictError,
   KnowledgeObjectIntegrityError,
@@ -22,6 +23,8 @@ const DOCUMENT_ID = '00000000-0000-7000-8000-000000000002';
 const VERSION_ID = '00000000-0000-7000-8000-000000000003';
 const OBJECT_KEY = `${TENANT_ID}/${DOCUMENT_ID}/${VERSION_ID}.bin`;
 const PHYSICAL_KEY = `knowledge/v1/${OBJECT_KEY}`;
+const KMS_KEY_ARN =
+  'arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012' as S3KmsKeyReference;
 
 describe('S3KnowledgeObjectStore', () => {
   it('uses an immutable conditional write with size and checksum metadata', async () => {
@@ -56,7 +59,25 @@ describe('S3KnowledgeObjectStore', () => {
         sha256: sha256(bytes),
         logicalkey: OBJECT_KEY,
       },
+      ServerSideEncryption: 'aws:kms',
+      SSEKMSKeyId: KMS_KEY_ARN,
     });
+  });
+
+  it('keeps development S3-compatible stores usable when KMS is not configured', async () => {
+    const send = vi.fn().mockResolvedValue({});
+    const store = createStore(send, {}, false);
+
+    await store.putObject({
+      tenantId: TENANT_ID,
+      documentId: DOCUMENT_ID,
+      versionId: VERSION_ID,
+      body: Buffer.from('local development'),
+    });
+
+    const command = send.mock.calls[0]?.[0] as PutObjectCommand;
+    expect(command.input).not.toHaveProperty('ServerSideEncryption');
+    expect(command.input).not.toHaveProperty('SSEKMSKeyId');
   });
 
   it('accepts a pre-existing object only when its immutable metadata matches', async () => {
@@ -70,6 +91,8 @@ describe('S3KnowledgeObjectStore', () => {
       .mockResolvedValueOnce({
         ContentLength: bytes.byteLength,
         Metadata: { sha256: sha256(bytes) },
+        ServerSideEncryption: 'aws:kms',
+        SSEKMSKeyId: KMS_KEY_ARN,
       });
     const store = createStore(send);
 
@@ -95,6 +118,8 @@ describe('S3KnowledgeObjectStore', () => {
       .mockResolvedValueOnce({
         ContentLength: bytes.byteLength,
         Metadata: { sha256: sha256(Buffer.from('different source')) },
+        ServerSideEncryption: 'aws:kms',
+        SSEKMSKeyId: KMS_KEY_ARN,
       });
     const store = createStore(send);
 
@@ -116,6 +141,8 @@ describe('S3KnowledgeObjectStore', () => {
       Metadata: { sha256: digest },
       ChecksumSHA256: Buffer.from(digest, 'hex').toString('base64'),
       Body: Readable.from([bytes]),
+      ServerSideEncryption: 'aws:kms',
+      SSEKMSKeyId: KMS_KEY_ARN,
     });
     const store = createStore(send);
 
@@ -135,6 +162,8 @@ describe('S3KnowledgeObjectStore', () => {
       vi.fn().mockResolvedValue({
         ContentLength: bytes.byteLength,
         Body: Readable.from([bytes]),
+        ServerSideEncryption: 'aws:kms',
+        SSEKMSKeyId: KMS_KEY_ARN,
       }),
     );
     await expect(missingMetadataStore.read(OBJECT_KEY)).rejects.toBeInstanceOf(
@@ -146,11 +175,60 @@ describe('S3KnowledgeObjectStore', () => {
         ContentLength: bytes.byteLength,
         Metadata: { sha256: sha256(bytes) },
         Body: Readable.from([Buffer.from('tampered bytes')]),
+        ServerSideEncryption: 'aws:kms',
+        SSEKMSKeyId: KMS_KEY_ARN,
       }),
     );
     await expect(tamperedStore.read(OBJECT_KEY)).rejects.toBeInstanceOf(
       KnowledgeObjectIntegrityError,
     );
+  });
+
+  it('fails closed when GetObject encryption metadata is absent or names another KMS key', async () => {
+    const bytes = Buffer.from('encrypted source');
+    const digest = sha256(bytes);
+    const response = {
+      ContentLength: bytes.byteLength,
+      Metadata: { sha256: digest },
+      Body: Readable.from([bytes]),
+    };
+    await expect(
+      createStore(vi.fn().mockResolvedValue(response)).read(OBJECT_KEY),
+    ).rejects.toBeInstanceOf(KnowledgeObjectIntegrityError);
+    await expect(
+      createStore(
+        vi.fn().mockResolvedValue({
+          ...response,
+          ServerSideEncryption: 'aws:kms',
+          SSEKMSKeyId:
+            'arn:aws:kms:us-east-1:123456789012:key/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        }),
+      ).read(OBJECT_KEY),
+    ).rejects.toBeInstanceOf(KnowledgeObjectIntegrityError);
+  });
+
+  it('fails closed when a pre-existing object does not carry the configured KMS metadata', async () => {
+    const bytes = Buffer.from('existing source');
+    const send = vi
+      .fn()
+      .mockRejectedValueOnce({
+        name: 'PreconditionFailed',
+        $metadata: { httpStatusCode: 412 },
+      })
+      .mockResolvedValueOnce({
+        ContentLength: bytes.byteLength,
+        Metadata: { sha256: sha256(bytes) },
+        ServerSideEncryption: 'AES256',
+      });
+
+    await expect(
+      createStore(send).putObject({
+        tenantId: TENANT_ID,
+        documentId: DOCUMENT_ID,
+        versionId: VERSION_ID,
+        body: bytes,
+      }),
+    ).rejects.toBeInstanceOf(KnowledgeObjectIntegrityError);
   });
 
   it('deletes only the validated, prefixed object key', async () => {
@@ -167,7 +245,11 @@ describe('S3KnowledgeObjectStore', () => {
   });
 });
 
-function createStore(send: ReturnType<typeof vi.fn>): S3KnowledgeObjectStore {
+function createStore(
+  send: ReturnType<typeof vi.fn>,
+  overrides: Partial<S3KnowledgeObjectStoreOptions> = {},
+  withKms = true,
+): S3KnowledgeObjectStore {
   const options: S3KnowledgeObjectStoreOptions = {
     endpoint: 'http://127.0.0.1:9000',
     region: 'us-east-1',
@@ -179,6 +261,8 @@ function createStore(send: ReturnType<typeof vi.fn>): S3KnowledgeObjectStore {
     forcePathStyle: true,
     prefix: 'knowledge/v1',
     maxBytes: 1024,
+    ...(withKms ? { kmsKeyId: KMS_KEY_ARN } : {}),
+    ...overrides,
   };
   return new S3KnowledgeObjectStore(options, { send } as unknown as Pick<S3Client, 'send'>);
 }

@@ -1,0 +1,40 @@
+{
+  "contractVersion": 1,
+  "environment": "production",
+  "database": "enterprise_agent",
+  "backup": {
+    "schedule": "0 1 * * *",
+    "localRetentionDays": 14,
+    "offsite": {
+      "enabled": true,
+      "provider": "s3_compatible",
+      "destination": "s3://replace-with-production-backup-bucket/enterprise-agent",
+      "region": "replace-with-secondary-region",
+      "separateFailureDomain": true,
+      "credentialReference": "secret://enterprise-agent/backup-writer",
+      "encryption": {
+        "mode": "KMS_ENVELOPE",
+        "keyReference": "kms://replace-with-backup-key-reference"
+      },
+      "immutability": {
+        "mode": "OBJECT_LOCK_COMPLIANCE",
+        "retentionDays": 35
+      }
+    }
+  },
+  "pitr": {
+    "enabled": true,
+    "walArchiveEnabled": true,
+    "timelineHistoryEnabled": true,
+    "restoreCommandConfigured": true,
+    "recoveryWindowMinutes": 15,
+    "retentionHours": 168,
+    "credentialReference": "secret://enterprise-agent/wal-archive-writer"
+  },
+  "drill": {
+    "rpoObjectiveMinutes": 15,
+    "rtoObjectiveMinutes": 240,
+    "maxReportAgeHours": 168,
+    "isolatedRestoreRequired": true
+  }
+}

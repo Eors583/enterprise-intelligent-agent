@@ -10,19 +10,23 @@ const parentByOrgUnitId = new Map<string, string | null>([
 ]);
 
 const knowledgeBases = [
-  { id: 'company-wide', orgUnits: [] },
+  { id: 'company-wide', orgUnits: [], members: [] },
   {
     id: 'product-tree',
     orgUnits: [{ orgUnitId: 'product', includeChildren: true }],
+    members: [],
   },
   {
     id: 'product-direct',
     orgUnits: [{ orgUnitId: 'product', includeChildren: false }],
+    members: [],
   },
   {
     id: 'sales-only',
     orgUnits: [{ orgUnitId: 'sales', includeChildren: true }],
+    members: [],
   },
+  { id: 'named-member', orgUnits: [], members: [{ userId: 'member-1' }] },
 ] as const;
 
 describe('knowledge access policy', () => {
@@ -30,17 +34,19 @@ describe('knowledge access policy', () => {
     expect(
       accessibleKnowledgeBaseIds({
         userActive: true,
+        memberUserId: 'member-1',
         memberOrgUnitIds: new Set(['platform']),
         parentByOrgUnitId,
         knowledgeBases,
       }),
-    ).toEqual(['company-wide', 'product-tree']);
+    ).toEqual(['company-wide', 'product-tree', 'named-member']);
   });
 
   it('uses every active employment for a multi-department member', () => {
     expect(
       accessibleKnowledgeBaseIds({
         userActive: true,
+        memberUserId: 'member-2',
         memberOrgUnitIds: new Set(['platform', 'sales']),
         parentByOrgUnitId,
         knowledgeBases,
@@ -52,6 +58,7 @@ describe('knowledge access policy', () => {
     expect(
       accessibleKnowledgeBaseIds({
         userActive: true,
+        memberUserId: 'member-2',
         memberOrgUnitIds: new Set(['product']),
         parentByOrgUnitId,
         knowledgeBases,
@@ -63,6 +70,7 @@ describe('knowledge access policy', () => {
     expect(
       accessibleKnowledgeBaseIds({
         userActive: false,
+        memberUserId: 'member-1',
         memberOrgUnitIds: new Set(['product']),
         parentByOrgUnitId,
         knowledgeBases,
@@ -74,6 +82,7 @@ describe('knowledge access policy', () => {
     expect(
       accessibleKnowledgeBaseIds({
         userActive: true,
+        memberUserId: 'member-1',
         memberOrgUnitIds: new Set(),
         parentByOrgUnitId,
         knowledgeBases,
@@ -89,12 +98,29 @@ describe('knowledge access policy', () => {
     expect(
       accessibleKnowledgeBaseIds({
         userActive: true,
+        memberUserId: 'member-1',
         memberOrgUnitIds: new Set(['a']),
         parentByOrgUnitId: cyclicParents,
         knowledgeBases: [
-          { id: 'unrelated', orgUnits: [{ orgUnitId: 'c', includeChildren: true }] },
+          {
+            id: 'unrelated',
+            orgUnits: [{ orgUnitId: 'c', includeChildren: true }],
+            members: [],
+          },
         ],
       }),
     ).toEqual([]);
+  });
+
+  it('uses the union of department and named-member assignments', () => {
+    expect(
+      accessibleKnowledgeBaseIds({
+        userActive: true,
+        memberUserId: 'member-1',
+        memberOrgUnitIds: new Set(['sales']),
+        parentByOrgUnitId,
+        knowledgeBases,
+      }),
+    ).toEqual(['company-wide', 'sales-only', 'named-member']);
   });
 });

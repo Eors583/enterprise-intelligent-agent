@@ -52,7 +52,7 @@ describe('account recovery contracts', () => {
     ).toEqual({ token: resetToken, newPassword: 'long-pass-1' });
   });
 
-  it('models invitation issue responses while keeping passwords out of invite input', () => {
+  it('never exposes an acceptance capability after successful email delivery', () => {
     const invite = inviteMemberRequestSchema.parse({
       email: 'member@example.com',
       displayName: 'Member',
@@ -60,20 +60,51 @@ describe('account recovery contracts', () => {
       orgUnitId: '00000000-0000-7000-8000-000000000111',
     });
     expect(invite).not.toHaveProperty('password');
+    const response = issueMemberInvitationResponseSchema.parse({
+      id: '00000000-0000-7000-8000-000000000211',
+      memberId: '00000000-0000-7000-8000-000000000212',
+      email: 'member@example.com',
+      displayName: 'Member',
+      status: 'SENT',
+      deliveryStatus: 'SENT',
+      deliveryTargetEvidence: 'ISSUED',
+      issuedAt: '2026-07-22T00:00:00.000Z',
+      expiresAt: '2026-07-29T00:00:00.000Z',
+      consumedAt: null,
+      deliveryKind: 'EMAIL_SENT',
+      fallback: null,
+    });
+    expect(response).not.toHaveProperty('acceptanceToken');
+    expect(response).not.toHaveProperty('acceptanceUrl');
     expect(
-      issueMemberInvitationResponseSchema.parse({
-        id: '00000000-0000-7000-8000-000000000211',
-        memberId: '00000000-0000-7000-8000-000000000212',
-        email: 'member@example.com',
-        displayName: 'Member',
-        status: 'SENT',
-        deliveryStatus: 'SENT',
-        issuedAt: '2026-07-22T00:00:00.000Z',
-        expiresAt: '2026-07-29T00:00:00.000Z',
-        consumedAt: null,
+      issueMemberInvitationResponseSchema.safeParse({
+        ...response,
         acceptanceToken: inviteToken,
         acceptanceUrl: `https://example.com/#/accept-invitation?token=${inviteToken}`,
-      }).acceptanceToken,
-    ).toBe(inviteToken);
+      }).success,
+    ).toBe(false);
+  });
+
+  it('models a short-lived explicit manual fallback without a separate raw token', () => {
+    const response = issueMemberInvitationResponseSchema.parse({
+      id: '00000000-0000-7000-8000-000000000211',
+      memberId: '00000000-0000-7000-8000-000000000212',
+      email: 'member@example.com',
+      displayName: 'Member',
+      status: 'PENDING',
+      deliveryStatus: 'NOT_CONFIGURED',
+      deliveryTargetEvidence: 'ISSUED',
+      issuedAt: '2026-07-22T00:00:00.000Z',
+      expiresAt: '2026-07-22T00:15:00.000Z',
+      consumedAt: null,
+      deliveryKind: 'MANUAL_FALLBACK',
+      fallback: {
+        kind: 'MANUAL_FALLBACK',
+        acceptanceUrl: `https://example.com/#/accept-invitation?token=${inviteToken}`,
+        expiresAt: '2026-07-22T00:15:00.000Z',
+      },
+    });
+    expect(response.fallback?.acceptanceUrl).toContain(inviteToken);
+    expect(response).not.toHaveProperty('acceptanceToken');
   });
 });

@@ -1,12 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { ServiceUnavailableException } from '@nestjs/common';
 
 import type { AdminPrismaService } from '../../../database/admin-prisma.service.js';
 import type { KnowledgeDocumentParser } from './knowledge-document-parser.port.js';
 import type { KnowledgeFileScanner } from '../infrastructure/knowledge-file-scanner.js';
-import type { KnowledgeObjectStore } from '../infrastructure/knowledge-object.store.js';
-import { KnowledgeIngestionProcessor } from './knowledge-ingestion.service.js';
+import {
+  KnowledgeObjectConflictError,
+  type KnowledgeObjectStore,
+} from '../infrastructure/knowledge-object.store.js';
+import {
+  KnowledgeIngestionProcessor,
+  normalizeKnowledgeEntityAliases,
+  type KnowledgeIngestionLeaseControl,
+} from './knowledge-ingestion.service.js';
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000001';
 const ADMIN_ID = '00000000-0000-7000-8000-000000000002';
@@ -20,6 +28,122 @@ const PRINCIPAL = {
   role: 'OWNER' as const,
   authenticationSource: 'session' as const,
 };
+
+describe('KnowledgeIngestionProcessor write availability gate', () => {
+  it('rejects file upload and web import before any durable or remote side effect', async () => {
+    const prisma = { withTenant: vi.fn() };
+    const objects = { putObject: vi.fn() };
+    const unavailable = vi.fn(() => {
+      throw new ServiceUnavailableException({
+        code: 'KNOWLEDGE_INGESTION_CONSUMER_UNAVAILABLE',
+        message: 'Knowledge ingestion consumer is unavailable.',
+      });
+    });
+    const { service } = createService({
+      prisma,
+      objects,
+      assertPersistentWritesAvailable: unavailable,
+    });
+
+    await expect(
+      service.upload(PRINCIPAL, {
+        knowledgeBaseId: KNOWLEDGE_BASE_ID,
+        title: 'Policy',
+        bytes: Buffer.from('policy'),
+        mimeType: 'text/plain',
+        fileName: 'policy.txt',
+      }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+    await expect(
+      service.importWeb(PRINCIPAL, {
+        knowledgeBaseId: KNOWLEDGE_BASE_ID,
+        sourceUri: 'https://docs.example.test/policy',
+      }),
+    ).rejects.toBeInstanceOf(ServiceUnavailableException);
+
+    expect(unavailable).toHaveBeenCalledTimes(2);
+    expect(prisma.withTenant).not.toHaveBeenCalled();
+    expect(objects.putObject).not.toHaveBeenCalled();
+  });
+});
+
+describe('KnowledgeIngestionProcessor original source reads', () => {
+  it('streams only the tenant-scoped source after checking the persisted size and checksum', async () => {
+    const bytes = Buffer.from('source file');
+    const sha256 = createHash('sha256').update(bytes).digest('hex');
+    const findFirst = vi.fn().mockResolvedValue({
+      objectKey: `${TENANT_ID}/${DOCUMENT_ID}/${VERSION_ID}.bin`,
+      objectSize: bytes.byteLength,
+      objectSha256: sha256,
+      mimeType: 'application/pdf',
+      fileName: '员工/制度.pdf',
+      document: { title: '员工制度' },
+    });
+    const prisma = {
+      withTenant: vi.fn((_tenantId: string, operation: (transaction: unknown) => unknown) =>
+        operation({ knowledgeDocumentVersion: { findFirst } }),
+      ),
+    };
+    const objects = {
+      readObject: vi.fn().mockResolvedValue({
+        body: Readable.from(bytes),
+        size: bytes.byteLength,
+        sha256,
+      }),
+    };
+    const { service } = createService({ prisma, objects });
+
+    const source = await service.readSourceDocument(PRINCIPAL, {
+      knowledgeBaseId: KNOWLEDGE_BASE_ID,
+      documentId: DOCUMENT_ID,
+      documentVersionId: VERSION_ID,
+    });
+    const chunks: Buffer[] = [];
+    for await (const chunk of source.body) chunks.push(Buffer.from(chunk as Uint8Array));
+
+    expect(Buffer.concat(chunks)).toEqual(bytes);
+    expect(source).toMatchObject({
+      size: bytes.byteLength,
+      mimeType: 'application/pdf',
+      fileName: '员工_制度.pdf',
+    });
+    expect(prisma.withTenant).toHaveBeenCalledWith(TENANT_ID, expect.any(Function));
+    expect(findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          tenantId: TENANT_ID,
+          knowledgeBaseId: KNOWLEDGE_BASE_ID,
+          documentId: DOCUMENT_ID,
+          id: VERSION_ID,
+        },
+      }),
+    );
+  });
+});
+
+describe('knowledge entity alias persistence boundary', () => {
+  it('cleans, deduplicates and bounds aliases without storing the canonical form', () => {
+    const aliases = normalizeKnowledgeEntityAliases('Canonical Name', [
+      'Canonical Name',
+      '“Canonical Name”',
+      ' canonical name ',
+      '“Surface Alias”',
+      'Surface Alias',
+      'x',
+      ` ${'L'.repeat(200)} `,
+      ...Array.from({ length: 40 }, (_, index) => `alias-${index}`),
+    ]);
+
+    expect(aliases).toHaveLength(32);
+    expect(new Set(aliases).size).toBe(aliases.length);
+    expect(aliases).not.toContain('Canonical Name');
+    expect(aliases).toContain('canonical name');
+    expect(aliases.filter((alias) => alias === 'Surface Alias')).toHaveLength(1);
+    expect(aliases.every((alias) => alias === alias.trim())).toBe(true);
+    expect(aliases.every((alias) => alias.length >= 2 && alias.length <= 160)).toBe(true);
+    expect(aliases.some((alias) => alias.length === 160)).toBe(true);
+  });
+});
 
 describe('KnowledgeIngestionProcessor file version storage', () => {
   it('retains a deterministic object for delayed worker recovery when ledger linking fails', async () => {
@@ -154,6 +278,8 @@ describe('KnowledgeIngestionProcessor file version storage', () => {
           documentId: DOCUMENT_ID,
           versionNumber: 2,
           sourceType: 'FILE',
+          classification: 'INTERNAL',
+          governanceHash: 'a'.repeat(64),
           mimeType: 'text/plain',
           fileName: 'recovery.txt',
           objectKey: null,
@@ -161,6 +287,7 @@ describe('KnowledgeIngestionProcessor file version storage', () => {
           objectSha256: null,
           contentText: null,
           createdById: ADMIN_ID,
+          document: { title: 'Recovery document' },
         }),
       },
     };
@@ -194,9 +321,13 @@ describe('KnowledgeIngestionProcessor file version storage', () => {
       objects as unknown as KnowledgeObjectStore,
       { scan: vi.fn() } as unknown as KnowledgeFileScanner,
       { semanticEnabled: false } as never,
+      postgresSearchIndex() as never,
+      { fetch: vi.fn() } as never,
+      { assertPersistentWritesAvailable: vi.fn() } as never,
     );
     const process = vi.fn().mockResolvedValue(undefined);
     Object.assign(service, { process });
+    const lease = activeLease();
 
     await service.executeClaim(
       {
@@ -204,10 +335,12 @@ describe('KnowledgeIngestionProcessor file version storage', () => {
         tenantId: TENANT_ID,
         documentVersionId: VERSION_ID,
         attempts: 1,
+        failureAttempts: 0,
         leaseExpiresAt: new Date(Date.now() + 60_000),
         createdAt: new Date(),
       },
       'worker-1',
+      lease,
     );
 
     expect(objects.readObject).toHaveBeenCalledWith(objectKey);
@@ -220,7 +353,7 @@ describe('KnowledgeIngestionProcessor file version storage', () => {
         },
       }),
     );
-    expect(process).toHaveBeenCalledWith(expect.any(Object), bytes, 'worker-1');
+    expect(process).toHaveBeenCalledWith(expect.any(Object), bytes, 'worker-1', lease);
   });
 });
 
@@ -251,7 +384,29 @@ describe('KnowledgeIngestionProcessor PDF page provenance', () => {
       $queryRaw: vi
         .fn()
         .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([{ id: JOB_ID }]),
+        .mockResolvedValueOnce([{ id: JOB_ID }])
+        .mockImplementation((sql: { readonly strings?: readonly string[] }) => {
+          const statement = sql.strings?.join('') ?? '';
+          if (statement.includes('FROM public.knowledge_relation_governance')) return [];
+          if (statement.includes('JOIN public.knowledge_ontology_versions')) return [];
+          if (statement.includes('SELECT subject.entity_type AS subject_type')) {
+            return [{ subject_type: 'DOCUMENT', object_type: 'TOPIC' }];
+          }
+          if (statement.includes('FROM public."knowledge_graph_projections"')) {
+            return [
+              {
+                id: '00000000-0000-7000-8000-000000000099',
+                graph_hash: 'b'.repeat(64),
+              },
+            ];
+          }
+          // This provenance test does not exercise governance persistence. Leave
+          // the synthetic conflict uninserted so no unrelated audit/outbox mock
+          // is required; the dedicated governance-candidate suite covers it.
+          if (statement.includes('INSERT INTO public.knowledge_graph_conflicts')) return [];
+          return [{ id: '00000000-0000-7000-8000-000000000099' }];
+        }),
+      $executeRaw: vi.fn().mockResolvedValue(1),
       knowledgeIngestionJob: {
         findFirst: vi.fn().mockResolvedValue({ id: JOB_ID }),
         updateMany: vi.fn().mockResolvedValue({ count: 1 }),
@@ -260,16 +415,24 @@ describe('KnowledgeIngestionProcessor PDF page provenance', () => {
       knowledgeDocument: {
         findFirstOrThrow: vi
           .fn()
-          .mockResolvedValueOnce({ status: 'PROCESSING' })
+          .mockResolvedValueOnce({ status: 'PROCESSING', title: 'PDF page provenance' })
           .mockResolvedValueOnce({ currentVersionId: null, documentVersion: 1 }),
         update: vi.fn().mockResolvedValue({}),
       },
       knowledgeBase: {
+        findFirst: vi.fn().mockResolvedValue({
+          chunkTargetTokens: 500,
+          chunkOverlapTokens: 80,
+        }),
         findFirstOrThrow: vi.fn().mockResolvedValue({ status: 'ACTIVE' }),
       },
       knowledgeChunk: {
         deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
         createMany: vi.fn().mockResolvedValue({ count: 3 }),
+      },
+      knowledgeParentChunk: {
+        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+        createMany: vi.fn().mockResolvedValue({ count: 2 }),
       },
       knowledgeDocumentVersion: {
         findFirstOrThrow: vi.fn().mockResolvedValue({ objectKey: 'tenant/document/version.bin' }),
@@ -277,6 +440,168 @@ describe('KnowledgeIngestionProcessor PDF page provenance', () => {
       },
       auditEvent: {
         create: vi.fn().mockResolvedValue({}),
+      },
+      outboxEvent: {
+        create: vi.fn().mockResolvedValue({}),
+      },
+    };
+    const prisma = {
+      withTenant: vi.fn((_tenantId: string, operation: (value: unknown) => unknown) =>
+        operation(transaction),
+      ),
+    };
+    const structuredObjectKey = `${TENANT_ID}/${DOCUMENT_ID}/${VERSION_ID}.structured.json`;
+    const objects = {
+      putObject: vi
+        .fn()
+        .mockRejectedValueOnce(new KnowledgeObjectConflictError(structuredObjectKey))
+        .mockResolvedValue({
+          objectKey: structuredObjectKey,
+          size: 512,
+          sha256: 'c'.repeat(64),
+          created: true,
+        }),
+      deleteObject: vi.fn().mockResolvedValue(undefined),
+    };
+    const service = new KnowledgeIngestionProcessor(
+      prisma as unknown as AdminPrismaService,
+      parser as unknown as KnowledgeDocumentParser,
+      objects as unknown as KnowledgeObjectStore,
+      {
+        scan: vi.fn().mockResolvedValue({
+          verdict: 'clean',
+          scanner: 'test',
+          scannedAt: new Date().toISOString(),
+        }),
+      } as KnowledgeFileScanner,
+      { semanticEnabled: false } as never,
+      postgresSearchIndex() as never,
+      { fetch: vi.fn() } as never,
+      { assertPersistentWritesAvailable: vi.fn() } as never,
+    );
+    const syncSearchDocumentVersion = vi
+      .spyOn(service, 'syncSearchDocumentVersion')
+      .mockResolvedValue();
+
+    await (
+      service as unknown as {
+        process(
+          identity: {
+            tenantId: string;
+            knowledgeBaseId: string;
+            documentId: string;
+            documentVersionId: string;
+            jobId: string;
+            versionNumber: number;
+            sourceType: 'FILE';
+            classification: string;
+            governanceHash: string;
+            mimeType: string;
+            fileName: string;
+            actorUserId: string;
+          },
+          source: Buffer,
+          workerId: string,
+          lease: KnowledgeIngestionLeaseControl,
+        ): Promise<void>;
+      }
+    ).process(
+      {
+        tenantId: TENANT_ID,
+        knowledgeBaseId: KNOWLEDGE_BASE_ID,
+        documentId: DOCUMENT_ID,
+        documentVersionId: VERSION_ID,
+        jobId: JOB_ID,
+        versionNumber: 2,
+        sourceType: 'FILE',
+        classification: 'INTERNAL',
+        governanceHash: 'a'.repeat(64),
+        mimeType: 'application/pdf',
+        fileName: 'handbook.pdf',
+        actorUserId: ADMIN_ID,
+      },
+      bytes,
+      'worker-1',
+      activeLease(),
+    );
+
+    const createMany = transaction.knowledgeChunk.createMany;
+    expect(createMany).toHaveBeenCalledOnce();
+    expect(objects.deleteObject).toHaveBeenCalledWith(structuredObjectKey);
+    expect(objects.putObject).toHaveBeenCalledTimes(2);
+    const stored = createMany.mock.calls[0]?.[0].data as Array<{
+      chunkIndex: number;
+      content: string;
+      metadata: Record<string, unknown>;
+    }>;
+    expect(stored).toHaveLength(3);
+    expect(stored.map((chunk) => chunk.chunkIndex)).toEqual([0, 1, 2]);
+    expect(stored.map((chunk) => chunk.metadata.pageStart)).toEqual([1, 1, 3]);
+    expect(stored.map((chunk) => chunk.metadata.pageEnd)).toEqual([1, 1, 3]);
+    expect(stored.every((chunk) => chunk.metadata.pageCount === 3)).toBe(true);
+    expect(stored.every((chunk) => chunk.metadata.parser === 'pdf-parse-v2')).toBe(true);
+    expect(parser.parse).toHaveBeenCalledWith(
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(stored.some((chunk) => chunk.metadata.pageStart === 2)).toBe(false);
+    expect(stored[2]?.content).toBe(thirdPage);
+    expect(transaction.knowledgeDocumentVersion.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contentText: fullText,
+          status: 'READY',
+          publishedAt: expect.any(Date),
+          parserName: 'local-document-parser-v1',
+          parseReviewStatus: 'PENDING',
+          parseDiagnostics: expect.objectContaining({
+            pageCount: 3,
+            nonEmptyPageCount: 2,
+          }),
+        }),
+      }),
+    );
+    expect(transaction.knowledgeDocument.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          currentVersionId: VERSION_ID,
+          documentVersion: 2,
+          status: 'READY',
+          contentText: fullText,
+        }),
+      }),
+    );
+    expect(transaction.auditEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          action: 'admin.knowledge-document-version.indexed',
+          metadata: expect.objectContaining({
+            current: true,
+            publicationRequired: false,
+            automaticPublication: true,
+          }),
+        }),
+      }),
+    );
+    expect(transaction.outboxEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          eventType: 'knowledge.document-version.published.v1',
+          aggregateId: VERSION_ID,
+        }),
+      }),
+    );
+    expect(syncSearchDocumentVersion).toHaveBeenCalledWith(
+      { tenantId: TENANT_ID },
+      expect.objectContaining({ documentVersionId: VERSION_ID, active: true }),
+    );
+  });
+
+  it('blocks sensitive PDF content before Docling or Embedding receives bytes', async () => {
+    const parser = { parse: vi.fn() };
+    const semantic = { semanticEnabled: true, embedAll: vi.fn() };
+    const transaction = {
+      knowledgeIngestionJob: {
+        updateMany: vi.fn().mockResolvedValue({ count: 1 }),
       },
     };
     const prisma = {
@@ -295,69 +620,124 @@ describe('KnowledgeIngestionProcessor PDF page provenance', () => {
           scannedAt: new Date().toISOString(),
         }),
       } as KnowledgeFileScanner,
-      { semanticEnabled: false } as never,
+      semantic as never,
+      postgresSearchIndex() as never,
+      { fetch: vi.fn() } as never,
+      { assertPersistentWritesAvailable: vi.fn() } as never,
     );
 
-    await (
-      service as unknown as {
-        process(
-          identity: {
-            tenantId: string;
-            knowledgeBaseId: string;
-            documentId: string;
-            documentVersionId: string;
-            jobId: string;
-            versionNumber: number;
-            sourceType: 'FILE';
-            mimeType: string;
-            fileName: string;
-            actorUserId: string;
+    await expect(
+      (
+        service as unknown as {
+          process(
+            identity: {
+              tenantId: string;
+              knowledgeBaseId: string;
+              documentId: string;
+              documentVersionId: string;
+              jobId: string;
+              versionNumber: number;
+              sourceType: 'FILE';
+              classification: string;
+              governanceHash: string;
+              mimeType: string;
+              fileName: string;
+              actorUserId: string;
+            },
+            source: Buffer,
+            workerId: string,
+            lease: KnowledgeIngestionLeaseControl,
+          ): Promise<void>;
+        }
+      ).process(
+        {
+          tenantId: TENANT_ID,
+          knowledgeBaseId: KNOWLEDGE_BASE_ID,
+          documentId: DOCUMENT_ID,
+          documentVersionId: VERSION_ID,
+          jobId: JOB_ID,
+          versionNumber: 2,
+          sourceType: 'FILE',
+          classification: 'SENSITIVE',
+          governanceHash: 'a'.repeat(64),
+          mimeType: 'application/pdf',
+          fileName: 'restricted.pdf',
+          actorUserId: ADMIN_ID,
+        },
+        Buffer.from('%PDF-1.7 restricted'),
+        'worker-1',
+        activeLease(),
+      ),
+    ).rejects.toThrow('KNOWLEDGE_DOCLING_CLASSIFICATION_NOT_APPROVED');
+    expect(parser.parse).not.toHaveBeenCalled();
+    expect(semantic.embedAll).not.toHaveBeenCalled();
+  });
+});
+
+describe('KnowledgeIngestionProcessor controlled web import', () => {
+  it('persists the canonical source URI and fetched HTML through the object-store path', async () => {
+    const bytes = Buffer.from('<main>Security policy</main>');
+    const prisma = {
+      withTenant: vi.fn((_tenantId: string, operation: (value: unknown) => unknown) =>
+        operation({
+          knowledgeBase: {
+            findFirst: vi.fn().mockResolvedValue({ status: 'ACTIVE' }),
           },
-          source: Buffer,
-          workerId: string,
-        ): Promise<void>;
-      }
-    ).process(
-      {
-        tenantId: TENANT_ID,
-        knowledgeBaseId: KNOWLEDGE_BASE_ID,
-        documentId: DOCUMENT_ID,
-        documentVersionId: VERSION_ID,
-        jobId: JOB_ID,
-        versionNumber: 2,
-        sourceType: 'FILE',
-        mimeType: 'application/pdf',
-        fileName: 'handbook.pdf',
-        actorUserId: ADMIN_ID,
-      },
+        }),
+      ),
+    };
+    const fetch = vi.fn().mockResolvedValue({
+      sourceUri: 'https://docs.example.com/security',
       bytes,
-      'worker-1',
+      mimeType: 'text/html',
+    });
+    const service = new KnowledgeIngestionProcessor(
+      prisma as unknown as AdminPrismaService,
+      {} as KnowledgeDocumentParser,
+      {} as KnowledgeObjectStore,
+      { scan: vi.fn() } as unknown as KnowledgeFileScanner,
+      { semanticEnabled: false } as never,
+      postgresSearchIndex() as never,
+      { fetch } as never,
+      { assertPersistentWritesAvailable: vi.fn() } as never,
     );
+    const createVersionRecord = vi.fn().mockResolvedValue({
+      tenantId: TENANT_ID,
+      knowledgeBaseId: KNOWLEDGE_BASE_ID,
+      documentId: DOCUMENT_ID,
+      documentVersionId: VERSION_ID,
+      jobId: JOB_ID,
+      versionNumber: 1,
+      sourceType: 'WEB',
+      classification: 'INTERNAL',
+      governanceHash: 'a'.repeat(64),
+      mimeType: 'text/html',
+      fileName: null,
+      actorUserId: ADMIN_ID,
+    });
+    const persistObjectAndActivate = vi.fn().mockResolvedValue(undefined);
+    Object.assign(service, { createVersionRecord, persistObjectAndActivate });
 
-    const createMany = transaction.knowledgeChunk.createMany;
-    expect(createMany).toHaveBeenCalledOnce();
-    const stored = createMany.mock.calls[0]?.[0].data as Array<{
-      chunkIndex: number;
-      content: string;
-      metadata: Record<string, unknown>;
-    }>;
-    expect(stored).toHaveLength(3);
-    expect(stored.map((chunk) => chunk.chunkIndex)).toEqual([0, 1, 2]);
-    expect(stored.map((chunk) => chunk.metadata.pageStart)).toEqual([1, 1, 3]);
-    expect(stored.map((chunk) => chunk.metadata.pageEnd)).toEqual([1, 1, 3]);
-    expect(stored.every((chunk) => chunk.metadata.pageCount === 3)).toBe(true);
-    expect(stored.every((chunk) => chunk.metadata.parser === 'pdf-parse-v2')).toBe(true);
-    expect(stored.some((chunk) => chunk.metadata.pageStart === 2)).toBe(false);
-    expect(stored[2]?.content).toBe(thirdPage);
-    expect(transaction.knowledgeDocumentVersion.update).toHaveBeenCalledWith(
+    await expect(
+      service.importWeb({ tenantId: TENANT_ID, userId: ADMIN_ID } as never, {
+        knowledgeBaseId: KNOWLEDGE_BASE_ID,
+        sourceUri: 'https://docs.example.com/security',
+      }),
+    ).resolves.toBe(DOCUMENT_ID);
+
+    expect(fetch).toHaveBeenCalledWith('https://docs.example.com/security');
+    expect(createVersionRecord).toHaveBeenCalledWith(
       expect.objectContaining({
-        data: expect.objectContaining({ contentText: fullText }),
+        sourceType: 'WEB',
+        sourceUri: 'https://docs.example.com/security',
+        mimeType: 'text/html',
+        processing: true,
+        enqueue: true,
       }),
     );
-    expect(transaction.knowledgeDocument.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ contentText: fullText }),
-      }),
+    expect(persistObjectAndActivate).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceType: 'WEB' }),
+      bytes,
     );
   });
 });
@@ -365,6 +745,7 @@ describe('KnowledgeIngestionProcessor PDF page provenance', () => {
 function createService(input: {
   prisma: Record<string, unknown>;
   objects: Record<string, unknown>;
+  assertPersistentWritesAvailable?: () => void;
 }) {
   const service = new KnowledgeIngestionProcessor(
     input.prisma as unknown as AdminPrismaService,
@@ -372,6 +753,11 @@ function createService(input: {
     input.objects as unknown as KnowledgeObjectStore,
     { scan: vi.fn() } as unknown as KnowledgeFileScanner,
     { semanticEnabled: false } as never,
+    postgresSearchIndex() as never,
+    { fetch: vi.fn() } as never,
+    {
+      assertPersistentWritesAvailable: input.assertPersistentWritesAvailable ?? vi.fn(),
+    } as never,
   );
   const createVersionRecord = vi.fn().mockResolvedValue({
     tenantId: TENANT_ID,
@@ -381,6 +767,8 @@ function createService(input: {
     jobId: JOB_ID,
     versionNumber: 2,
     sourceType: 'FILE',
+    classification: 'INTERNAL',
+    governanceHash: 'a'.repeat(64),
     mimeType: 'text/plain',
     fileName: 'handbook-2026.txt',
     actorUserId: ADMIN_ID,
@@ -389,4 +777,22 @@ function createService(input: {
   const failBeforeEnqueue = vi.fn().mockResolvedValue(undefined);
   Object.assign(service, { createVersionRecord, process, failBeforeEnqueue });
   return { service, createVersionRecord, process, failBeforeEnqueue };
+}
+
+function postgresSearchIndex() {
+  return {
+    driver: 'postgres',
+    replaceDocumentVersion: vi.fn().mockResolvedValue(undefined),
+    publishDocumentVersion: vi.fn().mockResolvedValue(undefined),
+    archiveDocument: vi.fn().mockResolvedValue(undefined),
+    query: vi.fn().mockResolvedValue([]),
+    status: vi.fn().mockResolvedValue({ driver: 'postgres', ready: true, collection: null }),
+  };
+}
+
+function activeLease(): KnowledgeIngestionLeaseControl {
+  return {
+    signal: new AbortController().signal,
+    assertOwned: vi.fn().mockResolvedValue(undefined),
+  };
 }

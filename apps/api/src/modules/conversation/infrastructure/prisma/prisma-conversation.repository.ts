@@ -1,27 +1,35 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import {
+  trustedModelRouteSnapshotSchema,
   textMessageContentSchema,
   type Conversation,
   type ConversationAgentRun,
   type Message,
   type TextMessageContent,
+  type UpdateConversationStateRequest,
 } from '@enterprise/contracts';
 import { randomUUID } from 'node:crypto';
 
 import { PrismaService } from '../../../../database/prisma.service.js';
+import { hasRoleAgentAssignmentMarker } from '../../../agent-control/domain/role-agent-assignment.policy.js';
+import { buildAgentRunPolicySnapshot } from '../../../agent-run/domain/agent-run-policy-snapshot.js';
 import {
-  ActiveAgentRunConflictError,
   AgentUnavailableForRunError,
+  type ConversationListOptions,
+  type ConversationMessagePage,
+  ConversationResponseTargetUnavailableError,
   ConversationRepository,
   type ConversationMessagesSnapshot,
   type CreateDirectConversationInput,
+  type CreateGroupConversationInput,
   type CreateUserMessageInput,
   MessageIdempotencyConflictError,
+  type UpdateGroupMembersInput,
 } from '../../domain/conversation.repository.js';
 
 type ConversationWithParticipants = Prisma.ConversationGetPayload<{
-  include: { participants: true };
+  include: { participants: true; userStates: true };
 }>;
 
 @Injectable()
@@ -30,7 +38,11 @@ export class PrismaConversationRepository extends ConversationRepository {
     super();
   }
 
-  listForUser(tenantId: string, userId: string): Promise<readonly Conversation[]> {
+  listForUser(
+    tenantId: string,
+    userId: string,
+    options: ConversationListOptions = { includeArchived: false },
+  ): Promise<readonly Conversation[]> {
     return this.prisma.withTenant(tenantId, async (transaction) => {
       const conversations = await transaction.conversation.findMany({
         where: {
@@ -38,11 +50,39 @@ export class PrismaConversationRepository extends ConversationRepository {
           participants: {
             some: { tenantId, type: 'USER', userId, leftAt: null },
           },
+          userStates: {
+            some: {
+              tenantId,
+              userId,
+              ...(options.includeArchived ? {} : { archivedAt: null }),
+            },
+          },
+          ...(options.query === undefined
+            ? {}
+            : {
+                OR: [
+                  { title: { contains: options.query, mode: 'insensitive' as const } },
+                  {
+                    participants: {
+                      some: {
+                        tenantId,
+                        leftAt: null,
+                        displayName: { contains: options.query, mode: 'insensitive' as const },
+                      },
+                    },
+                  },
+                ],
+              }),
         },
-        include: { participants: { where: { tenantId, leftAt: null } } },
+        include: {
+          participants: { where: { tenantId, leftAt: null } },
+          userStates: { where: { tenantId, userId } },
+        },
         orderBy: [{ lastMessageAt: 'desc' }, { updatedAt: 'desc' }],
       });
-      return conversations.map((conversation) => mapConversation(conversation, userId));
+      return conversations
+        .map((conversation) => mapConversation(conversation, userId))
+        .sort(compareConversationListOrder);
     });
   }
 
@@ -60,7 +100,10 @@ export class PrismaConversationRepository extends ConversationRepository {
             some: { tenantId, type: 'USER', userId, leftAt: null },
           },
         },
-        include: { participants: { where: { tenantId, leftAt: null } } },
+        include: {
+          participants: { where: { tenantId, leftAt: null } },
+          userStates: { where: { tenantId, userId } },
+        },
       });
       return conversation === null ? null : mapConversation(conversation, userId);
     });
@@ -75,7 +118,10 @@ export class PrismaConversationRepository extends ConversationRepository {
 
       const existing = await transaction.conversation.findFirst({
         where: { tenantId: input.tenantId, directKey: input.directKey },
-        include: { participants: { where: { tenantId: input.tenantId } } },
+        include: {
+          participants: { where: { tenantId: input.tenantId } },
+          userStates: { where: { tenantId: input.tenantId, userId: input.actorUserId } },
+        },
       });
       if (existing !== null) {
         assertRelayConfiguration(existing, input);
@@ -83,6 +129,7 @@ export class PrismaConversationRepository extends ConversationRepository {
           input.participants.map((participant) => `${participant.type}:${participant.id}`),
         );
         if (
+          input.preserveExistingParticipants !== true &&
           existing.participants.some(
             (participant) =>
               participant.leftAt === null && !expectedKeys.has(participant.participantKey),
@@ -118,9 +165,17 @@ export class PrismaConversationRepository extends ConversationRepository {
 
         const reopened = await transaction.conversation.findFirst({
           where: { id: existing.id, tenantId: input.tenantId },
-          include: { participants: { where: { tenantId: input.tenantId, leftAt: null } } },
+          include: {
+            participants: { where: { tenantId: input.tenantId, leftAt: null } },
+            userStates: { where: { tenantId: input.tenantId, userId: input.actorUserId } },
+          },
         });
-        if (reopened === null || reopened.participants.length !== input.participants.length) {
+        if (
+          reopened === null ||
+          (input.preserveExistingParticipants === true
+            ? reopened.participants.length < input.participants.length
+            : reopened.participants.length !== input.participants.length)
+        ) {
           throw new Error('Stored direct conversation could not be reopened safely.');
         }
         return mapConversation(reopened, input.actorUserId);
@@ -139,6 +194,7 @@ export class PrismaConversationRepository extends ConversationRepository {
           participants: {
             create: input.participants.map((participant) => ({
               type: participant.type === 'user' ? 'USER' : 'AGENT',
+              role: 'MEMBER',
               participantKey: `${participant.type}:${participant.id}`,
               userId: participant.type === 'user' ? participant.id : null,
               agentId: participant.type === 'agent' ? participant.id : null,
@@ -146,7 +202,10 @@ export class PrismaConversationRepository extends ConversationRepository {
             })),
           },
         },
-        include: { participants: true },
+        include: {
+          participants: true,
+          userStates: { where: { tenantId: input.tenantId, userId: input.actorUserId } },
+        },
       });
 
       await Promise.all([
@@ -183,10 +242,81 @@ export class PrismaConversationRepository extends ConversationRepository {
     });
   }
 
+  createGroup(input: CreateGroupConversationInput): Promise<Conversation> {
+    return this.prisma.withTenant(input.tenantId, async (transaction) => {
+      const conversationId = randomUUID();
+      const conversation = await transaction.conversation.create({
+        data: {
+          id: conversationId,
+          tenantId: input.tenantId,
+          type: 'GROUP',
+          directKey: `group:${conversationId}`,
+          title: input.title,
+          createdById: input.actorUserId,
+          relayAgentAId: input.relay?.agentAId ?? null,
+          relayAgentBId: input.relay?.agentBId ?? null,
+          relayTurnLimit: input.relay?.turnLimit ?? null,
+          participants: {
+            create: input.participants.map((participant) => ({
+              type: participant.type === 'user' ? ('USER' as const) : ('AGENT' as const),
+              role:
+                participant.type === 'user' && participant.id === input.actorUserId
+                  ? ('OWNER' as const)
+                  : ('MEMBER' as const),
+              participantKey: `${participant.type}:${participant.id}`,
+              userId: participant.type === 'user' ? participant.id : null,
+              agentId: participant.type === 'agent' ? participant.id : null,
+              displayName: participant.name,
+            })),
+          },
+        },
+        include: {
+          participants: true,
+          userStates: { where: { tenantId: input.tenantId, userId: input.actorUserId } },
+        },
+      });
+      await Promise.all([
+        transaction.outboxEvent.create({
+          data: {
+            tenantId: input.tenantId,
+            aggregateType: 'conversation',
+            aggregateId: conversation.id,
+            eventType: 'conversation.created.v1',
+            payload: {
+              conversationId: conversation.id,
+              type: 'group',
+              title: input.title,
+              participants: input.participants.map((participant) => ({
+                type: participant.type,
+                id: participant.id,
+              })),
+            },
+          },
+        }),
+        transaction.auditEvent.create({
+          data: {
+            tenantId: input.tenantId,
+            actorType: 'USER',
+            actorId: input.actorUserId,
+            action: 'conversation.group.create',
+            resourceType: 'conversation',
+            resourceId: conversation.id,
+            metadata: {
+              participantCount: input.participants.length,
+              brainstorming: input.relay !== undefined,
+            },
+          },
+        }),
+      ]);
+      return mapConversation(conversation, input.actorUserId);
+    });
+  }
+
   listMessagesForUser(
     tenantId: string,
     userId: string,
     conversationId: string,
+    page: ConversationMessagePage = { limit: 50 },
   ): Promise<ConversationMessagesSnapshot | null> {
     return this.prisma.withTenant(tenantId, async (transaction) => {
       const conversation = await transaction.conversation.findFirst({
@@ -199,6 +329,7 @@ export class PrismaConversationRepository extends ConversationRepository {
         },
         select: {
           id: true,
+          type: true,
           relayAgentAId: true,
           relayAgentBId: true,
           relayTurnLimit: true,
@@ -206,18 +337,65 @@ export class PrismaConversationRepository extends ConversationRepository {
       });
       if (conversation === null) return null;
 
-      const [messages, runs] = await Promise.all([
-        transaction.message.findMany({
-          where: { tenantId, conversationId },
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        }),
-        transaction.agentRun.findMany({
-          where: { tenantId, conversationId },
-          include: { agent: { select: { name: true } } },
-          orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-        }),
-      ]);
-      return { items: messages.map(mapMessage), runs: runs.map(mapConversationRun) };
+      const cursor =
+        page.before === undefined
+          ? null
+          : await transaction.message.findFirst({
+              where: { tenantId, conversationId, id: page.before },
+              select: { id: true, sequence: true },
+            });
+      if (page.before !== undefined && cursor === null) return null;
+
+      const newestFirst = await transaction.message.findMany({
+        where: {
+          tenantId,
+          conversationId,
+          ...(cursor === null
+            ? {}
+            : {
+                sequence: { lt: cursor.sequence },
+              }),
+        },
+        orderBy: [{ sequence: 'desc' }],
+        take: page.limit + 1,
+      });
+      const hasMore = newestFirst.length > page.limit;
+      const messages = newestFirst.slice(0, page.limit).reverse();
+      const messageIds = messages.map((message) => message.id);
+      const runs = await transaction.agentRun.findMany({
+        where: {
+          tenantId,
+          conversationId,
+          ...(messageIds.length === 0
+            ? {}
+            : {
+                OR: [
+                  { inputMessageId: { in: messageIds } },
+                  { outputMessageId: { in: messageIds } },
+                ],
+              }),
+        },
+        include: {
+          agent: { select: { name: true } },
+          streamEvents: {
+            select: { type: true },
+            orderBy: { sequence: 'desc' },
+            take: 1,
+          },
+        },
+        orderBy: [
+          { conversationSequence: 'asc' },
+          { turnIndex: 'asc' },
+          { createdAt: 'asc' },
+          { id: 'asc' },
+        ],
+      });
+      return {
+        items: messages.map(mapMessage),
+        runs: runs.map(mapConversationRun),
+        nextCursor: hasMore ? (messages[0]?.id ?? null) : null,
+        hasMore,
+      };
     });
   }
 
@@ -239,12 +417,287 @@ export class PrismaConversationRepository extends ConversationRepository {
           },
         });
         if (existing === null) throw error;
-        if (parseStoredTextContent(existing.content).text !== input.content.text) {
+        if (
+          parseStoredTextContent(existing.content).text !== input.content.text ||
+          !sameResponseTarget(storedResponseTarget(existing), input.responseTarget)
+        ) {
           throw new MessageIdempotencyConflictError();
         }
         return mapMessage(existing);
       });
     }
+  }
+
+  markRead(
+    tenantId: string,
+    userId: string,
+    conversationId: string,
+    lastMessageId?: string,
+  ): Promise<Conversation | null> {
+    return this.prisma.withTenant(tenantId, async (transaction) => {
+      const conversation = await findConversationForUser(
+        transaction,
+        tenantId,
+        userId,
+        conversationId,
+      );
+      if (conversation === null) return null;
+      const lastMessage =
+        lastMessageId === undefined
+          ? await transaction.message.findFirst({
+              where: { tenantId, conversationId },
+              select: { id: true, createdAt: true },
+              orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+            })
+          : await transaction.message.findFirst({
+              where: { tenantId, conversationId, id: lastMessageId },
+              select: { id: true, createdAt: true },
+            });
+      if (lastMessageId !== undefined && lastMessage === null) return null;
+      await transaction.conversationUserState.upsert({
+        where: { tenantId_conversationId_userId: { tenantId, conversationId, userId } },
+        create: {
+          tenantId,
+          conversationId,
+          userId,
+          unreadCount: 0,
+          lastReadMessageId: lastMessage?.id ?? null,
+          lastReadAt: lastMessage?.createdAt ?? new Date(),
+        },
+        update: {
+          unreadCount: 0,
+          lastReadMessageId: lastMessage?.id ?? null,
+          lastReadAt: lastMessage?.createdAt ?? new Date(),
+        },
+      });
+      return findConversationForUser(transaction, tenantId, userId, conversationId);
+    });
+  }
+
+  updateState(
+    tenantId: string,
+    userId: string,
+    conversationId: string,
+    request: UpdateConversationStateRequest,
+  ): Promise<Conversation | null> {
+    return this.prisma.withTenant(tenantId, async (transaction) => {
+      const conversation = await findConversationForUser(
+        transaction,
+        tenantId,
+        userId,
+        conversationId,
+      );
+      if (conversation === null) return null;
+      const now = new Date();
+      await transaction.conversationUserState.upsert({
+        where: { tenantId_conversationId_userId: { tenantId, conversationId, userId } },
+        create: {
+          tenantId,
+          conversationId,
+          userId,
+          ...(request.pinned === true ? { pinnedAt: now } : {}),
+          ...(request.archived === true ? { archivedAt: now } : {}),
+          ...(request.mutedUntil === undefined
+            ? {}
+            : { mutedUntil: request.mutedUntil === null ? null : new Date(request.mutedUntil) }),
+        },
+        update: {
+          ...(request.pinned === undefined ? {} : { pinnedAt: request.pinned ? now : null }),
+          ...(request.archived === undefined ? {} : { archivedAt: request.archived ? now : null }),
+          ...(request.mutedUntil === undefined
+            ? {}
+            : { mutedUntil: request.mutedUntil === null ? null : new Date(request.mutedUntil) }),
+        },
+      });
+      await transaction.auditEvent.create({
+        data: {
+          tenantId,
+          actorType: 'USER',
+          actorId: userId,
+          action: 'conversation.state.update',
+          resourceType: 'conversation',
+          resourceId: conversationId,
+          metadata: {
+            pinned: request.pinned ?? null,
+            archived: request.archived ?? null,
+            mutedUntil: request.mutedUntil ?? null,
+          },
+        },
+      });
+      return findConversationForUser(transaction, tenantId, userId, conversationId);
+    });
+  }
+
+  searchMessages(
+    tenantId: string,
+    userId: string,
+    conversationId: string,
+    query: string,
+    limit: number,
+  ): Promise<readonly Message[] | null> {
+    return this.prisma.withTenant(tenantId, async (transaction) => {
+      const conversation = await findConversationForUser(
+        transaction,
+        tenantId,
+        userId,
+        conversationId,
+      );
+      if (conversation === null) return null;
+      const messages = await transaction.message.findMany({
+        where: {
+          tenantId,
+          conversationId,
+          content: { path: ['text'], string_contains: query, mode: 'insensitive' },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: limit,
+      });
+      return messages.map(mapMessage);
+    });
+  }
+
+  renameGroup(
+    tenantId: string,
+    actorUserId: string,
+    conversationId: string,
+    title: string,
+  ): Promise<Conversation | null> {
+    return this.prisma.withTenant(tenantId, async (transaction) => {
+      const group = await transaction.conversation.findFirst({
+        where: {
+          tenantId,
+          id: conversationId,
+          type: 'GROUP',
+          participants: {
+            some: {
+              tenantId,
+              userId: actorUserId,
+              type: 'USER',
+              role: { in: ['OWNER', 'ADMIN'] },
+              leftAt: null,
+            },
+          },
+        },
+        select: { id: true },
+      });
+      if (group === null) return null;
+      await transaction.conversation.updateMany({
+        where: { tenantId, id: conversationId, type: 'GROUP' },
+        data: { title },
+      });
+      await transaction.auditEvent.create({
+        data: {
+          tenantId,
+          actorType: 'USER',
+          actorId: actorUserId,
+          action: 'conversation.group.rename',
+          resourceType: 'conversation',
+          resourceId: conversationId,
+          metadata: { title },
+        },
+      });
+      return findConversationForUser(transaction, tenantId, actorUserId, conversationId);
+    });
+  }
+
+  updateGroupMembers(input: UpdateGroupMembersInput): Promise<Conversation | null> {
+    return this.prisma.withTenant(input.tenantId, async (transaction) => {
+      const group = await transaction.conversation.findFirst({
+        where: {
+          tenantId: input.tenantId,
+          id: input.conversationId,
+          type: 'GROUP',
+          participants: {
+            some: {
+              tenantId: input.tenantId,
+              userId: input.actorUserId,
+              type: 'USER',
+              role: { in: ['OWNER', 'ADMIN'] },
+              leftAt: null,
+            },
+          },
+        },
+        include: { participants: { where: { tenantId: input.tenantId, leftAt: null } } },
+      });
+      if (group === null) return null;
+      const owner = group.participants.find((participant) => participant.role === 'OWNER');
+      if (
+        owner !== undefined &&
+        input.remove.some(
+          (participant) => participant.type === 'user' && participant.id === owner.userId,
+        )
+      ) {
+        throw new Error('The group owner cannot be removed.');
+      }
+
+      for (const participant of input.add) {
+        const participantKey = `${participant.type}:${participant.id}`;
+        await transaction.conversationParticipant.upsert({
+          where: {
+            tenantId_conversationId_participantKey: {
+              tenantId: input.tenantId,
+              conversationId: input.conversationId,
+              participantKey,
+            },
+          },
+          create: {
+            tenantId: input.tenantId,
+            conversationId: input.conversationId,
+            type: participant.type === 'user' ? 'USER' : 'AGENT',
+            role: 'MEMBER',
+            participantKey,
+            userId: participant.type === 'user' ? participant.id : null,
+            agentId: participant.type === 'agent' ? participant.id : null,
+            displayName: participant.name,
+          },
+          update: { leftAt: null, role: 'MEMBER', displayName: participant.name },
+        });
+      }
+      for (const participant of input.remove) {
+        await transaction.conversationParticipant.updateMany({
+          where: {
+            tenantId: input.tenantId,
+            conversationId: input.conversationId,
+            participantKey: `${participant.type}:${participant.id}`,
+            role: { not: 'OWNER' },
+            leftAt: null,
+          },
+          data: { leftAt: new Date() },
+        });
+      }
+      const activeUserCount = await transaction.conversationParticipant.count({
+        where: {
+          tenantId: input.tenantId,
+          conversationId: input.conversationId,
+          type: 'USER',
+          leftAt: null,
+        },
+      });
+      if (activeUserCount < 2) throw new Error('A group requires at least two active members.');
+      await transaction.auditEvent.create({
+        data: {
+          tenantId: input.tenantId,
+          actorType: 'USER',
+          actorId: input.actorUserId,
+          action: 'conversation.group.members.update',
+          resourceType: 'conversation',
+          resourceId: input.conversationId,
+          metadata: {
+            added: input.add.map((participant) => ({
+              type: participant.type,
+              id: participant.id,
+            })),
+            removed: input.remove,
+          },
+        },
+      });
+      return findConversationForUser(
+        transaction,
+        input.tenantId,
+        input.actorUserId,
+        input.conversationId,
+      );
+    });
   }
 
   private createUserMessageTransaction(input: CreateUserMessageInput): Promise<Message | null> {
@@ -264,6 +717,7 @@ export class PrismaConversationRepository extends ConversationRepository {
         },
         select: {
           id: true,
+          type: true,
           relayAgentAId: true,
           relayAgentBId: true,
           relayTurnLimit: true,
@@ -286,35 +740,43 @@ export class PrismaConversationRepository extends ConversationRepository {
       });
       if (existing !== null) {
         const existingContent = parseStoredTextContent(existing.content);
-        if (existingContent.text !== input.content.text) {
+        if (
+          existingContent.text !== input.content.text ||
+          !sameResponseTarget(storedResponseTarget(existing), input.responseTarget)
+        ) {
           throw new MessageIdempotencyConflictError();
         }
         return mapMessage(existing);
       }
 
-      const activeAgentParticipant = await transaction.conversationParticipant.findFirst({
-        where: {
-          tenantId: input.tenantId,
-          conversationId: input.conversationId,
-          type: 'AGENT',
-          leftAt: null,
-        },
-        select: { id: true },
-      });
-      if (activeAgentParticipant !== null) {
-        const relayLockKey = `${input.tenantId}:${input.conversationId}:agent-run`;
-        await transaction.$queryRaw`
-          SELECT pg_advisory_xact_lock(hashtextextended(${relayLockKey}, 0))::text AS lock_token
-        `;
-        const activeRun = await transaction.agentRun.findFirst({
+      // Allocate the message and its initial Run while holding the same durable
+      // conversation lock used by terminal Run writes. Every question is
+      // accepted; the lock only establishes a database order and never waits
+      // for model execution.
+      const conversationLockKey = `${input.tenantId}:${input.conversationId}:agent-run`;
+      await transaction.$queryRaw`
+        SELECT pg_advisory_xact_lock(hashtextextended(${conversationLockKey}, 0))::text AS lock_token
+      `;
+
+      if (input.responseTarget !== undefined) {
+        const responseParticipant = await transaction.conversationParticipant.findFirst({
           where: {
             tenantId: input.tenantId,
             conversationId: input.conversationId,
-            status: { in: ['QUEUED', 'DISPATCHING', 'RUNNING', 'UNKNOWN'] },
+            leftAt: null,
+            ...(input.responseTarget.type === 'human'
+              ? { type: 'USER' as const, userId: input.responseTarget.userId }
+              : { type: 'AGENT' as const, agentId: input.responseTarget.agentId }),
           },
-          select: { id: true },
+          select: { participantKey: true },
         });
-        if (activeRun !== null) throw new ActiveAgentRunConflictError();
+        if (
+          responseParticipant === null ||
+          (input.responseTarget.type === 'human' &&
+            input.responseTarget.userId === input.senderUserId)
+        ) {
+          throw new ConversationResponseTargetUnavailableError();
+        }
       }
 
       const message = await transaction.message.create({
@@ -328,6 +790,18 @@ export class PrismaConversationRepository extends ConversationRepository {
           clientMessageId: input.clientMessageId,
           contentType: 'TEXT',
           content: { type: 'text', text: input.content.text },
+          responseTargetType:
+            input.responseTarget === undefined
+              ? null
+              : input.responseTarget.type === 'human'
+                ? 'HUMAN'
+                : 'AGENT',
+          responseTargetId:
+            input.responseTarget === undefined
+              ? null
+              : input.responseTarget.type === 'human'
+                ? input.responseTarget.userId
+                : input.responseTarget.agentId,
         },
       });
       const recipients = await transaction.conversationParticipant.findMany({
@@ -363,12 +837,14 @@ export class PrismaConversationRepository extends ConversationRepository {
             payload: {
               messageId: message.id,
               conversationId: input.conversationId,
+              conversationType: conversation.type === 'GROUP' ? 'group' : 'direct',
               sender: { type: 'user', id: input.senderUserId },
               recipients: recipients.map((recipient) => ({
                 type: recipient.type === 'USER' ? 'user' : 'agent',
                 id: recipient.userId ?? recipient.agentId,
               })),
               content: { type: 'text', text: input.content.text },
+              responseTarget: input.responseTarget ?? null,
             },
           },
         }),
@@ -384,7 +860,14 @@ export class PrismaConversationRepository extends ConversationRepository {
           },
         }),
       ]);
-      await enqueueInitialAgentRun(transaction, input, conversation, message.id, recipients);
+      await enqueueInitialAgentRun(
+        transaction,
+        input,
+        conversation,
+        message.id,
+        recipients,
+        input.responseTarget,
+      );
       return mapMessage(message);
     });
   }
@@ -396,10 +879,15 @@ function mapConversationRun(run: {
   readonly outputMessageId: string | null;
   readonly agentId: string;
   readonly agent: { readonly name: string };
+  readonly modelRouteSnapshot: Prisma.JsonValue | null;
+  readonly streamEvents: ReadonlyArray<{
+    readonly type: 'DELTA' | 'TERMINAL' | 'TERMINAL_ONLY' | 'TERMINAL_RECONCILED';
+  }>;
   readonly status:
     'QUEUED' | 'DISPATCHING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'UNKNOWN' | 'CANCELLED';
   readonly errorCode: string | null;
   readonly errorMessage: string | null;
+  readonly supersededByRunId: string | null;
   readonly createdAt: Date;
   readonly startedAt: Date | null;
   readonly finishedAt: Date | null;
@@ -410,14 +898,54 @@ function mapConversationRun(run: {
     outputMessageId: run.outputMessageId,
     agentId: run.agentId,
     agentName: run.agent.name,
+    streamMode: resolveConversationRunStreamMode(run.modelRouteSnapshot, run.streamEvents),
     status: run.status,
     errorCode: run.errorCode,
     errorMessage: run.errorMessage,
-    retryable: run.status === 'FAILED' || run.status === 'UNKNOWN' || run.status === 'CANCELLED',
+    supersededByRunId: run.supersededByRunId,
+    retryable: run.status === 'FAILED' || run.status === 'CANCELLED',
     createdAt: run.createdAt.toISOString(),
     startedAt: run.startedAt?.toISOString() ?? null,
     finishedAt: run.finishedAt?.toISOString() ?? null,
   };
+}
+
+function resolveConversationRunStreamMode(
+  modelRouteSnapshot: Prisma.JsonValue | null,
+  streamEvents: ReadonlyArray<{
+    readonly type: 'DELTA' | 'TERMINAL' | 'TERMINAL_ONLY' | 'TERMINAL_RECONCILED';
+  }>,
+): ConversationAgentRun['streamMode'] {
+  const latestEvent = streamEvents[0]?.type;
+  if (latestEvent === 'DELTA' || latestEvent === 'TERMINAL') return 'live';
+  if (latestEvent === 'TERMINAL_ONLY') return 'terminal_only';
+
+  const route = trustedModelRouteSnapshotSchema.safeParse(modelRouteSnapshot);
+  if (!route.success) return null;
+  const firstCandidate = route.data.candidates.reduce((first, candidate) =>
+    candidate.ordinal < first.ordinal ? candidate : first,
+  );
+  return firstCandidate.provider === 'MANUS' ? 'terminal_only' : 'live';
+}
+
+async function findConversationForUser(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  userId: string,
+  conversationId: string,
+): Promise<Conversation | null> {
+  const conversation = await transaction.conversation.findFirst({
+    where: {
+      tenantId,
+      id: conversationId,
+      participants: { some: { tenantId, type: 'USER', userId, leftAt: null } },
+    },
+    include: {
+      participants: { where: { tenantId, leftAt: null } },
+      userStates: { where: { tenantId, userId } },
+    },
+  });
+  return conversation === null ? null : mapConversation(conversation, userId);
 }
 
 function mapConversation(source: ConversationWithParticipants, viewerUserId: string): Conversation {
@@ -425,19 +953,43 @@ function mapConversation(source: ConversationWithParticipants, viewerUserId: str
     type: participant.type === 'USER' ? ('user' as const) : ('agent' as const),
     id: participant.userId ?? participant.agentId ?? participant.id,
     name: participant.displayName,
+    role: participant.role.toLowerCase() as 'owner' | 'admin' | 'member',
   }));
-  const otherParticipant = participants.find(
-    (participant) => participant.type !== 'user' || participant.id !== viewerUserId,
-  );
+  const state = source.userStates?.[0];
+  const otherParticipant =
+    participants.find(
+      (participant) => participant.type === 'user' && participant.id !== viewerUserId,
+    ) ??
+    participants.find(
+      (participant) => participant.type !== 'user' || participant.id !== viewerUserId,
+    );
   return {
     id: source.id,
-    type: 'direct',
-    title: source.relayAgentAId !== null ? source.title : (otherParticipant?.name ?? source.title),
+    type: source.type === 'GROUP' ? 'group' : 'direct',
+    title:
+      source.type === 'GROUP' || source.relayAgentAId !== null
+        ? source.title
+        : (otherParticipant?.name ?? source.title),
     participants,
     lastMessageAt: source.lastMessageAt?.toISOString() ?? null,
+    unreadCount: state?.unreadCount ?? 0,
+    pinnedAt: state?.pinnedAt?.toISOString() ?? null,
+    archivedAt: state?.archivedAt?.toISOString() ?? null,
+    mutedUntil: state?.mutedUntil?.toISOString() ?? null,
     createdAt: source.createdAt.toISOString(),
     updatedAt: source.updatedAt.toISOString(),
   };
+}
+
+function compareConversationListOrder(left: Conversation, right: Conversation): number {
+  if (left.pinnedAt !== right.pinnedAt) {
+    if (left.pinnedAt === null || left.pinnedAt === undefined) return 1;
+    if (right.pinnedAt === null || right.pinnedAt === undefined) return -1;
+    return right.pinnedAt.localeCompare(left.pinnedAt);
+  }
+  return (right.lastMessageAt ?? right.updatedAt).localeCompare(
+    left.lastMessageAt ?? left.updatedAt,
+  );
 }
 
 function assertRelayConfiguration(
@@ -483,6 +1035,7 @@ async function enqueueInitialAgentRun(
     readonly userId: string | null;
     readonly agentId: string | null;
   }[],
+  responseTarget: CreateUserMessageInput['responseTarget'],
 ): Promise<void> {
   const agentRecipients = recipients.flatMap((recipient) =>
     recipient.type === 'AGENT' && recipient.agentId !== null ? [recipient.agentId] : [],
@@ -502,6 +1055,10 @@ async function enqueueInitialAgentRun(
       agentId = conversation.relayAgentAId;
       turnLimit = conversation.relayTurnLimit;
     }
+  } else if (responseTarget?.type === 'human') {
+    return;
+  } else if (responseTarget?.type === 'agent') {
+    agentId = agentRecipients.includes(responseTarget.agentId) ? responseTarget.agentId : null;
   } else if (agentRecipients.length === 1) {
     agentId = agentRecipients[0] ?? null;
   }
@@ -511,17 +1068,64 @@ async function enqueueInitialAgentRun(
     turnLimit > 1 && conversation.relayAgentAId !== null && conversation.relayAgentBId !== null
       ? [conversation.relayAgentAId, conversation.relayAgentBId]
       : [agentId];
+  const now = new Date();
   const executableAgents = await transaction.agentInstance.findMany({
     where: { id: { in: requiredAgentIds }, tenantId: input.tenantId },
-    include: { version: true },
+    include: {
+      version: { include: { template: true } },
+      _count: { select: { roleAssignments: true } },
+      roleAssignments: {
+        where: {
+          tenantId: input.tenantId,
+          userId: input.senderUserId,
+          status: 'ACTIVE',
+          effectiveFrom: { lte: now },
+          AND: [
+            { OR: [{ effectiveTo: null }, { effectiveTo: { gt: now } }] },
+            { employment: { is: { userId: input.senderUserId, status: 'ACTIVE' } } },
+          ],
+        },
+        select: {
+          id: true,
+          roleTemplateId: true,
+          roleVersionId: true,
+        },
+        take: 1,
+      },
+    },
   });
+  const activeEmploymentOrgUnitIds = new Set(
+    (
+      await transaction.employment.findMany({
+        where: {
+          tenantId: input.tenantId,
+          userId: input.senderUserId,
+          status: 'ACTIVE',
+        },
+        select: { orgUnitId: true },
+      })
+    ).map((employment) => employment.orgUnitId),
+  );
   if (
     executableAgents.length !== new Set(requiredAgentIds).size ||
     executableAgents.some(
       (candidate) =>
         candidate.status !== 'ONLINE' ||
-        candidate.version.status !== 'PUBLISHED' ||
-        !isAgentVisibleToUser(candidate.settings, candidate.ownerUserId, input.senderUserId),
+        (candidate.version.status !== 'PUBLISHED' &&
+          !(
+            candidate.version.status === 'RETIRED' &&
+            candidate.roleAssignments.length > 0 &&
+            candidate._count.roleAssignments > 0
+          )) ||
+        (candidate.kind === 'DEPARTMENT' &&
+          (candidate.orgUnitId === null || !activeEmploymentOrgUnitIds.has(candidate.orgUnitId))) ||
+        !isAgentVisibleToUser(
+          candidate.settings,
+          candidate.ownerUserId,
+          input.senderUserId,
+          candidate.roleAssignments.length > 0,
+          candidate._count.roleAssignments > 0,
+        ),
     )
   ) {
     throw new AgentUnavailableForRunError();
@@ -543,14 +1147,29 @@ async function enqueueInitialAgentRun(
       turnIndex: 1,
       turnLimit,
       idempotencyKey: `message:${messageId}:agent:${agent.id}`,
-      policySnapshot: {
-        agentVersionId: agent.versionId,
-        version: agent.version.version,
-        modelPolicy: agent.version.modelPolicy,
-        toolPolicy: agent.version.toolPolicy,
-        knowledgeScope: agent.version.knowledgeScope,
-        relay: turnLimit > 1,
-      },
+      policySnapshot: buildAgentRunPolicySnapshot({
+        agentVersion: agent.version,
+        roleAssignment: agent.roleAssignments[0] ?? null,
+        knowledgeScopeOverride: effectiveAgentKnowledgeScope(
+          agent.settings,
+          agent.version.knowledgeScope,
+        ),
+        extra: { relay: turnLimit > 1 },
+      }),
+    },
+  });
+  const superseded = await transaction.agentRun.updateMany({
+    where: {
+      tenantId: input.tenantId,
+      conversationId: conversation.id,
+      status: 'UNKNOWN',
+      supersededByRunId: null,
+      id: { not: runId },
+    },
+    data: {
+      supersededByRunId: runId,
+      supersededAt: now,
+      version: { increment: 1 },
     },
   });
   await transaction.outboxEvent.create({
@@ -576,25 +1195,55 @@ async function enqueueInitialAgentRun(
         agentId: agent.id,
         turnIndex: 1,
         turnLimit,
+        supersededUnknownRunCount: superseded.count,
       },
     },
   });
 }
 
-function isAgentVisibleToUser(
+export function isAgentVisibleToUser(
   settings: Prisma.JsonValue,
   ownerUserId: string | null,
   userId: string,
+  hasActiveAssignment = false,
+  hasAnyRoleAssignment = hasActiveAssignment,
 ): boolean {
+  if (hasRoleAgentAssignmentMarker(settings) || hasAnyRoleAssignment) return hasActiveAssignment;
   if (
     typeof settings === 'object' &&
     settings !== null &&
     !Array.isArray(settings) &&
-    settings.visibility === 'tenant'
+    (settings.visibility === 'tenant' || settings.visibility === 'department')
   ) {
     return true;
   }
   return ownerUserId !== null && ownerUserId === userId;
+}
+
+function effectiveAgentKnowledgeScope(
+  settings: Prisma.JsonValue,
+  versionScope: Prisma.JsonValue,
+): Prisma.JsonValue {
+  if (
+    typeof settings !== 'object' ||
+    settings === null ||
+    Array.isArray(settings) ||
+    !Array.isArray(settings.knowledgeBaseIdsOverride)
+  ) {
+    return versionScope;
+  }
+  const knowledgeBaseIds = [
+    ...new Set(
+      settings.knowledgeBaseIdsOverride.filter((id): id is string => typeof id === 'string'),
+    ),
+  ]
+    .sort()
+    .slice(0, 50);
+  const base =
+    typeof versionScope === 'object' && versionScope !== null && !Array.isArray(versionScope)
+      ? (JSON.parse(JSON.stringify(versionScope)) as Prisma.JsonObject)
+      : {};
+  return { ...base, knowledgeBaseIds };
 }
 
 function mapMessage(source: Prisma.MessageGetPayload<Record<string, never>>): Message {
@@ -608,8 +1257,33 @@ function mapMessage(source: Prisma.MessageGetPayload<Record<string, never>>): Me
     },
     clientMessageId: source.clientMessageId,
     content: parseStoredTextContent(source.content),
+    responseTarget: storedResponseTarget(source) ?? null,
     createdAt: source.createdAt.toISOString(),
   };
+}
+
+function storedResponseTarget(source: {
+  readonly responseTargetType: string | null;
+  readonly responseTargetId: string | null;
+}): CreateUserMessageInput['responseTarget'] | undefined {
+  if (source.responseTargetType === 'HUMAN' && source.responseTargetId !== null) {
+    return { type: 'human', userId: source.responseTargetId };
+  }
+  if (source.responseTargetType === 'AGENT' && source.responseTargetId !== null) {
+    return { type: 'agent', agentId: source.responseTargetId };
+  }
+  return undefined;
+}
+
+function sameResponseTarget(
+  left: CreateUserMessageInput['responseTarget'],
+  right: CreateUserMessageInput['responseTarget'],
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left.type !== right.type) return false;
+  return left.type === 'human'
+    ? left.userId === (right.type === 'human' ? right.userId : null)
+    : left.agentId === (right.type === 'agent' ? right.agentId : null);
 }
 
 export function parseStoredTextContent(content: Prisma.JsonValue): TextMessageContent {

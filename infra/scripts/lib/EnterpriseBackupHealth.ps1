@@ -49,6 +49,7 @@ function Get-EnterpriseBackupContinuityStatus {
     [Parameter(Mandatory = $true)][string]$Database,
     [ValidateRange(1, 168)][int]$BackupMaxAgeHours = 25,
     [ValidateRange(1, 720)][int]$RestoreReportMaxAgeHours = 168,
+    [ValidateRange(1, 720)][int]$DisasterRecoveryReportMaxAgeHours = 168,
     [DateTime]$UtcNow = [DateTime]::UtcNow
   )
 
@@ -107,11 +108,92 @@ function Get-EnterpriseBackupContinuityStatus {
     }
   }
 
+  $disasterRecoveryFiles = @(
+    Get-ChildItem -LiteralPath $resolved -Filter "$Database-*.dr-report.json" -File -ErrorAction SilentlyContinue |
+      Sort-Object LastWriteTimeUtc -Descending
+  )
+  $disasterRecoveryStatus = 'missing'
+  if ($disasterRecoveryFiles.Count -gt 0) {
+    $disasterRecoveryStatus = 'stale-or-invalid'
+    try {
+      $latestDisasterRecoveryFile = $disasterRecoveryFiles[0]
+      $suffix = '.dr-report.json'
+      if (-not $latestDisasterRecoveryFile.Name.EndsWith($suffix, [StringComparison]::Ordinal)) {
+        throw 'invalid disaster recovery report name'
+      }
+      $pairedRestoreName = (
+        $latestDisasterRecoveryFile.Name.Substring(
+          0,
+          $latestDisasterRecoveryFile.Name.Length - $suffix.Length
+        ) + '.json'
+      )
+      $pairedRestorePath = Join-Path $resolved $pairedRestoreName
+      if (-not (Test-Path -LiteralPath $pairedRestorePath -PathType Leaf)) {
+        throw 'paired restore report missing'
+      }
+      $pairedRestore = Get-Content -LiteralPath $pairedRestorePath -Raw -Encoding utf8 | ConvertFrom-Json
+      $drReport = Get-Content -LiteralPath $latestDisasterRecoveryFile.FullName -Raw -Encoding utf8 | ConvertFrom-Json
+      if (
+        [int]$drReport.contractVersion -ne 1 -or
+        [string]$drReport.scope -ne 'DATABASE_ISOLATED_REHEARSAL' -or
+        [string]$drReport.status -ne 'database-objectives-met' -or
+        [string]$drReport.sourceDatabase -ne $Database -or
+        [string]$drReport.backupSha256 -notmatch '^[0-9a-f]{64}$' -or
+        $drReport.objectiveResults.databaseRestoreMet -isnot [bool] -or
+        -not [bool]$drReport.objectiveResults.databaseRestoreMet -or
+        $drReport.evidence.productionTrafficFailoverVerified -isnot [bool] -or
+        [bool]$drReport.evidence.productionTrafficFailoverVerified -or
+        $drReport.evidence.offsiteRestoreVerified -isnot [bool] -or
+        [bool]$drReport.evidence.offsiteRestoreVerified -or
+        $drReport.evidence.pitrReplayVerified -isnot [bool] -or
+        [bool]$drReport.evidence.pitrReplayVerified
+      ) {
+        throw 'disaster recovery report contract invalid'
+      }
+      if (
+        [string]$pairedRestore.status -ne 'restore-verified' -or
+        $pairedRestore.cleanupVerified -isnot [bool] -or
+        -not [bool]$pairedRestore.cleanupVerified -or
+        [string]$pairedRestore.sourceDatabase -ne $Database -or
+        [string]$pairedRestore.backupSha256 -ne [string]$drReport.backupSha256
+      ) {
+        throw 'paired restore report invalid'
+      }
+      $matchingManifest = $false
+      foreach ($manifestFile in $manifestFiles) {
+        $candidate = Test-EnterpriseBackupManifestFile `
+          -ManifestFile $manifestFile `
+          -Database $Database `
+          -UtcNow $UtcNow
+        if ([bool]$candidate.valid -and [string]$candidate.sha256 -eq [string]$drReport.backupSha256) {
+          $matchingManifest = $true
+          break
+        }
+      }
+      if (-not $matchingManifest) { throw 'matching protected backup missing' }
+
+      $generatedAt = [DateTimeOffset]::Parse([string]$drReport.generatedAtUtc).UtcDateTime
+      if ($generatedAt -gt $UtcNow.AddMinutes(5)) { throw 'future timestamp' }
+      $reportAge = $UtcNow - $generatedAt
+      $disasterRecoveryStatus = if ($reportAge.TotalHours -le $DisasterRecoveryReportMaxAgeHours) {
+        'verified'
+      }
+      else {
+        'stale-or-invalid'
+      }
+    }
+    catch {
+      $disasterRecoveryStatus = 'stale-or-invalid'
+    }
+  }
+
   return [ordered]@{
     backupStatus = $backupStatus
     restoreStatus = $restoreStatus
+    disasterRecoveryStatus = $disasterRecoveryStatus
     integrityMode = 'protected-metadata-and-size'
     manifestCount = $manifestFiles.Count
     restoreReportCount = $reportFiles.Count
+    disasterRecoveryReportCount = $disasterRecoveryFiles.Count
   }
 }

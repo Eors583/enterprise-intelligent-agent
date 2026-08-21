@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useEffect, useId, useRef, type KeyboardEvent, type ReactNode } from 'react';
 
 export function Spinner({ label = '正在加载' }: { label?: string }): ReactNode {
   return (
@@ -94,6 +94,29 @@ export function Modal({
   size?: 'normal' | 'wide';
   dismissible?: boolean;
 }): ReactNode {
+  const dialogRef = useRef<HTMLElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const focusTarget = dialog.querySelector<HTMLElement>(
+      '[autofocus], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+    );
+    (focusTarget ?? dialog).focus();
+    return () => previouslyFocused?.focus();
+  }, []);
+
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (dismissible && event.key === 'Escape') {
+      event.preventDefault();
+      onClose();
+    }
+  };
+
   return (
     <div
       className="modal-backdrop"
@@ -101,16 +124,20 @@ export function Modal({
       onMouseDown={dismissible ? onClose : undefined}
     >
       <section
+        ref={dialogRef}
         className={`modal ${size === 'wide' ? 'wide' : ''}`}
         role="dialog"
         aria-modal="true"
-        aria-label={title}
+        aria-labelledby={titleId}
+        aria-describedby={description ? descriptionId : undefined}
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="modal-header">
           <div>
-            <h2>{title}</h2>
-            {description ? <p>{description}</p> : null}
+            <h2 id={titleId}>{title}</h2>
+            {description ? <p id={descriptionId}>{description}</p> : null}
           </div>
           {dismissible ? (
             <button type="button" className="icon-button close" aria-label="关闭" onClick={onClose}>
@@ -140,9 +167,9 @@ export function StatusPill({ value, label }: { value: string; label?: string }):
     SUSPENDED: '已暂停',
     TERMINATED: '已离职',
     NOT_CONFIGURED: '未配置',
-    RUNNING: '同步中',
-    SUCCEEDED: '同步成功',
-    FAILED: '同步失败',
+    RUNNING: '进行中',
+    SUCCEEDED: '成功',
+    FAILED: '失败',
   };
   return (
     <span className={`status-pill status-${value.toLowerCase()}`}>

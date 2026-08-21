@@ -81,3 +81,6 @@ class InMemoryRunStore:
 
     async def is_ready(self) -> bool:
         return True
+
+    async def aclose(self) -> None:
+        return None

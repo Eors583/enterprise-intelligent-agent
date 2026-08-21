@@ -31,9 +31,11 @@ describe('KnowledgeAiRuntimeClient', () => {
       }),
     );
     vi.stubGlobal('fetch', fetchMock);
-    const client = createClient();
+    const client = createClient({
+      serviceToken: 'runtime-service-token-at-least-32-characters',
+    });
 
-    await expect(client.embed(TENANT_ID, ['first', 'second'])).resolves.toEqual({
+    await expect(client.embed(TENANT_ID, ['first', 'second'], 'INTERNAL')).resolves.toEqual({
       model: 'embedding-model-v1',
       dimensions: DIMENSIONS,
       vectors: [first, second],
@@ -47,12 +49,46 @@ describe('KnowledgeAiRuntimeClient', () => {
       expect.objectContaining({
         'Content-Type': 'application/json',
         'X-Tenant-ID': TENANT_ID,
+        Authorization: 'Bearer runtime-service-token-at-least-32-characters',
       }),
     );
     expect((request.headers as Record<string, string>)['X-Request-ID']).toMatch(/^knowledge-/);
+    expect((request.headers as Record<string, string>)['X-Correlation-ID']).toBe(
+      (request.headers as Record<string, string>)['X-Request-ID'],
+    );
     expect(JSON.parse(String(request.body))).toEqual({
       tenant_id: TENANT_ID,
       inputs: ['first', 'second'],
+    });
+  });
+
+  it('uses an index-version profile as the model and dimension contract', async () => {
+    const dimensions = 768;
+    const embedding = Array<number>(dimensions).fill(0.25);
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        model: 'bge-index-v2',
+        dimensions,
+        items: [{ index: 0, embedding }],
+        usage: null,
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const client = createClient({ dimensions });
+
+    await expect(
+      client.embed(TENANT_ID, ['input'], 'INTERNAL', undefined, {
+        model: 'bge-index-v2',
+        dimensions,
+      }),
+    ).resolves.toMatchObject({ model: 'bge-index-v2', dimensions });
+
+    const [, request] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(JSON.parse(String(request.body))).toEqual({
+      tenant_id: TENANT_ID,
+      inputs: ['input'],
+      expected_model: 'bge-index-v2',
+      expected_dimensions: dimensions,
     });
   });
 
@@ -92,7 +128,7 @@ describe('KnowledgeAiRuntimeClient', () => {
   ])('rejects %s in a successful embedding response', async (_label, payload) => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse(payload)));
 
-    await expect(createClient().embed(TENANT_ID, ['input'])).rejects.toMatchObject({
+    await expect(createClient().embed(TENANT_ID, ['input'], 'INTERNAL')).rejects.toMatchObject({
       name: 'KnowledgeAiRuntimeError',
       code: 'KNOWLEDGE_AI_INVALID_RESPONSE',
       retryable: true,
@@ -130,6 +166,7 @@ describe('KnowledgeAiRuntimeClient', () => {
             { id: 'b', text: 'B' },
           ],
           2,
+          'INTERNAL',
         ),
       ).rejects.toMatchObject({ code: 'KNOWLEDGE_AI_INVALID_RESPONSE' });
     }
@@ -153,6 +190,7 @@ describe('KnowledgeAiRuntimeClient', () => {
           { id: 'b', text: 'B' },
         ],
         1,
+        'INTERNAL',
       ),
     ).resolves.toEqual({
       model: 'reranker-v1',
@@ -175,7 +213,7 @@ describe('KnowledgeAiRuntimeClient', () => {
         ),
     );
 
-    await expect(createClient().embed(TENANT_ID, ['input'])).rejects.toMatchObject({
+    await expect(createClient().embed(TENANT_ID, ['input'], 'INTERNAL')).rejects.toMatchObject({
       code: 'EMBEDDING_PROVIDER_RATE_LIMITED',
       retryable: true,
     });
@@ -196,10 +234,36 @@ describe('KnowledgeAiRuntimeClient', () => {
       ),
     );
 
-    const error = await captureError(createClient({ timeoutMs: 5 }).embed(TENANT_ID, ['input']));
+    const error = await captureError(
+      createClient({ timeoutMs: 5 }).embed(TENANT_ID, ['input'], 'INTERNAL'),
+    );
     expect(error).toBeInstanceOf(KnowledgeAiRuntimeError);
     expect(error).toMatchObject({ code: 'KNOWLEDGE_AI_TIMEOUT', retryable: true });
     expect((error as Error).message).toBe('Knowledge AI service is unavailable.');
+  });
+
+  it('propagates lease cancellation to an in-flight embedding request', async () => {
+    const fetchMock = vi.fn(
+      (_url: URL, request: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            reject(new DOMException('lease lost', 'AbortError'));
+          });
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+
+    const embedding = createClient().embed(TENANT_ID, ['input'], 'INTERNAL', controller.signal);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(embedding).rejects.toMatchObject({
+      code: 'KNOWLEDGE_AI_TIMEOUT',
+      retryable: true,
+    });
+    const [, request] = fetchMock.mock.calls[0] as unknown as [URL, RequestInit];
+    expect(request.signal?.aborted).toBe(true);
   });
 
   it('fails closed when semantic search is disabled and avoids a provider request', async () => {
@@ -207,7 +271,7 @@ describe('KnowledgeAiRuntimeClient', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(
-      createClient({ semanticEnabled: false }).embed(TENANT_ID, ['input']),
+      createClient({ semanticEnabled: false }).embed(TENANT_ID, ['input'], 'INTERNAL'),
     ).rejects.toMatchObject({
       code: 'KNOWLEDGE_SEMANTIC_DISABLED',
       retryable: false,
@@ -331,12 +395,67 @@ describe('KnowledgeAiRuntimeClient', () => {
       .mockResolvedValueOnce(embeddingResponse('model-b', 1));
     vi.stubGlobal('fetch', fetchMock);
 
-    await expect(createClient().embedAll(TENANT_ID, Array(65).fill('input'))).rejects.toMatchObject(
-      {
-        code: 'KNOWLEDGE_EMBEDDING_MODEL_CHANGED',
-        retryable: true,
-      },
+    await expect(
+      createClient().embedAll(TENANT_ID, Array(65).fill('input'), 'INTERNAL'),
+    ).rejects.toMatchObject({
+      code: 'KNOWLEDGE_EMBEDDING_MODEL_CHANGED',
+      retryable: true,
+    });
+  });
+
+  it('runs at most two embedding batches concurrently and preserves input order', async () => {
+    let active = 0;
+    let maximumActive = 0;
+    const fetchMock = vi.fn(async (_url: URL, request: RequestInit) => {
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const inputs = (JSON.parse(String(request.body)) as { inputs: string[] }).inputs;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      active -= 1;
+      return jsonResponse({
+        model: 'embedding-model-v1',
+        dimensions: DIMENSIONS,
+        items: inputs.map((input, index) => ({ index, embedding: vector(Number(input)) })),
+        usage: { input_tokens: inputs.length },
+      });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await createClient().embedAll(
+      TENANT_ID,
+      Array.from({ length: 129 }, (_, index) => String(index + 1)),
+      'INTERNAL',
     );
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(maximumActive).toBe(2);
+    expect(result.vectors.map((item) => item[0])).toEqual(
+      Array.from({ length: 129 }, (_, index) => index + 1),
+    );
+  });
+
+  it('blocks confidential embedding and rerank payloads before any provider request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const client = createClient({ rerankEnabled: true });
+
+    await expect(client.embed(TENANT_ID, ['secret'], 'CONFIDENTIAL')).rejects.toMatchObject({
+      code: 'KNOWLEDGE_EMBEDDING_CLASSIFICATION_NOT_APPROVED',
+      retryable: false,
+    });
+    await expect(
+      client.rerank(
+        TENANT_ID,
+        'question',
+        [{ id: 'a', text: 'secret candidate' }],
+        1,
+        'RESTRICTED',
+      ),
+    ).rejects.toMatchObject({
+      code: 'KNOWLEDGE_RERANK_CLASSIFICATION_NOT_APPROVED',
+      retryable: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
 
@@ -345,12 +464,15 @@ function createClient(
     semanticEnabled?: boolean;
     rerankEnabled?: boolean;
     timeoutMs?: number;
+    serviceToken?: string;
+    dimensions?: number;
   } = {},
 ): KnowledgeAiRuntimeClient {
   const values = {
     AI_RUNTIME_URL: 'http://127.0.0.1:8100',
+    AI_RUNTIME_SERVICE_TOKEN: overrides.serviceToken,
     KNOWLEDGE_AI_TIMEOUT_MS: overrides.timeoutMs ?? 1_000,
-    KNOWLEDGE_EMBEDDING_DIMENSIONS: DIMENSIONS,
+    KNOWLEDGE_EMBEDDING_DIMENSIONS: overrides.dimensions ?? DIMENSIONS,
     KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: overrides.semanticEnabled ?? true,
     KNOWLEDGE_RERANK_ENABLED: overrides.rerankEnabled ?? false,
     KNOWLEDGE_VECTOR_SEARCH_MODE: 'exact',

@@ -1,0 +1,28 @@
+name: enterprise-agent-wukongim-dev
+
+services:
+  wukongim:
+    # Pinned to the exact source revision audited for the adapter contract.
+    # The source is fetched at build time and is not vendored into this repo.
+    build:
+      context: https://github.com/Mininglamp-OSS/octo-im.git#613fc2b2b3a4c23054385ee3f8238fc44a8f68e7
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    volumes:
+      - ./wukongim/dev-single-node.conf:/etc/wukongim/wukongim.conf:ro
+      - wukongim-data:/var/lib/wukongim
+    ports:
+      # The administrative REST API has no native application authentication
+      # in this audited revision. It must remain loopback-only in development.
+      - '127.0.0.1:5501:5001'
+      - '127.0.0.1:5510:5100'
+      - '127.0.0.1:5520:5200'
+    healthcheck:
+      test: ['CMD', 'wget', '-q', '-O', '-', 'http://127.0.0.1:5001/healthz']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 20s
+
+volumes:
+  wukongim-data:

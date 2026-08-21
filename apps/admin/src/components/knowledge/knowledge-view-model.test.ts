@@ -4,6 +4,7 @@ import type {
   KnowledgeDocumentVersionSummary,
 } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
+import { testKnowledgeGovernance } from '@/test/knowledge-fixtures';
 
 import {
   filterKnowledgeDocuments,
@@ -32,6 +33,11 @@ describe('filterKnowledgeDocuments', () => {
       sourceType: 'MARKDOWN',
       fileName: null,
     });
+    const deleted = document({
+      id: '00000000-0000-7000-8000-000000000103',
+      title: '已删除制度',
+      status: 'ARCHIVED',
+    });
 
     expect(
       filterKnowledgeDocuments([handbook, markdown], 'handbook', 'FILE', 'PROCESSING'),
@@ -40,6 +46,10 @@ describe('filterKnowledgeDocuments', () => {
       markdown,
     ]);
     expect(filterKnowledgeDocuments([handbook, markdown], '', 'TEXT', 'ALL')).toEqual([]);
+    expect(filterKnowledgeDocuments([handbook, markdown, deleted], '', 'ALL', 'ALL')).toEqual([
+      handbook,
+      markdown,
+    ]);
   });
 });
 
@@ -136,6 +146,19 @@ function version(
     chunkCount: 1,
     createdAt: '2026-07-27T00:00:00.000Z',
     publishedAt: '2026-07-27T00:00:00.000Z',
+    evaluationRunId: null,
+    evaluationDatasetVersionId: null,
+    evaluationSnapshotHash: null,
+    sourceUri: null,
+    parserName: 'utf8-markdown-v1',
+    parseQualityScore: 1,
+    parseReviewStatus: 'NOT_REQUIRED',
+    parseReviewRevision: 1,
+    parseReviewedById: null,
+    parseReviewedAt: null,
+    parseReviewNote: null,
+    parseDiagnostics: {},
+    governance: testKnowledgeGovernance(),
     ingestionJob: null,
     ...overrides,
   };
@@ -146,6 +169,8 @@ function document(overrides: Partial<KnowledgeDocumentSummary> = {}): KnowledgeD
   return {
     id: '00000000-0000-7000-8000-000000000100',
     knowledgeBaseId: '00000000-0000-7000-8000-000000000001',
+    folderId: null,
+    folderPath: null,
     title: '默认文档',
     sourceType: 'MARKDOWN',
     mimeType: 'text/markdown',

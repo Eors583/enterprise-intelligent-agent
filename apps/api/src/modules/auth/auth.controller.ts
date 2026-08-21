@@ -6,28 +6,48 @@ import {
   HttpStatus,
   Inject,
   Logger,
+  Optional,
   Post,
   Req,
+  Res,
   UnauthorizedException,
 } from '@nestjs/common';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import {
   acceptMemberInvitationRequestSchema,
   completePasswordResetRequestSchema,
   changePasswordRequestSchema,
   loginRequestSchema,
+  mfaEnrollmentStartRequestSchema,
+  mfaEnrollmentVerifyRequestSchema,
+  mfaLoginVerifyRequestSchema,
+  recentMfaChallengeRequestSchema,
+  recentMfaVerifyRequestSchema,
   refreshSessionRequestSchema,
   registerTenantRequestSchema,
   requestPasswordResetRequestSchema,
   type AcceptMemberInvitationRequest,
   type AcceptMemberInvitationResponse,
   type AuthSessionResponse,
+  type BrowserAuthSessionResponse,
+  type BrowserLoginResult,
   type ChangePasswordRequest,
   type ChangePasswordResponse,
   type CompletePasswordResetRequest,
   type CompletePasswordResetResponse,
   type CurrentSessionResponse,
   type LoginRequest,
+  type LoginResult,
+  type MfaEnrollmentStartRequest,
+  type MfaEnrollmentStartResponse,
+  type MfaEnrollmentVerifyRequest,
+  type MfaEnrollmentVerifyResponse,
+  type MfaLoginVerifyRequest,
+  type MfaStatusResponse,
+  type RecentMfaChallengeRequest,
+  type RecentMfaChallengeResponse,
+  type RecentMfaVerifyRequest,
+  type RecentMfaVerifyResponse,
   type RefreshSessionRequest,
   type RegisterTenantRequest,
   type RequestPasswordResetRequest,
@@ -42,12 +62,14 @@ import {
   PASSWORD_RESET_REQUEST_ACCEPTED_RESPONSE,
 } from './application/auth-recovery.service.js';
 import { LoginAttemptLimiter } from './application/login-attempt-limiter.service.js';
+import { MfaService } from './application/mfa.service.js';
 import { RecoveryResponseTimingService } from './application/recovery-response-timing.service.js';
 import {
   RecoveryRateLimitExceededException,
   RecoveryRequestLimiter,
 } from './application/recovery-request-limiter.service.js';
 import type { AuthenticatedPrincipal } from './domain/authenticated-principal.js';
+import { BrowserSessionTransport } from './browser-session.transport.js';
 import { Public } from './public.decorator.js';
 
 @Controller('auth')
@@ -61,15 +83,98 @@ export class AuthController {
     @Inject(RecoveryRequestLimiter) private readonly recoveryRequests: RecoveryRequestLimiter,
     @Inject(RecoveryResponseTimingService)
     private readonly recoveryResponseTiming: RecoveryResponseTimingService,
+    @Inject(BrowserSessionTransport)
+    private readonly browserSession: BrowserSessionTransport,
+    @Optional()
+    @Inject(MfaService)
+    private readonly mfa?: MfaService,
   ) {}
+
+  @Public()
+  @SuppressResponseTiming()
+  @Post('browser/register-tenant')
+  async registerBrowserTenant(
+    @Body(new SchemaValidationPipe(registerTenantRequestSchema))
+    request: RegisterTenantRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<BrowserLoginResult> {
+    const result = await this.auth.registerTenant(request);
+    return 'accessToken' in result ? this.browserSession.issue(response, result) : result;
+  }
+
+  @Public()
+  @SuppressResponseTiming()
+  @Post('browser/login')
+  @HttpCode(HttpStatus.OK)
+  async browserLogin(
+    @Body(new SchemaValidationPipe(loginRequestSchema)) request: LoginRequest,
+    @Req() httpRequest: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<BrowserLoginResult> {
+    const result = await this.login(request, httpRequest);
+    return 'accessToken' in result ? this.browserSession.issue(response, result) : result;
+  }
+
+  @Public()
+  @SuppressResponseTiming()
+  @Post('browser/mfa/login/verify')
+  @HttpCode(HttpStatus.OK)
+  async completeBrowserMfaLogin(
+    @Body(new SchemaValidationPipe(mfaLoginVerifyRequestSchema))
+    request: MfaLoginVerifyRequest,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<BrowserAuthSessionResponse> {
+    return this.browserSession.issue(response, await this.auth.completeMfaLogin(request));
+  }
+
+  @Public()
+  @SuppressResponseTiming()
+  @Post('browser/refresh')
+  @HttpCode(HttpStatus.OK)
+  async refreshBrowserSession(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<BrowserAuthSessionResponse> {
+    this.browserSession.requireCsrf(request);
+    return this.browserSession.issue(
+      response,
+      await this.auth.refresh({
+        refreshToken: this.browserSession.requireRefreshToken(request),
+      }),
+    );
+  }
+
+  @Post('browser/logout')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async logoutBrowserSession(
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<void> {
+    try {
+      await this.auth.logout(requirePrincipal(request));
+    } finally {
+      this.browserSession.clear(response);
+    }
+  }
 
   @Public()
   @SuppressResponseTiming()
   @Post('register-tenant')
   registerTenant(
     @Body(new SchemaValidationPipe(registerTenantRequestSchema)) request: RegisterTenantRequest,
-  ): Promise<AuthSessionResponse> {
+  ): Promise<LoginResult> {
     return this.auth.registerTenant(request);
+  }
+
+  @Public()
+  @SuppressResponseTiming()
+  @Post('mfa/login/verify')
+  @HttpCode(HttpStatus.OK)
+  completeMfaLogin(
+    @Body(new SchemaValidationPipe(mfaLoginVerifyRequestSchema))
+    request: MfaLoginVerifyRequest,
+  ): Promise<AuthSessionResponse> {
+    return this.auth.completeMfaLogin(request);
   }
 
   @Public()
@@ -157,7 +262,7 @@ export class AuthController {
   async login(
     @Body(new SchemaValidationPipe(loginRequestSchema)) request: LoginRequest,
     @Req() httpRequest: Request,
-  ): Promise<AuthSessionResponse> {
+  ): Promise<LoginResult> {
     const clientAddress = httpRequest.ip ?? httpRequest.socket.remoteAddress;
     const context = this.loginAttempts.createContext({
       tenantSlug: request.tenantSlug,
@@ -195,6 +300,52 @@ export class AuthController {
     return this.auth.current(requirePrincipal(request));
   }
 
+  @Get('mfa')
+  mfaStatus(@Req() request: Request): Promise<MfaStatusResponse> {
+    return requireMfa(this.mfa).status(requirePrincipal(request));
+  }
+
+  @Post('mfa/enrollment/start')
+  @HttpCode(HttpStatus.OK)
+  startMfaEnrollment(
+    @Body(new SchemaValidationPipe(mfaEnrollmentStartRequestSchema))
+    request: MfaEnrollmentStartRequest,
+    @Req() httpRequest: Request,
+  ): Promise<MfaEnrollmentStartResponse> {
+    return requireMfa(this.mfa).startEnrollment(request, requirePrincipal(httpRequest));
+  }
+
+  @Post('mfa/enrollment/verify')
+  @HttpCode(HttpStatus.OK)
+  verifyMfaEnrollment(
+    @Body(new SchemaValidationPipe(mfaEnrollmentVerifyRequestSchema))
+    request: MfaEnrollmentVerifyRequest,
+    @Req() httpRequest: Request,
+  ): Promise<MfaEnrollmentVerifyResponse> {
+    return requireMfa(this.mfa).verifyEnrollment(request, requirePrincipal(httpRequest));
+  }
+
+  @Post('mfa/recent/challenge')
+  @HttpCode(HttpStatus.OK)
+  beginRecentMfa(
+    @Body(new SchemaValidationPipe(recentMfaChallengeRequestSchema))
+    request: RecentMfaChallengeRequest,
+    @Req() httpRequest: Request,
+  ): Promise<RecentMfaChallengeResponse> {
+    return requireMfa(this.mfa).beginRecentMfa(request.purpose, requirePrincipal(httpRequest));
+  }
+
+  @Post('mfa/recent/verify')
+  @SuppressResponseTiming()
+  @HttpCode(HttpStatus.OK)
+  verifyRecentMfa(
+    @Body(new SchemaValidationPipe(recentMfaVerifyRequestSchema))
+    request: RecentMfaVerifyRequest,
+    @Req() httpRequest: Request,
+  ): Promise<RecentMfaVerifyResponse> {
+    return requireMfa(this.mfa).verifyRecentMfa(request, requirePrincipal(httpRequest));
+  }
+
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
   changePassword(
@@ -220,4 +371,11 @@ function requirePrincipal(request: Request): AuthenticatedPrincipal {
     throw new UnauthorizedException('Authentication required.');
   }
   return request.authPrincipal;
+}
+
+function requireMfa(service: MfaService | undefined): MfaService {
+  if (service === undefined) {
+    throw new UnauthorizedException('Multi-factor authentication is unavailable.');
+  }
+  return service;
 }

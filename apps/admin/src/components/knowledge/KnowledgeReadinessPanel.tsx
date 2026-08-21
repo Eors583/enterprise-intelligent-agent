@@ -1,37 +1,50 @@
 import type {
   KnowledgeBaseIndexReadiness,
   KnowledgeCapabilityReadiness,
+  KnowledgeGraphOverview,
 } from '@enterprise/contracts';
 import { useEffect, useState, type ReactNode } from 'react';
 
-import { getKnowledgeBaseReadiness } from '@/api/admin-api';
+import { getKnowledgeBaseReadiness, getKnowledgeGraphOverview } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
 import { ErrorState, LoadingPanel, Notice, Spinner } from '@/components/ui';
 
 import {
+  knowledgeCapabilityRecoveryPollingRequired,
   knowledgeCapabilityStatusLabel,
   knowledgeReadinessReasonLabel,
   knowledgeReadinessSummary,
 } from './knowledge-readiness-view';
+import {
+  knowledgeGraphReadinessReasonLabel,
+  knowledgeGraphStatusLabel,
+} from './knowledge-graph-view';
 
 const POLL_INTERVAL_MS = 3_000;
+const CAPABILITY_RECOVERY_POLL_INTERVAL_MS = 5_000;
 
 export function KnowledgeReadinessPanel({
   knowledgeBaseId,
   refreshToken,
   onReadinessChange,
+  onGraphOverviewChange,
   onReviewFailures,
 }: {
   knowledgeBaseId: string;
   refreshToken: string;
   onReadinessChange: (readiness: KnowledgeBaseIndexReadiness | null) => void;
+  onGraphOverviewChange: (overview: KnowledgeGraphOverview | null) => void;
   onReviewFailures: () => void;
 }): ReactNode {
   const [reloadKey, setReloadKey] = useState(0);
+  const [capabilityReloadKey, setCapabilityReloadKey] = useState(0);
   const [result, setResult] = useState<KnowledgeBaseIndexReadiness | null>(null);
+  const [graphOverview, setGraphOverview] = useState<KnowledgeGraphOverview | null>(null);
   const [loading, setLoading] = useState(true);
+  const [graphLoading, setGraphLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [graphError, setGraphError] = useState<string | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -52,7 +65,28 @@ export function KnowledgeReadinessPanel({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [knowledgeBaseId, onReadinessChange, refreshToken, reloadKey]);
+  }, [capabilityReloadKey, knowledgeBaseId, onReadinessChange, refreshToken, reloadKey]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setGraphLoading(true);
+    setGraphError(null);
+    void getKnowledgeGraphOverview(knowledgeBaseId, controller.signal)
+      .then((response) => {
+        if (controller.signal.aborted) return;
+        setGraphOverview(response);
+        onGraphOverviewChange(response);
+      })
+      .catch((caught: unknown) => {
+        if (controller.signal.aborted) return;
+        setGraphError(messageFromError(caught));
+        onGraphOverviewChange(null);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setGraphLoading(false);
+      });
+    return () => controller.abort();
+  }, [knowledgeBaseId, onGraphOverviewChange, refreshToken, reloadKey]);
 
   useEffect(() => {
     if ((result?.documents.processing ?? 0) === 0) return;
@@ -79,13 +113,38 @@ export function KnowledgeReadinessPanel({
     };
   }, [result]);
 
+  useEffect(() => {
+    if (!knowledgeCapabilityRecoveryPollingRequired(result)) return;
+    let timer: number | null = null;
+    const schedule = (): void => {
+      if (timer !== null || document.visibilityState !== 'visible') return;
+      timer = window.setTimeout(() => {
+        timer = null;
+        setCapabilityReloadKey((value) => value + 1);
+      }, CAPABILITY_RECOVERY_POLL_INTERVAL_MS);
+    };
+    const visibilityChanged = (): void => {
+      if (document.visibilityState === 'visible') schedule();
+      else if (timer !== null) {
+        window.clearTimeout(timer);
+        timer = null;
+      }
+    };
+    schedule();
+    document.addEventListener('visibilitychange', visibilityChanged);
+    return () => {
+      if (timer !== null) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', visibilityChanged);
+    };
+  }, [result]);
+
   const retry = (): void => setReloadKey((value) => value + 1);
   return (
-    <section className="card knowledge-readiness-panel" aria-label="企业就绪度与索引治理">
+    <section className="card knowledge-readiness-panel" aria-label="检索运行状态与索引诊断">
       <header className="card-header">
         <div>
-          <h2>企业就绪度</h2>
-          <p>核对已发布文档、当前模型向量覆盖以及语义与重排服务状态。</p>
+          <h2>检索运行状态</h2>
+          <p>查看文档、向量、重排和关系图谱状态；诊断异常不会阻止知识库启用或文档发布。</p>
         </div>
         <button
           className="button secondary compact"
@@ -93,7 +152,7 @@ export function KnowledgeReadinessPanel({
           onClick={retry}
           disabled={loading}
         >
-          {loading ? (
+          {loading || graphLoading ? (
             <Spinner label="检查中…" />
           ) : (
             <>
@@ -103,7 +162,7 @@ export function KnowledgeReadinessPanel({
         </button>
       </header>
 
-      {loading && result === null ? <LoadingPanel label="正在检查知识库企业就绪度…" /> : null}
+      {loading && result === null ? <LoadingPanel label="正在检查知识库检索状态…" /> : null}
       {error && result === null ? <ErrorState message={error} onRetry={retry} /> : null}
       {result ? (
         <div className="knowledge-readiness-content">
@@ -112,12 +171,14 @@ export function KnowledgeReadinessPanel({
             <Notice tone="info">本次状态刷新失败，正在保留上一次安全结果：{error}</Notice>
           ) : null}
           <div className="knowledge-readiness-metrics">
-            <Metric label="文档总数" value={result.documents.total} />
+            <Metric
+              label="文档总数"
+              value={Math.max(0, result.documents.total - result.documents.archived)}
+            />
             <Metric label="已就绪" value={result.documents.ready} tone="ready" />
             <Metric label="处理中" value={result.documents.processing} tone="processing" />
             <Metric label="失败" value={result.documents.failed} tone="failed" />
             <Metric label="草稿" value={result.documents.draft} />
-            <Metric label="已归档" value={result.documents.archived} />
           </div>
           <div className="knowledge-index-summary">
             <div>
@@ -141,24 +202,80 @@ export function KnowledgeReadinessPanel({
             <CapabilityCard title="Embedding" capability={result.embedding} />
             <CapabilityCard title="Reranker" capability={result.rerank} />
           </div>
+          <div className="knowledge-graph-readiness-inline">
+            <header>
+              <div>
+                <strong>关系图谱</strong>
+                <span>
+                  {graphOverview
+                    ? knowledgeGraphStatusLabel(graphOverview.status)
+                    : graphLoading
+                      ? '检查中'
+                      : '不可用'}
+                </span>
+              </div>
+              {graphOverview ? (
+                <em
+                  className={
+                    graphOverview.status === 'READY' ? 'status-ready' : 'status-processing'
+                  }
+                >
+                  {graphOverview.status === 'READY' ? '关系检索可用' : '可选增强未就绪'}
+                </em>
+              ) : null}
+            </header>
+            {graphOverview ? (
+              <>
+                <dl>
+                  <div>
+                    <dt>实体</dt>
+                    <dd>{graphOverview.entityCount.toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>关系</dt>
+                    <dd>{graphOverview.relationCount.toLocaleString()}</dd>
+                  </div>
+                  <div>
+                    <dt>切片提及覆盖</dt>
+                    <dd>{Math.round(graphOverview.mentionCoverage * 100)}%</dd>
+                  </div>
+                  <div>
+                    <dt>关系证据覆盖</dt>
+                    <dd>{Math.round(graphOverview.evidenceCoverage * 100)}%</dd>
+                  </div>
+                </dl>
+                {graphOverview.diagnostics.length > 0 ? (
+                  <ul>
+                    {graphOverview.diagnostics.map((reason) => (
+                      <li key={reason}>{knowledgeGraphReadinessReasonLabel(reason)}</li>
+                    ))}
+                  </ul>
+                ) : null}
+              </>
+            ) : graphError ? (
+              <p>关系图谱状态检查失败：{graphError}。普通文档检索不受影响。</p>
+            ) : (
+              <p>正在核对实体、关系与来源证据。</p>
+            )}
+          </div>
           {result.degradedReason ? (
             <Notice tone="info">
               当前仅提供词法降级检索：{knowledgeReadinessReasonLabel(result.degradedReason)}（
               {result.degradedReason}）
             </Notice>
           ) : null}
-          {result.activationBlockers.length > 0 ? (
-            <div className="knowledge-activation-blockers" role="status">
-              <strong>暂不能启用为企业知识库</strong>
-              <ul>
-                {result.activationBlockers.map((reason) => (
-                  <li key={reason}>{knowledgeReadinessReasonLabel(reason)}</li>
-                ))}
-              </ul>
-            </div>
-          ) : (
+          {result.retrievalMode === 'HYBRID' ? (
             <Notice tone="success">
-              已满足启用门禁：发布切片、当前模型向量覆盖及 Reranker 均已就绪。
+              混合检索可用：关键词与向量召回会按知识库配置执行，Reranker 可按需参与重排。
+            </Notice>
+          ) : (
+            <Notice tone="info">当前使用关键词检索；知识库仍可正常启用和验证。</Notice>
+          )}
+          {graphOverview?.status === 'READY' ? (
+            <Notice tone="success">关系图谱增强可用，可在普通混合检索之外补充实体关系路径。</Notice>
+          ) : (
+            <Notice tone="info">
+              关系图谱是可选增强；尚未构建或质量不足时，系统继续使用普通文档检索。
             </Notice>
           )}
           {result.documents.failed > 0 || result.documents.processing > 0 ? (
@@ -182,10 +299,10 @@ export function KnowledgeReadinessPanel({
 function ReadinessHeadline({ readiness }: { readiness: KnowledgeBaseIndexReadiness }): ReactNode {
   const summary = knowledgeReadinessSummary(readiness);
   const copy = {
-    READY: ['企业就绪', '混合检索与重排链路已就绪'],
-    DEGRADED: ['尚未就绪', '请完成下方阻断项后再启用'],
+    READY: ['混合检索可用', '关键词与向量召回链路运行正常'],
+    DEGRADED: ['关键词检索可用', '向量能力不可用时自动降级，不阻塞使用'],
     PROCESSING: ['正在构建索引', '处理完成后将自动重新检查'],
-    FAILED: ['存在失败文档', '请查看失败原因并安全重试'],
+    FAILED: ['部分文档处理失败', '其他已发布文档仍可检索，可按需重试失败项'],
   }[summary];
   return (
     <div className={`knowledge-readiness-headline status-${summary.toLowerCase()}`}>
@@ -251,5 +368,6 @@ function providerLabel(provider: KnowledgeCapabilityReadiness['provider']): stri
     disabled: '未配置',
     openai_compatible: 'OpenAI Compatible',
     cohere_compatible: 'Cohere Compatible',
+    local_fastembed: '本地中文模型',
   }[provider];
 }

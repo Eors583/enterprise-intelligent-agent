@@ -2,6 +2,7 @@ import { NotFoundException } from '@nestjs/common';
 import type { PrismaService } from '../../database/prisma.service.js';
 import type { IdentityService } from '../identity/application/identity.service.js';
 import { AnswerFeedbackService } from './answer-feedback.service.js';
+import type { AnswerFeedbackEvaluationRepository } from './domain/answer-feedback-evaluation.repository.js';
 
 const TENANT_ID = '00000000-0000-7000-8000-000000000001';
 const USER_ID = '00000000-0000-7000-8000-000000000101';
@@ -10,7 +11,7 @@ const CONVERSATION_ID = '00000000-0000-7000-8000-000000000401';
 const FEEDBACK_ID = '00000000-0000-7000-8000-000000000601';
 
 describe('AnswerFeedbackService', () => {
-  it('upserts one current-user feedback record and writes a metadata-only audit event', async () => {
+  it('upserts feedback and atomically emits metadata-only audit and evaluation events', async () => {
     const fixture = createFixture();
 
     await expect(
@@ -92,9 +93,53 @@ describe('AnswerFeedbackService', () => {
         },
       }),
     });
+    expect(fixture.transaction.outboxEvent.create).toHaveBeenCalledWith({
+      data: {
+        tenantId: TENANT_ID,
+        aggregateType: 'answer_feedback',
+        aggregateId: FEEDBACK_ID,
+        eventType: 'agent.answer-feedback.recorded.v1',
+        payload: {
+          feedbackId: FEEDBACK_ID,
+          conversationId: CONVERSATION_ID,
+          messageId: MESSAGE_ID,
+          userId: USER_ID,
+          rating: 'NOT_HELPFUL',
+          reason: 'MISSING_KNOWLEDGE',
+          feedbackUpdatedAt: '2026-07-20T03:01:00.000Z',
+          evaluationCandidate: true,
+        },
+      },
+    });
     expect(JSON.stringify(fixture.transaction.auditEvent.create.mock.calls)).not.toContain(
       '缺少今年的新制度',
     );
+    expect(JSON.stringify(fixture.transaction.outboxEvent.create.mock.calls)).not.toContain(
+      '缺少今年的新制度',
+    );
+    expect(fixture.evaluations.projectNotHelpful).toHaveBeenCalledWith(fixture.transaction, {
+      tenantId: TENANT_ID,
+      userId: USER_ID,
+      feedbackId: FEEDBACK_ID,
+    });
+  });
+
+  it('does not create an evaluation bad case for HELPFUL feedback', async () => {
+    const fixture = createFixture({
+      feedback: {
+        rating: 'HELPFUL',
+        reason: null,
+        comment: null,
+      },
+    });
+
+    await fixture.service.upsert(MESSAGE_ID, {
+      rating: 'HELPFUL',
+      reason: null,
+      comment: null,
+    });
+
+    expect(fixture.evaluations.projectNotHelpful).not.toHaveBeenCalled();
   });
 
   it('returns the current feedback for an eligible answer', async () => {
@@ -131,16 +176,26 @@ function createFixture(
         status: 'SUCCEEDED';
       }>;
     } | null;
+    feedback?: {
+      rating: 'HELPFUL' | 'NOT_HELPFUL';
+      reason: 'MISSING_KNOWLEDGE' | null;
+      comment: string | null;
+    };
   } = {},
 ) {
+  const feedback = options.feedback ?? {
+    rating: 'NOT_HELPFUL' as const,
+    reason: 'MISSING_KNOWLEDGE' as const,
+    comment: '缺少今年的新制度。',
+  };
   const row = {
     id: FEEDBACK_ID,
     tenantId: TENANT_ID,
     messageId: MESSAGE_ID,
     userId: USER_ID,
-    rating: 'NOT_HELPFUL' as const,
-    reason: 'MISSING_KNOWLEDGE' as const,
-    comment: '缺少今年的新制度。',
+    rating: feedback.rating,
+    reason: feedback.reason,
+    comment: feedback.comment,
     createdAt: new Date('2026-07-20T03:00:00.000Z'),
     updatedAt: new Date('2026-07-20T03:01:00.000Z'),
   };
@@ -169,6 +224,7 @@ function createFixture(
       upsert: vi.fn().mockResolvedValue(row),
     },
     auditEvent: { create: vi.fn().mockResolvedValue({}) },
+    outboxEvent: { create: vi.fn().mockResolvedValue({}) },
   };
   const prisma = {
     withTenant: vi.fn(
@@ -182,5 +238,17 @@ function createFixture(
       user: { id: USER_ID, tenantId: TENANT_ID, name: '员工', status: 'active' },
     }),
   } as unknown as IdentityService;
-  return { service: new AnswerFeedbackService(identity, prisma), transaction };
+  const evaluations = {
+    projectNotHelpful: vi.fn().mockResolvedValue({
+      badCaseId: '00000000-0000-7000-8000-000000000701',
+      created: true,
+    }),
+  } as unknown as AnswerFeedbackEvaluationRepository;
+  return {
+    service: new AnswerFeedbackService(identity, prisma, evaluations),
+    transaction,
+    evaluations: evaluations as {
+      projectNotHelpful: ReturnType<typeof vi.fn>;
+    },
+  };
 }

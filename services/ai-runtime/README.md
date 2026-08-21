@@ -1,6 +1,6 @@
 # Enterprise AI Runtime
 
-企业 AI 协同平台的独立模型运行服务。当前实现提供可测试的 Run 执行链、OpenAI-compatible 与 Manus API v2 适配器，以及开发用内存存储；默认配置为 `noop`，不会发起任何外部模型请求。NestJS API 与桌面端是否调用本服务由上层编排链路决定。
+企业 AI 协同平台的独立模型运行服务。当前实现提供可测试的 Run 执行链、OpenAI-compatible 与 Manus API v2 适配器、开发用内存存储与生产 PostgreSQL RunStore；默认配置为 `noop`，不会发起任何外部模型请求。NestJS API 与桌面端是否调用本服务由上层编排链路决定。
 
 ## 安装与运行
 
@@ -17,6 +17,25 @@ python -m pip install -e ".[dev]"
 uvicorn enterprise_ai_runtime.main:app --reload --port 8100
 ```
 
+## 本地中文语义检索
+
+开发和私有化部署可以使用 `local_fastembed`，无需 Embedding/Reranker API Key：
+
+```dotenv
+AI_RUNTIME_EMBEDDING_DRIVER=local_fastembed
+AI_RUNTIME_EMBEDDING_MODEL=BAAI/bge-small-zh-v1.5
+AI_RUNTIME_RERANK_DRIVER=local_fastembed
+AI_RUNTIME_RERANK_MODEL=BAAI/bge-reranker-base
+AI_RUNTIME_LOCAL_MODEL_CACHE_DIR=.data/ai-models
+AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD=true
+AI_RUNTIME_LOCAL_MODEL_THREADS=2
+```
+
+本地 Embedding 输出会归一化，并按配置维度校验或补齐；知识库把实际输出维度绑定到索引版本
+pgvector 契约，余弦相似度不变。Reranker 使用真实 BGE Cross Encoder，并将模型
+logit 通过 sigmoid 归一化为 0～1 相关性分数。生产环境禁止运行时下载，必须提前
+准备模型缓存并设置 `AI_RUNTIME_LOCAL_MODEL_ALLOW_DOWNLOAD=false`。
+
 质量检查：
 
 ```bash
@@ -28,41 +47,44 @@ uv run ruff check .
 
 开发或测试启动时，模块会查找仓库根 `pnpm-workspace.yaml`，然后从同目录 `.env` 非覆盖式加载 `AI_RUNTIME_*` 与 `MANUS_*` 变量。数据库、认证等其他服务的变量不会进入 AI Runtime 进程；已经由当前进程、容器或 Secret 注入的值优先，dotenv 不会覆盖。`AI_RUNTIME_ENVIRONMENT=production` 时完全跳过 dotenv；dotenv 文件自身也不允许把进程切换为生产模式。仓库根 `.env.example` 仅是配置清单，不得填真实密钥。
 
-| 变量                                   | 默认值                 | 说明                                             |
-| -------------------------------------- | ---------------------- | ------------------------------------------------ |
-| `AI_RUNTIME_ENVIRONMENT`               | `development`          | `development`、`test` 或 `production`            |
-| `AI_RUNTIME_DRIVER`                    | `noop`                 | `noop`、`openai_compatible` 或 `manus`           |
-| `AI_RUNTIME_STORE_DRIVER`              | `memory`               | `memory` 或后续持久化适配器 `postgres`           |
-| `AI_RUNTIME_OPENAI_BASE_URL`           | 无                     | OpenAI-compatible `/v1` 根地址                   |
-| `AI_RUNTIME_OPENAI_API_KEY`            | 无                     | OpenAI-compatible Secret                         |
-| `AI_RUNTIME_OPENAI_MODEL`              | 无                     | 模型或部署名称                                   |
-| `AI_RUNTIME_EMBEDDING_DRIVER`          | `disabled`             | `disabled` 或 `openai_compatible`                |
-| `AI_RUNTIME_EMBEDDING_BASE_URL`        | 无                     | OpenAI-compatible Embedding API 根地址           |
-| `AI_RUNTIME_EMBEDDING_API_KEY`         | 无                     | Embedding Secret，仅供本服务使用                 |
-| `AI_RUNTIME_EMBEDDING_MODEL`           | 无                     | Embedding 模型或部署名称                         |
-| `AI_RUNTIME_EMBEDDING_DIMENSIONS`      | `1536`                 | 固定为 1536，与 pgvector 数据契约一致            |
-| `AI_RUNTIME_EMBEDDING_TIMEOUT_SECONDS` | `30`                   | Embedding 超时，允许 0.1～300 秒                 |
-| `AI_RUNTIME_RERANK_DRIVER`             | `disabled`             | `disabled` 或 `cohere_compatible`                |
-| `AI_RUNTIME_RERANK_BASE_URL`           | 无                     | Cohere-compatible Rerank API 根地址              |
-| `AI_RUNTIME_RERANK_API_KEY`            | 无                     | Rerank Secret，仅供本服务使用                    |
-| `AI_RUNTIME_RERANK_MODEL`              | 无                     | Rerank 模型或部署名称                            |
-| `AI_RUNTIME_RERANK_TIMEOUT_SECONDS`    | `30`                   | Rerank 超时，允许 0.1～300 秒                    |
-| `MANUS_API_KEY`                        | 无                     | Manus Secret，仅供后端运行时使用                 |
-| `MANUS_API_BASE_URL`                   | `https://api.manus.ai` | 固定为 Manus 官方 HTTPS API 根地址               |
-| `MANUS_AGENT_PROFILE`                  | `manus-1.6-lite`       | `manus-1.6`、`manus-1.6-lite` 或 `manus-1.6-max` |
-| `MANUS_PROJECT_ID`                     | 无                     | 可选的已批准 Manus Project ID                    |
-| `MANUS_POLL_INTERVAL_SECONDS`          | `2`                    | 状态轮询间隔，允许 1～60 秒                      |
-| `MANUS_MAX_WAIT_SECONDS`               | `120`                  | 不小于轮询间隔，最大 3600 秒                     |
+| 变量                                   | 默认值                 | 说明                                               |
+| -------------------------------------- | ---------------------- | -------------------------------------------------- |
+| `AI_RUNTIME_ENVIRONMENT`               | `development`          | `development`、`test` 或 `production`              |
+| `AI_RUNTIME_DRIVER`                    | `noop`                 | `noop`、`openai_compatible` 或 `manus`             |
+| `AI_RUNTIME_STORE_DRIVER`              | `memory`               | `memory` 或持久化适配器 `postgres`                 |
+| `AI_RUNTIME_POSTGRES_DSN`              | 无                     | PostgreSQL RunStore 专用连接，选择 postgres 必填   |
+| `AI_RUNTIME_SERVICE_TOKEN`             | 无                     | API→Runtime Bearer 凭据，生产至少 32 字符          |
+| `AI_RUNTIME_OPENAI_BASE_URL`           | 无                     | OpenAI-compatible `/v1` 根地址                     |
+| `AI_RUNTIME_OPENAI_API_KEY`            | 无                     | OpenAI-compatible Secret                           |
+| `AI_RUNTIME_OPENAI_MODEL`              | 无                     | 模型或部署名称                                     |
+| `AI_RUNTIME_EMBEDDING_DRIVER`          | `disabled`             | `disabled` 或 `openai_compatible`                  |
+| `AI_RUNTIME_EMBEDDING_BASE_URL`        | 无                     | OpenAI-compatible Embedding API 根地址             |
+| `AI_RUNTIME_EMBEDDING_API_KEY`         | 无                     | Embedding Secret，仅供本服务使用                   |
+| `AI_RUNTIME_EMBEDDING_MODEL`           | 无                     | Embedding 模型或部署名称                           |
+| `AI_RUNTIME_EMBEDDING_DIMENSIONS`      | `1536`                 | 当前模型输出维度（1～16000）；变更后创建新索引版本 |
+| `AI_RUNTIME_EMBEDDING_TIMEOUT_SECONDS` | `30`                   | Embedding 超时，允许 0.1～300 秒                   |
+| `AI_RUNTIME_RERANK_DRIVER`             | `disabled`             | `disabled` 或 `cohere_compatible`                  |
+| `AI_RUNTIME_RERANK_BASE_URL`           | 无                     | Cohere-compatible Rerank API 根地址                |
+| `AI_RUNTIME_RERANK_API_KEY`            | 无                     | Rerank Secret，仅供本服务使用                      |
+| `AI_RUNTIME_RERANK_MODEL`              | 无                     | Rerank 模型或部署名称                              |
+| `AI_RUNTIME_RERANK_TIMEOUT_SECONDS`    | `30`                   | Rerank 超时，允许 0.1～300 秒                      |
+| `MANUS_API_KEY`                        | 无                     | Manus Secret，仅供后端运行时使用                   |
+| `MANUS_API_BASE_URL`                   | `https://api.manus.ai` | 固定为 Manus 官方 HTTPS API 根地址                 |
+| `MANUS_AGENT_PROFILE`                  | `manus-1.6-lite`       | `manus-1.6`、`manus-1.6-lite` 或 `manus-1.6-max`   |
+| `MANUS_PROJECT_ID`                     | 无                     | 可选的已批准 Manus Project ID                      |
+| `MANUS_POLL_INTERVAL_SECONDS`          | `2`                    | 状态轮询间隔，允许 1～60 秒                        |
+| `MANUS_MAX_WAIT_SECONDS`               | `300`                  | 兼容配置；仅约束轮询 HTTP，不限制创建或任务总时长  |
 
 安全规则：
 
 - `noop` 是默认驱动且不出网；显式执行会形成 `RUNTIME_NOT_CONFIGURED` 的 `failed` 记录，绝不伪装成模型成功。
 - `AI_RUNTIME_ENVIRONMENT=production` 时禁止使用 `noop`，服务会在启动时失败。
-- 生产环境禁止 `memory` RunStore；当前尚未实现 PostgreSQL 适配器，因此选择 `postgres` 且未注入持久化 `RunStorePort` 时同样启动失败。
+- 生产环境禁止 `memory` RunStore；选择 `postgres` 时必须提供专用 `AI_RUNTIME_POSTGRES_DSN`，并显式使用 `sslmode=require`、`verify-ca` 或 `verify-full` 强制 TLS；Run 数据通过租户上下文和 FORCE RLS 隔离。
+- 生产环境必须提供至少 32 字符的 `AI_RUNTIME_SERVICE_TOKEN`；所有 `/internal/*` 接口校验 Bearer 凭据，健康探针保持可独立访问。
 - `openai_compatible` 缺少 URL、API Key 或模型名称时启动失败。
 - `manus` 缺少 `MANUS_API_KEY` 时启动失败；API Base URL 只接受 `https://api.manus.ai`，防止将高权限密钥发送到可配置的第三方主机。
 - Embedding 与 Rerank 独立于对话 Run 驱动，默认均为 `disabled`；启用任一能力但缺少 URL、API Key 或模型名称时启动失败。
-- Embedding 输出必须恰好 1536 维、覆盖全部输入索引、仅含有限数且不是零向量；Rerank 必须恰好返回 `top_n` 个、只引用请求内唯一索引、分数位于 0～1 并按相关性降序排列。
+- Embedding 输出必须与请求的索引版本维度一致、覆盖全部输入索引、仅含有限数且不是零向量；Rerank 必须恰好返回 `top_n` 个、只引用请求内唯一索引、分数位于 0～1 并按相关性降序排列。
 - 生产环境 Provider URL 必须使用 HTTPS，URL 中不得包含用户名或密码。
 - OpenAI-compatible Key、Embedding Key 与 Rerank Key 只进入各自的 `Authorization` 请求头；Manus Key 只进入 `x-manus-api-key`。Provider 异常均经过脱敏映射，不返回响应正文、密钥或底层异常。
 - Provider 就绪检查只检查本地配置与生命周期，不发起可能计费的探测请求。
@@ -71,6 +93,7 @@ uv run ruff check .
 
 - `GET /health/live`：进程存活检查。
 - `GET /health/ready`：RunStore、Runtime 和已启用知识 Provider 的本地就绪检查；默认关闭的知识能力不阻断就绪。
+- `GET /health/dependencies`：独立返回 RunStore、模型、Embedding 和 Reranker 的 `ready/degraded/disabled` 状态及降级方式；`external_connectivity_verified=false` 表示该轻量检查不构成真实供应商调用验收。
 - `POST /internal/v1/runs`：创建 `queued` Run，返回 HTTP 202。
 - `GET /internal/v1/runs/{run_id}`：读取租户内 Run。
 - `POST /internal/v1/runs/{run_id}/execute`：显式执行 Run。
@@ -79,7 +102,7 @@ uv run ruff check .
 - `POST /internal/v1/knowledge/embeddings`：调用独立 OpenAI-compatible `/embeddings`。
 - `POST /internal/v1/knowledge/rerank`：调用独立 Cohere-compatible `/rerank`。
 
-所有响应都返回 `X-Request-ID`。调用方传入的合法 Request ID 会向 Provider 透传；缺失或不合法时服务生成 UUID。所有 Run 接口要求 `X-Tenant-ID`，创建接口还会检查请求头与请求体 `tenant_id` 一致。跨租户读取、执行和取消统一返回 404，避免泄露 Run 是否存在。
+所有响应都返回 `X-Request-ID`。调用方传入的合法 Request ID 会向 Provider 透传；缺失或不合法时服务生成 UUID。配置服务凭据后，全部内部接口还要求 `Authorization: Bearer <AI_RUNTIME_SERVICE_TOKEN>`。所有 Run 接口要求 `X-Tenant-ID`，创建接口还会检查请求头与请求体 `tenant_id` 一致。跨租户读取、执行和取消统一返回 404，避免泄露 Run 是否存在。
 
 三个知识接口同样要求 `X-Tenant-ID`；Embedding/Rerank 还会严格检查请求头与请求体 `tenant_id` 一致。请求不会把租户 ID 或供应商响应正文外发/回传。内部契约为：
 
@@ -93,7 +116,7 @@ POST /internal/v1/knowledge/rerank
 -> {"model":"rerank-model","results":[{"id":"chunk-1","index":0,"relevance_score":0.93}]}
 ```
 
-示例中的 Embedding 数组为便于阅读而省略；真实响应始终包含 1536 个分量。错误统一返回 `detail: {code, message, retryable}`：上游超时为 HTTP 504，429 保持 HTTP 429，鉴权、请求拒绝、5xx 或无效结构通过 502 脱敏返回；能力未启用时为 503 `KNOWLEDGE_CAPABILITY_DISABLED`。
+示例中的 Embedding 数组为便于阅读而省略；真实响应分量数由索引版本配置决定。错误统一返回 `detail: {code, message, retryable}`：上游超时为 HTTP 504，429 保持 HTTP 429，鉴权、请求拒绝、5xx 或无效结构通过 502 脱敏返回；能力未启用时为 503 `KNOWLEDGE_CAPABILITY_DISABLED`，请求模型/维度与 Runtime 不一致时为 409 `KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH`。
 
 执行接口是幂等的：
 
@@ -118,6 +141,8 @@ stateDiagram-v2
 ```
 
 Run 会保存 `output`、`usage`、脱敏 `error`、`execution_request_id`、`started_at`、`finished_at` 和递增 `version`。OpenAI-compatible 请求使用 Run 的 `timeout_ms` 与 `max_output_tokens`；Provider 返回后再次核对输入 token、输出 token、工具调用和成本预算。任何可观测到的超限都会形成明确的 `*_BUDGET_EXCEEDED` 失败记录。标准 OpenAI-compatible 响应不包含价格时 `cost_micros` 为 0，生产接入前需增加受版本控制的模型计价表或使用 Provider 返回的可信成本字段。Manus 的计量边界见下文。
+
+HTTP 边界会传播 `X-Request-ID`、`X-Correlation-ID` 和合法 W3C `traceparent`，并输出不含 query、正文、Prompt、Secret 或上游响应的单行 JSON 访问日志。Runtime 已接入 OpenTelemetry SDK、OTLP/HTTP Trace/Metric Exporter、FastAPI、HTTPX 与 asyncpg 埋点；生产默认将遥测设为 readiness 必需能力，未配置 Collector 时返回 503。共享开发 dotenv 应使用 `AI_RUNTIME_OTEL_*` 隔离别名，独立生产进程也可直接注入标准 `OTEL_*`。Header 仅进入 Exporter，不会出现在状态、日志或异常中；Collector/APM 在线采集和跨服务 Trace 仍须以部署环境证据验收。
 
 创建和执行示例：
 
@@ -178,11 +203,14 @@ curl -X POST http://localhost:8100/internal/v1/runs/<run_id>/execute \
 1. `POST {MANUS_API_BASE_URL}/v2/task.create` 创建独立任务；
 2. 请求固定设置 `share_visibility=private`、`hide_in_task_list=true`、`interactive_mode=false`，并显式传入空 `connectors`，不继承 Manus 账号或 Project 的默认连接器；
 3. 任务标题为 `enterprise-run-<run_id>`，只包含本地 Run UUID，便于事后对账；
-4. `GET /v2/task.listMessages` 轮询独立 `task_id`，不与其他租户或会话共享上下文；
+4. `GET /v2/task.listMessages` 轮询独立 `task_id`，每次强校验顶层任务身份、事件唯一性、
+   时间顺序和终态答案，不与其他租户或会话共享上下文；
 5. `running` 继续轮询，`stopped` 读取最新 `assistant_message`，`waiting` 形成 `PROVIDER_INTERACTION_REQUIRED`，`error` 形成 `PROVIDER_TASK_FAILED`；
-6. 本地超时、取消或任务解析失败后，best-effort 调用 `POST /v2/task.stop`，避免远程任务继续运行和计费。
+6. 用户取消、Runtime 关闭或任务解析失败后，best-effort 调用 `POST /v2/task.stop`，避免远程任务继续运行和计费。
 
-实际最长等待为 `min(Run.budget.timeout_ms, MANUS_MAX_WAIT_SECONDS)`。HTTP 429 会进行有限次指数退避并加入抖动，耗尽后形成 `PROVIDER_RATE_LIMITED`。新建 Task 的事件流可能短暂不可见；读取端会对 404、`not_found` 与 `failed_precondition` 进行最多五次短退避。`task.listMessages` 的无效 JSON、缺失消息数组、不完整状态或答案事件也会在同一 Task 内进行有限次退避重读，任一结构完整的轮询会清零连续异常计数；耗尽后形成 `PROVIDER_INVALID_RESPONSE` 并 best-effort 停止远程任务。所有重读始终复用已经取得的 `task_id`，不会重复创建远程任务。阶段诊断只记录固定的读取阶段、次数与退避时间，不记录 Task ID、响应正文、请求头或密钥。轮询只请求非 verbose 的最近事件，不读取或返回 Manus 内部错误正文。
+`task.create` 不设置客户端总等待上限：供应商没有公开请求幂等键，若本地先超时就无法区分“未创建”和“已创建但响应丢失”，盲目重发可能产生重复付费任务；因此创建阶段等待明确响应或用户取消。Manus 返回 `task_id` 后也不设置任务总等待上限，系统持续轮询到明确的 `stopped`、`waiting`、`error` 或用户取消。轮询的单次 HTTP 超时、限流和临时不可用只触发同一 `task_id` 的退避重读，不作为最终超时返回。新建 Task 的事件流可能短暂不可见；读取端会对 404、`not_found` 与 `failed_precondition` 进行最多五次短退避。`task.listMessages` 的无效 JSON、缺失消息数组、不完整状态或答案事件也会在同一 Task 内进行有限次退避重读，任一结构完整的轮询会清零连续异常计数；耗尽后形成 `PROVIDER_INVALID_RESPONSE` 并 best-effort 停止远程任务。所有重读始终复用已经取得的 `task_id`，不会重复创建远程任务。阶段诊断只记录固定的读取阶段、次数与退避时间，不记录 Task ID、响应正文、请求头或密钥。轮询只请求非 verbose 的最近事件，不读取或返回 Manus 内部错误正文。Runtime readiness 使用不创建生成任务的 `GET /v2/task.list?limit=1` 验证真实凭据和响应契约，并缓存成功/失败结果，不能再由“配置了 Key”直接推断模型可用。
+
+`task.create` 的安全错误类别不再折叠成一个 `PROVIDER_REQUEST_REJECTED`：`invalid_argument`、`not_found`、`failed_precondition` 分别映射为 `MANUS_TASK_CREATE_INVALID_ARGUMENT`、`MANUS_TASK_CREATE_TARGET_NOT_FOUND`、`MANUS_TASK_CREATE_PRECONDITION_FAILED`；其他确定性拒绝为 `MANUS_TASK_CREATE_REJECTED`。供应商错误正文仍不记录、不持久化、不返回客户端。
 
 Manus v2 当前没有公开的请求幂等键。`task.create` 在响应丢失或超时后存在“远程已创建、本地未收到 task_id”的不确定窗口，调用方不得立即盲目新建 Run 重试，否则可能重复执行和扣费。生产编排需要持久化 dispatch 状态，并使用唯一 Run 标题和任务列表进行 reconciliation；标题只辅助对账，不构成供应商强幂等。
 
@@ -194,4 +222,4 @@ MVP 显式传入空 `connectors`，并在任务指令中禁止外部连接器、
 
 ## 当前边界与下一步
 
-`InMemoryRunStore` 仅用于开发，进程重启会丢失数据，并受生产启动门禁保护。进入多实例和生产环境前必须实现 PostgreSQL RunStore，并补齐 API 集成、乐观锁、执行租约、Outbox、队列消费者、租户级并发限制、服务间 JWT/mTLS、工具审批、计价表、审计事件和 OpenTelemetry。OpenAI-compatible 调用为非流式 `chat/completions`；Manus 使用异步任务轮询。两者均未形成桌面端流式输出链路。
+`InMemoryRunStore` 仅用于开发，进程重启会丢失数据，并受生产启动门禁保护。PostgreSQL RunStore 已实现租户 RLS、状态 CAS、受限 capability role、服务关闭清理及恢复门禁；API 与 Runtime 之间已支持共享 Bearer 服务凭据。进入多实例生产环境前仍需补齐执行租约/接管、Runtime 自身的队列与 Outbox、工作负载身份或 mTLS、供应商计价对账和远端 Manus Task 身份的持久化恢复。OpenAI-compatible 路由可把真实增量传到 API 的事件流；Manus 使用异步任务轮询，因此明确标记为 `terminal_only`，桌面端仍通过同一游标协议获得终态而不会伪造 token 流。

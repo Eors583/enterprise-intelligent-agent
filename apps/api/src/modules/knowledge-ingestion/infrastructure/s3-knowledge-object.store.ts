@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { Readable } from 'node:stream';
 
+import type { S3KmsKeyReference } from '../../../config/environment.js';
 import {
   KnowledgeObjectConflictError,
   KnowledgeObjectIntegrityError,
@@ -36,6 +37,7 @@ export interface S3KnowledgeObjectStoreOptions {
   readonly forcePathStyle: boolean;
   readonly prefix: string;
   readonly maxBytes: number;
+  readonly kmsKeyId?: S3KmsKeyReference;
 }
 
 type S3CommandSender = Pick<S3Client, 'send'>;
@@ -45,12 +47,14 @@ export class S3KnowledgeObjectStore extends KnowledgeObjectStore {
   private readonly bucket: string;
   private readonly prefix: string;
   private readonly client: S3CommandSender;
+  private readonly kmsKeyId: S3KmsKeyReference | undefined;
 
   constructor(options: S3KnowledgeObjectStoreOptions, client?: S3CommandSender) {
     super();
     this.maxBytes = validateMaximumBytes(options.maxBytes);
     this.bucket = validateBucket(options.bucket);
     this.prefix = normalizePrefix(options.prefix);
+    this.kmsKeyId = options.kmsKeyId;
     this.client =
       client ??
       new S3Client({
@@ -73,13 +77,19 @@ export class S3KnowledgeObjectStore extends KnowledgeObjectStore {
           Key: this.physicalKey(objectKey),
           Body: prepared.body,
           ContentLength: prepared.size,
-          ContentType: 'application/octet-stream',
+          ContentType: input.contentType ?? 'application/octet-stream',
           ChecksumSHA256: Buffer.from(prepared.sha256, 'hex').toString('base64'),
           IfNoneMatch: '*',
           Metadata: {
             sha256: prepared.sha256,
             logicalkey: objectKey,
           },
+          ...(this.kmsKeyId === undefined
+            ? {}
+            : {
+                ServerSideEncryption: 'aws:kms',
+                SSEKMSKeyId: this.kmsKeyId,
+              }),
         }),
       );
       return {
@@ -107,6 +117,7 @@ export class S3KnowledgeObjectStore extends KnowledgeObjectStore {
         ChecksumMode: 'ENABLED',
       }),
     )) as GetObjectCommandOutput;
+    assertExpectedKmsEncryption(response, this.kmsKeyId);
     if (response.ContentLength === undefined) {
       throw new KnowledgeObjectIntegrityError(
         'S3 knowledge object response did not include Content-Length.',
@@ -158,6 +169,7 @@ export class S3KnowledgeObjectStore extends KnowledgeObjectStore {
         Key: this.physicalKey(objectKey),
       }),
     )) as HeadObjectCommandOutput;
+    assertExpectedKmsEncryption(response, this.kmsKeyId);
     if (response.ContentLength === undefined || response.Metadata?.sha256 === undefined) {
       throw new KnowledgeObjectIntegrityError(
         'Existing S3 knowledge object is missing size or SHA-256 metadata.',
@@ -235,4 +247,19 @@ function validateMaximumBytes(value: number): number {
     );
   }
   return value;
+}
+
+function assertExpectedKmsEncryption(
+  response: Pick<
+    GetObjectCommandOutput | HeadObjectCommandOutput,
+    'ServerSideEncryption' | 'SSEKMSKeyId'
+  >,
+  expectedKmsKeyId: S3KmsKeyReference | undefined,
+): void {
+  if (expectedKmsKeyId === undefined) return;
+  if (response.ServerSideEncryption !== 'aws:kms' || response.SSEKMSKeyId !== expectedKmsKeyId) {
+    throw new KnowledgeObjectIntegrityError(
+      'S3 knowledge object encryption metadata does not match the configured customer-managed KMS key.',
+    );
+  }
 }

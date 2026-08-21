@@ -17,6 +17,12 @@ const validPayload = {
         id: 'agent-1',
         name: '成员一的智能体',
         status: 'online',
+        operationalAvailability: {
+          status: 'AVAILABLE',
+          evidenceStatus: 'VERIFIED',
+          reasonCodes: [],
+          checkedAt: '2026-07-28T01:00:00.000Z',
+        },
       },
       capabilities: {
         canContactHuman: true,
@@ -24,6 +30,7 @@ const validPayload = {
       },
     },
   ],
+  departmentAgents: [],
 };
 
 afterEach(() => {

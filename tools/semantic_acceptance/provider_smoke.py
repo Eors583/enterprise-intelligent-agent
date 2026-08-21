@@ -170,5 +170,5 @@ def validate_rerank_response(
 
 def _object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
-        raise ValueError(f"{label} must be a JSON object")
+        raise TypeError(f"{label} must be a JSON object")
     return value

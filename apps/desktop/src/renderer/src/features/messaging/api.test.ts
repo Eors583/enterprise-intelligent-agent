@@ -3,6 +3,7 @@ import {
   createDirectConversation,
   getAnswerFeedback,
   getKnowledgeCitationOriginal,
+  listAgentRunStreamEvents,
   listConversations,
   sendTextMessage,
   upsertAnswerFeedback,
@@ -34,6 +35,68 @@ afterEach(() => {
 });
 
 describe('conversation API', () => {
+  it('reads bounded Agent Run stream deltas by cursor', async () => {
+    const runId = '00000000-0000-7000-8000-000000000901';
+    const page = {
+      items: [
+        {
+          eventId: `${runId}:2`,
+          sequence: 2,
+          type: 'delta',
+          delta: 'world',
+          deltaHash: 'a'.repeat(64),
+          createdAt: '2026-07-28T08:00:00.000Z',
+        },
+      ],
+      nextCursor: 2,
+      terminal: false,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(page), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      listAgentRunStreamEvents(conversationId, runId, 1, undefined, 'http://localhost:3000'),
+    ).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://localhost:3000/api/v1/conversations/${conversationId}/runs/${runId}/events?cursor=1&limit=128`,
+      expect.objectContaining({ method: 'GET', credentials: 'include' }),
+    );
+  });
+
+  it('accepts the reserved reconciliation cursor and rejects values beyond it', async () => {
+    const runId = '00000000-0000-7000-8000-000000000902';
+    const page = {
+      items: [],
+      nextCursor: 10_001,
+      terminal: true,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(page), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(
+      listAgentRunStreamEvents(conversationId, runId, 10_001, undefined, 'http://localhost:3000'),
+    ).resolves.toEqual(page);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://localhost:3000/api/v1/conversations/${conversationId}/runs/${runId}/events?cursor=10001&limit=128`,
+      expect.objectContaining({ method: 'GET', credentials: 'include' }),
+    );
+
+    await expect(
+      listAgentRunStreamEvents(conversationId, runId, 10_002, undefined, 'http://localhost:3000'),
+    ).rejects.toThrow('Agent Run stream cursor is invalid.');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('加载并校验会话列表', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       new Response(JSON.stringify({ items: [conversation] }), {
@@ -155,6 +218,26 @@ describe('conversation API', () => {
       chunkId,
       headingPath: ['人事制度', '年假'],
       sourceType: 'MARKDOWN',
+      sourceFileName: 'leave-policy.md',
+      sourceMimeType: 'text/markdown',
+      sourceUri: null,
+      sourceDownloadAvailable: true,
+      sourceLocator: {
+        kind: 'SECTION',
+        pageStart: null,
+        pageEnd: null,
+        sheetName: null,
+        headingPath: ['人事制度', '年假'],
+      },
+      structuralContext: {
+        parent: {
+          id: '00000000-0000-7000-8000-000000000605',
+          headingPath: ['人事制度', '年假'],
+          excerpt: '年假申请需至少提前一天发起。',
+        },
+        previous: null,
+        next: null,
+      },
       content: '年假申请需至少提前一天发起。',
       updatedAt: '2026-07-20T02:00:00.000Z',
     };
@@ -167,10 +250,16 @@ describe('conversation API', () => {
     vi.stubGlobal('fetch', fetchMock);
 
     await expect(
-      getKnowledgeCitationOriginal(documentVersionId, chunkId, undefined, 'http://localhost:3000'),
+      getKnowledgeCitationOriginal(
+        messageId,
+        documentVersionId,
+        chunkId,
+        undefined,
+        'http://localhost:3000',
+      ),
     ).resolves.toEqual(detail);
     expect(fetchMock).toHaveBeenCalledWith(
-      `http://localhost:3000/api/v1/knowledge-citations/${documentVersionId}/chunks/${chunkId}`,
+      `http://localhost:3000/api/v1/knowledge-citations/${documentVersionId}/chunks/${chunkId}?messageId=${messageId}`,
       expect.objectContaining({ method: 'GET', credentials: 'include' }),
     );
   });

@@ -138,6 +138,27 @@ def test_disabled_knowledge_provider_fails_explicitly(client: TestClient) -> Non
     }
 
 
+def test_embedding_request_rejects_a_profile_not_served_by_the_runtime() -> None:
+    service = KnowledgeService(embedding_provider=StubEmbeddingProvider())
+    with TestClient(create_app(knowledge_service=service)) as client:
+        response = client.post(
+            "/internal/v1/knowledge/embeddings",
+            headers={"X-Tenant-ID": "tenant-a", "X-Request-ID": "req-embedding-api"},
+            json={
+                "tenant_id": "tenant-a",
+                "inputs": ["text"],
+                "expected_model": "different-model",
+                "expected_dimensions": 768,
+            },
+        )
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH",
+        "message": "the requested embedding index profile is not served by this runtime",
+        "retryable": False,
+    }
+
+
 def test_rerank_request_rejects_duplicate_ids_and_invalid_top_n() -> None:
     with TestClient(create_app()) as client:
         response = client.post(

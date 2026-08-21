@@ -26,13 +26,35 @@ const result = spawnSync(
   [
     vitestCli,
     'run',
+    // All suites intentionally share one disposable acceptance database.
+    // Cross-tenant workers (ingestion/outbox) may claim any eligible row, so
+    // file-level parallelism can make one suite consume another suite's job.
+    // A single worker keeps queue ownership and cleanup deterministic.
+    '--maxWorkers=1',
+    '--no-file-parallelism',
     'test/prisma-auth.integration.spec.ts',
     'test/prisma-admin.integration.spec.ts',
+    'test/prisma-audit-governance.integration.spec.ts',
+    'test/prisma-role-assignment.integration.spec.ts',
+    'test/prisma-identity-governance.integration.spec.ts',
+    'test/prisma-ai-runtime-store.integration.spec.ts',
+    'test/prisma-ai-safety-model-routing.integration.spec.ts',
+    'test/prisma-governance-security.integration.spec.ts',
     'test/prisma-rls.integration.spec.ts',
+    'test/prisma-employee-task-execution.integration.spec.ts',
+    'test/prisma-collaboration-execution.integration.spec.ts',
     'test/prisma-conversation.integration.spec.ts',
+    'test/prisma-answer-feedback-evaluation.integration.spec.ts',
     'test/prisma-agent-run.integration.spec.ts',
+    'test/prisma-finops-auto-projection.integration.spec.ts',
+    'test/prisma-finops-cost-verification.integration.spec.ts',
+    'test/prisma-employee-insights.integration.spec.ts',
+    'test/prisma-experience-knowledge-projection.integration.spec.ts',
     'test/prisma-im-outbox.integration.spec.ts',
     'test/prisma-knowledge-ingestion.integration.spec.ts',
+    'test/prisma-knowledge-version-governance.integration.spec.ts',
+    'test/prisma-knowledge-citation.integration.spec.ts',
+    'test/prisma-knowledge-graph-governance.integration.spec.ts',
   ],
   {
     cwd: resolve(repositoryRoot, 'apps/api'),
@@ -52,11 +74,19 @@ const result = spawnSync(
       DATABASE_URL: testDatabaseUrl,
       AUTH_DATABASE_URL: testDatabaseUrl,
       ADMIN_DATABASE_URL: testDatabaseUrl,
+      SCIM_DATABASE_URL: testDatabaseUrl,
+      LIFECYCLE_DATABASE_URL: testDatabaseUrl,
       OUTBOX_DATABASE_URL: testDatabaseUrl,
       // Integration suites drive a bounded worker instance explicitly after
       // asserting the queued state. Disable the AppModule bootstrap worker so
       // it cannot claim the same row first and make those assertions racy.
       KNOWLEDGE_INGESTION_WORKER_ENABLED: 'false',
+      // The product dev environment intentionally disables the retired local
+      // backend. Database acceptance suites explicitly exercise the local
+      // ingestion boundary in a disposable database, so do not inherit that
+      // product runtime flag here.
+      KNOWLEDGE_LOCAL_BACKEND_ENABLED: 'true',
+      FINOPS_PROJECTION_WORKER_ENABLED: 'false',
       AUTH_LOGIN_RATE_LIMIT_ENABLED: 'true',
       AUTH_TOKEN_PEPPER: 'database-integration-token-pepper',
       AUTH_LOGIN_RATE_LIMIT_NETWORK_ENABLED: 'false',

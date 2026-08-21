@@ -1,0 +1,45 @@
+.member-onboarding-form {
+  gap: var(--space-12);
+}
+
+.member-form-section {
+  display: grid;
+  gap: var(--space-6);
+  min-width: 0;
+  margin: var(--space-0);
+  padding: var(--space-10);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-subtle);
+}
+
+.member-form-section > legend {
+  padding: var(--space-0) var(--space-3);
+  color: var(--color-text-primary);
+  font-size: var(--font-size-xl);
+  font-weight: var(--font-weight-bold);
+}
+
+.member-form-section > p {
+  margin: var(--space-0);
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-md);
+  line-height: var(--line-height-normal);
+}
+
+.member-form-section-content {
+  display: grid;
+  gap: var(--space-9);
+}
+
+.member-phone-field {
+  display: grid;
+  grid-template-columns: minmax(5rem, 0.35fr) minmax(0, 1fr);
+  gap: var(--space-4);
+}
+
+@media (max-width: 760px) {
+  .member-phone-field {
+    grid-template-columns: 1fr;
+  }
+}

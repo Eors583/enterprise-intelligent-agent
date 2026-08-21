@@ -4,6 +4,7 @@ import { conversationSchema, messageSchema } from '@enterprise/contracts';
 import request, { type Test } from 'supertest';
 
 import { createTestApp } from '../src/testing/create-test-app.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantId = '00000000-0000-7000-8000-000000000009';
@@ -169,13 +170,6 @@ describe.runIf(enabled)('PostgreSQL conversation integration', () => {
   }
 
   async function cleanupTestTenant(): Promise<void> {
-    await administrator.auditEvent.deleteMany({ where: { tenantId } });
-    await administrator.outboxEvent.deleteMany({ where: { tenantId } });
-    await administrator.agentRun.deleteMany({ where: { tenantId } });
-    await administrator.message.deleteMany({ where: { tenantId } });
-    await administrator.conversationParticipant.deleteMany({ where: { tenantId } });
-    await administrator.conversation.deleteMany({ where: { tenantId } });
-    await administrator.user.deleteMany({ where: { tenantId } });
-    await administrator.tenant.deleteMany({ where: { id: tenantId } });
+    await cleanupDisposableTenants(administrator, [tenantId]);
   }
 });

@@ -203,6 +203,7 @@ function messageEvent(overrides: Partial<ClaimedOutboxEvent> = {}): ClaimedOutbo
     payload: {
       messageId: MESSAGE_ID,
       conversationId: CONVERSATION_ID,
+      conversationType: 'direct',
       sender: { type: 'user', id: SENDER_ID },
       recipients: [{ type: 'user', id: RECIPIENT_ID }],
       content: { type: 'text', text: 'hello' },
@@ -216,6 +217,7 @@ function deliveryEvent(overrides: Partial<MessageCreatedDelivery> = {}): Message
     eventId: EVENT_ID,
     tenantId: TENANT_ID,
     eventType: 'message.created.v1',
+    conversationType: 'direct',
     messageId: MESSAGE_ID,
     conversationId: CONVERSATION_ID,
     sender: { type: 'user', id: SENDER_ID },

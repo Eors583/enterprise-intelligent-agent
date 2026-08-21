@@ -13,6 +13,14 @@ class RunNotFoundError(RunError):
         self.run_id = run_id
 
 
+class RunStreamReconciliationRequiredError(RunError):
+    """A durable RUNNING record has no safe in-process execution to resume."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id} requires reconciliation")
+        self.run_id = run_id
+
+
 class InvalidRunTransitionError(RunError):
     """Raised when a state transition violates the run state machine."""
 
@@ -76,6 +84,15 @@ class KnowledgeCapabilityDisabledError(RuntimeExecutionError):
         )
 
 
+class KnowledgeEmbeddingProfileMismatchError(RuntimeExecutionError):
+    def __init__(self) -> None:
+        super().__init__(
+            "KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH",
+            "the requested embedding index profile is not served by this runtime",
+            retryable=False,
+        )
+
+
 class ProviderTimeoutError(RuntimeExecutionError):
     def __init__(self) -> None:
         super().__init__("PROVIDER_TIMEOUT", "model provider timed out", retryable=True)
@@ -100,10 +117,14 @@ class ProviderRateLimitError(RuntimeExecutionError):
 
 
 class ProviderRequestError(RuntimeExecutionError):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        code: str = "PROVIDER_REQUEST_REJECTED",
+        message: str = "model provider rejected the request",
+    ) -> None:
         super().__init__(
-            "PROVIDER_REQUEST_REJECTED",
-            "model provider rejected the request",
+            code,
+            message,
             retryable=False,
         )
 

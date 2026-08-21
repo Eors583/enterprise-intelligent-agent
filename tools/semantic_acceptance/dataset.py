@@ -93,7 +93,7 @@ def load_dataset(path: Path) -> Dataset:
 def _parse_case(value: Any, line_number: int) -> EvaluationCase:
     prefix = f"line {line_number}"
     if not isinstance(value, dict):
-        raise ValueError(f"{prefix}: record must be an object")
+        raise TypeError(f"{prefix}: record must be an object")
     unknown = set(value) - ALLOWED_FIELDS
     if unknown:
         raise ValueError(f"{prefix}: unknown fields: {', '.join(sorted(unknown))}")
@@ -192,13 +192,13 @@ def _required_string(value: dict[str, Any], field: str, prefix: str) -> str:
 def _required_bool(value: dict[str, Any], field: str, prefix: str) -> bool:
     item = value.get(field)
     if not isinstance(item, bool):
-        raise ValueError(f"{prefix}: {field} must be a boolean")
+        raise TypeError(f"{prefix}: {field} must be a boolean")
     return item
 
 
 def _uuid(value: Any, field: str, prefix: str) -> str:
     if not isinstance(value, str):
-        raise ValueError(f"{prefix}: {field} must be a UUID string")
+        raise TypeError(f"{prefix}: {field} must be a UUID string")
     try:
         return str(UUID(value))
     except ValueError as error:
@@ -207,20 +207,20 @@ def _uuid(value: Any, field: str, prefix: str) -> str:
 
 def _uuid_set(value: Any, field: str, prefix: str) -> set[str]:
     if not isinstance(value, list):
-        raise ValueError(f"{prefix}: {field} must be an array")
+        raise TypeError(f"{prefix}: {field} must be an array")
     return {_uuid(item, field, prefix) for item in value}
 
 
 def _relevance(value: Any, prefix: str) -> dict[str, float]:
     if not isinstance(value, dict):
-        raise ValueError(f"{prefix}: relevance must be an object keyed by chunk UUID")
+        raise TypeError(f"{prefix}: relevance must be an object keyed by chunk UUID")
     parsed: dict[str, float] = {}
     for item_id, raw_grade in value.items():
         normalized_id = _uuid(item_id, "relevance key", prefix)
         if normalized_id in parsed:
             raise ValueError(f"{prefix}: relevance contains duplicate normalized UUIDs")
         if isinstance(raw_grade, bool) or not isinstance(raw_grade, (int, float)):
-            raise ValueError(f"{prefix}: relevance grades must be numeric")
+            raise TypeError(f"{prefix}: relevance grades must be numeric")
         grade = float(raw_grade)
         if not 0 < grade <= 3:
             raise ValueError(f"{prefix}: relevance grades must be in (0, 3]")

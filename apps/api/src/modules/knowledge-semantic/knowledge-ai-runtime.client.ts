@@ -3,15 +3,23 @@ import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 
 import type { EnvironmentVariables } from '../../config/environment.js';
+import type { AiDataClassification } from '@enterprise/contracts';
+import { isExternalKnowledgeAiApproved } from '../ai-safety-model-routing/ai-data-classification.js';
 
 const MAX_EMBEDDING_BATCH = 64;
+const MAX_EMBEDDING_BATCH_CONCURRENCY = 2;
 const MAX_RERANK_DOCUMENTS = 100;
 
 export interface KnowledgeEmbeddingBatch {
   readonly model: string;
-  readonly dimensions: 1536;
+  readonly dimensions: number;
   readonly vectors: readonly (readonly number[])[];
   readonly inputTokens: number | null;
+}
+
+export interface KnowledgeEmbeddingProfileExpectation {
+  readonly model: string;
+  readonly dimensions: number;
 }
 
 export interface KnowledgeRerankResult {
@@ -29,13 +37,13 @@ export type KnowledgeRuntimeCapabilityStatus = 'disabled' | 'ready' | 'not_ready
 export interface KnowledgeRuntimeCapabilities {
   readonly embeddings: {
     readonly status: KnowledgeRuntimeCapabilityStatus;
-    readonly provider: 'disabled' | 'openai_compatible';
+    readonly provider: 'disabled' | 'openai_compatible' | 'local_fastembed';
     readonly model: string | null;
     readonly dimensions: number;
   };
   readonly rerank: {
     readonly status: KnowledgeRuntimeCapabilityStatus;
-    readonly provider: 'disabled' | 'cohere_compatible';
+    readonly provider: 'disabled' | 'cohere_compatible' | 'local_fastembed';
     readonly model: string | null;
   };
 }
@@ -58,22 +66,31 @@ export class KnowledgeAiRuntimeClient {
   readonly vectorSearchMode: 'exact' | 'hnsw';
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
-  private readonly dimensions: 1536;
+  private readonly dimensions: number;
+  private readonly serviceToken: string | undefined;
 
   constructor(@Inject(ConfigService) config: ConfigService<EnvironmentVariables, true>) {
     this.baseUrl = config.get('AI_RUNTIME_URL', { infer: true });
     this.timeoutMs = config.get('KNOWLEDGE_AI_TIMEOUT_MS', { infer: true });
     this.dimensions = config.get('KNOWLEDGE_EMBEDDING_DIMENSIONS', { infer: true });
+    this.serviceToken = config.get('AI_RUNTIME_SERVICE_TOKEN', { infer: true });
     this.semanticEnabled = config.get('KNOWLEDGE_SEMANTIC_SEARCH_ENABLED', { infer: true });
     this.rerankEnabled = config.get('KNOWLEDGE_RERANK_ENABLED', { infer: true });
     this.vectorSearchMode = config.get('KNOWLEDGE_VECTOR_SEARCH_MODE', { infer: true });
   }
 
-  get embeddingDimensions(): 1536 {
+  get embeddingDimensions(): number {
     return this.dimensions;
   }
 
-  async embed(tenantId: string, inputs: readonly string[]): Promise<KnowledgeEmbeddingBatch> {
+  async embed(
+    tenantId: string,
+    inputs: readonly string[],
+    classification: AiDataClassification,
+    signal?: AbortSignal,
+    expectedProfile?: KnowledgeEmbeddingProfileExpectation,
+  ): Promise<KnowledgeEmbeddingBatch> {
+    assertExternalKnowledgeAiApproved(classification, 'KNOWLEDGE_EMBEDDING');
     if (!this.semanticEnabled) {
       throw new KnowledgeAiRuntimeError(
         'KNOWLEDGE_SEMANTIC_DISABLED',
@@ -84,22 +101,67 @@ export class KnowledgeAiRuntimeClient {
     if (inputs.length < 1 || inputs.length > MAX_EMBEDDING_BATCH) {
       throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_BATCH_INVALID', false);
     }
-    const payload = await this.request('/internal/v1/knowledge/embeddings', tenantId, 'POST', {
-      tenant_id: tenantId,
-      inputs,
-    });
-    return parseEmbeddingResponse(payload, inputs.length, this.dimensions);
+    const payload = await this.request(
+      '/internal/v1/knowledge/embeddings',
+      tenantId,
+      'POST',
+      {
+        tenant_id: tenantId,
+        inputs,
+        ...(expectedProfile === undefined
+          ? {}
+          : {
+              expected_model: expectedProfile.model,
+              expected_dimensions: expectedProfile.dimensions,
+            }),
+      },
+      signal,
+    );
+    const response = parseEmbeddingResponse(
+      payload,
+      inputs.length,
+      expectedProfile?.dimensions ?? this.dimensions,
+    );
+    if (expectedProfile !== undefined && response.model !== expectedProfile.model) {
+      throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_PROFILE_MISMATCH', false);
+    }
+    return response;
   }
 
-  async embedAll(tenantId: string, inputs: readonly string[]): Promise<KnowledgeEmbeddingBatch> {
+  async embedAll(
+    tenantId: string,
+    inputs: readonly string[],
+    classification: AiDataClassification,
+    signal?: AbortSignal,
+    expectedProfile?: KnowledgeEmbeddingProfileExpectation,
+  ): Promise<KnowledgeEmbeddingBatch> {
+    assertExternalKnowledgeAiApproved(classification, 'KNOWLEDGE_EMBEDDING');
     if (inputs.length === 0) {
-      return { model: '', dimensions: this.dimensions, vectors: [], inputTokens: 0 };
+      return {
+        model: expectedProfile?.model ?? '',
+        dimensions: expectedProfile?.dimensions ?? this.dimensions,
+        vectors: [],
+        inputTokens: 0,
+      };
+    }
+    const batches: Array<readonly string[]> = [];
+    for (let offset = 0; offset < inputs.length; offset += MAX_EMBEDDING_BATCH) {
+      batches.push(inputs.slice(offset, offset + MAX_EMBEDDING_BATCH));
+    }
+    const results: KnowledgeEmbeddingBatch[] = [];
+    for (let offset = 0; offset < batches.length; offset += MAX_EMBEDDING_BATCH_CONCURRENCY) {
+      results.push(
+        ...(await Promise.all(
+          batches
+            .slice(offset, offset + MAX_EMBEDDING_BATCH_CONCURRENCY)
+            .map((batch) => this.embed(tenantId, batch, classification, signal, expectedProfile)),
+        )),
+      );
     }
     const vectors: Array<readonly number[]> = [];
     let model: string | null = null;
     let inputTokens: number | null = 0;
-    for (let offset = 0; offset < inputs.length; offset += MAX_EMBEDDING_BATCH) {
-      const batch = await this.embed(tenantId, inputs.slice(offset, offset + MAX_EMBEDDING_BATCH));
+    for (const batch of results) {
       if (model !== null && model !== batch.model) {
         throw new KnowledgeAiRuntimeError('KNOWLEDGE_EMBEDDING_MODEL_CHANGED', true);
       }
@@ -110,7 +172,7 @@ export class KnowledgeAiRuntimeClient {
     }
     return {
       model: model ?? '',
-      dimensions: this.dimensions,
+      dimensions: expectedProfile?.dimensions ?? this.dimensions,
       vectors,
       inputTokens,
     };
@@ -121,17 +183,26 @@ export class KnowledgeAiRuntimeClient {
     query: string,
     documents: readonly { readonly id: string; readonly text: string }[],
     topN: number,
+    classification: AiDataClassification,
+    signal?: AbortSignal,
   ): Promise<KnowledgeRerankBatch> {
+    assertExternalKnowledgeAiApproved(classification, 'KNOWLEDGE_RERANK');
     if (!this.rerankEnabled) return { model: '', results: [] };
     if (documents.length < 1 || documents.length > MAX_RERANK_DOCUMENTS) {
       throw new KnowledgeAiRuntimeError('KNOWLEDGE_RERANK_BATCH_INVALID', false);
     }
-    const payload = await this.request('/internal/v1/knowledge/rerank', tenantId, 'POST', {
-      tenant_id: tenantId,
-      query,
-      documents,
-      top_n: Math.min(documents.length, Math.max(1, topN)),
-    });
+    const payload = await this.request(
+      '/internal/v1/knowledge/rerank',
+      tenantId,
+      'POST',
+      {
+        tenant_id: tenantId,
+        query,
+        documents,
+        top_n: Math.min(documents.length, Math.max(1, topN)),
+      },
+      signal,
+    );
     return parseRerankResponse(payload, documents, Math.min(documents.length, Math.max(1, topN)));
   }
 
@@ -169,17 +240,27 @@ export class KnowledgeAiRuntimeClient {
     tenantId: string,
     method: 'GET' | 'POST',
     body?: unknown,
+    callerSignal?: AbortSignal,
   ): Promise<unknown> {
+    callerSignal?.throwIfAborted();
     const controller = new AbortController();
+    const abortFromCaller = (): void => controller.abort();
+    callerSignal?.addEventListener('abort', abortFromCaller, { once: true });
+    if (callerSignal?.aborted === true) controller.abort();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     timer.unref?.();
+    const requestId = `knowledge-${randomUUID()}`;
     try {
       const response = await fetch(new URL(path, this.baseUrl), {
         method,
         headers: {
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
           'X-Tenant-ID': tenantId,
-          'X-Request-ID': `knowledge-${randomUUID()}`,
+          'X-Request-ID': requestId,
+          'X-Correlation-ID': requestId,
+          ...(this.serviceToken === undefined
+            ? {}
+            : { Authorization: `Bearer ${this.serviceToken}` }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         signal: controller.signal,
@@ -195,6 +276,7 @@ export class KnowledgeAiRuntimeClient {
       throw new KnowledgeAiRuntimeError('KNOWLEDGE_AI_UNAVAILABLE', true);
     } finally {
       clearTimeout(timer);
+      callerSignal?.removeEventListener('abort', abortFromCaller);
     }
   }
 }
@@ -238,7 +320,9 @@ function parseEmbeddingCapability(value: unknown): KnowledgeRuntimeCapabilities[
   if (
     !isRecord(value) ||
     (value.status !== 'disabled' && value.status !== 'ready' && value.status !== 'not_ready') ||
-    (value.provider !== 'disabled' && value.provider !== 'openai_compatible') ||
+    (value.provider !== 'disabled' &&
+      value.provider !== 'openai_compatible' &&
+      value.provider !== 'local_fastembed') ||
     !Number.isSafeInteger(value.dimensions) ||
     (value.dimensions as number) < 1 ||
     (value.model !== null &&
@@ -258,7 +342,9 @@ function parseRerankCapability(value: unknown): KnowledgeRuntimeCapabilities['re
   if (
     !isRecord(value) ||
     (value.status !== 'disabled' && value.status !== 'ready' && value.status !== 'not_ready') ||
-    (value.provider !== 'disabled' && value.provider !== 'cohere_compatible') ||
+    (value.provider !== 'disabled' &&
+      value.provider !== 'cohere_compatible' &&
+      value.provider !== 'local_fastembed') ||
     (value.model !== null &&
       (typeof value.model !== 'string' || value.model.length < 1 || value.model.length > 200))
   ) {
@@ -270,7 +356,7 @@ function parseRerankCapability(value: unknown): KnowledgeRuntimeCapabilities['re
 function parseEmbeddingResponse(
   value: unknown,
   expectedCount: number,
-  expectedDimensions: 1536,
+  expectedDimensions: number,
 ): KnowledgeEmbeddingBatch {
   if (
     !isRecord(value) ||
@@ -374,6 +460,18 @@ function errorFromResponse(status: number, value: unknown): KnowledgeAiRuntimeEr
 
 function invalidResponse(): KnowledgeAiRuntimeError {
   return new KnowledgeAiRuntimeError('KNOWLEDGE_AI_INVALID_RESPONSE', true);
+}
+
+function assertExternalKnowledgeAiApproved(
+  classification: AiDataClassification,
+  capability: 'KNOWLEDGE_EMBEDDING' | 'KNOWLEDGE_RERANK',
+): void {
+  if (isExternalKnowledgeAiApproved(classification)) return;
+  throw new KnowledgeAiRuntimeError(
+    `${capability}_CLASSIFICATION_NOT_APPROVED`,
+    false,
+    'Knowledge content classification is not approved for this external AI route.',
+  );
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

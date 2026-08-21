@@ -17,6 +17,8 @@ function agent(overrides: Partial<MemberAgent> = {}): MemberAgent {
     status: 'online',
     versionStatus: 'published',
     visibility: 'tenant',
+    assignedToPrincipal: false,
+    requiresActiveAssignment: false,
     ...overrides,
   };
 }
@@ -38,5 +40,29 @@ describe('canContactMemberAgent', () => {
     ).toBe(false);
     expect(canContactMemberAgent(principal, agent({ status: 'disabled' }))).toBe(false);
     expect(canContactMemberAgent(principal, agent({ visibility: 'owner' }))).toBe(false);
+  });
+
+  it('allows a private Role Agent only while the repository marks an effective assignment', () => {
+    expect(
+      canContactMemberAgent(
+        principal,
+        agent({
+          visibility: 'owner',
+          assignedToPrincipal: true,
+          requiresActiveAssignment: true,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      canContactMemberAgent(
+        principal,
+        agent({
+          ownerUserId: principal.userId,
+          visibility: 'owner',
+          assignedToPrincipal: false,
+          requiresActiveAssignment: true,
+        }),
+      ),
+    ).toBe(false);
   });
 });

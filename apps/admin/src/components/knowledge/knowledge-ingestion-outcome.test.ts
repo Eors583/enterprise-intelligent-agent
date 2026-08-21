@@ -1,5 +1,6 @@
 import type { KnowledgeDocumentVersionSummary } from '@enterprise/contracts';
 import { describe, expect, it } from 'vitest';
+import { testKnowledgeGovernance } from '@/test/knowledge-fixtures';
 
 import {
   knowledgeVersionAction,
@@ -40,6 +41,7 @@ describe('knowledgeVersionFailure', () => {
       id: '00000000-0000-7000-8000-000000000103',
       versionNumber: 2,
       status: 'READY',
+      publishedAt: '2026-07-20T00:00:00.000Z',
     });
     const oldDraft = version({
       id: '00000000-0000-7000-8000-000000000104',
@@ -60,19 +62,26 @@ describe('knowledgeVersionFailure', () => {
     ).toEqual(newestDraft);
   });
 
-  it('offers publish for drafts and rollback only for non-current ready versions', () => {
-    const current = version({ id: '00000000-0000-7000-8000-000000000106' });
-    const historical = version({ id: '00000000-0000-7000-8000-000000000107' });
-    const draft = version({
+  it('offers publish for indexed candidates and rollback only for historical published versions', () => {
+    const current = version({
+      id: '00000000-0000-7000-8000-000000000106',
+      publishedAt: '2026-07-22T00:00:00.000Z',
+    });
+    const historical = version({
+      id: '00000000-0000-7000-8000-000000000107',
+      publishedAt: '2026-07-20T00:00:00.000Z',
+    });
+    const candidate = version({
       id: '00000000-0000-7000-8000-000000000108',
       versionNumber: 3,
-      status: 'DRAFT',
+      status: 'READY',
+      publishedAt: null,
     });
 
-    const document = { currentVersionId: current.id, versions: [current, historical, draft] };
+    const document = { currentVersionId: current.id, versions: [current, historical, candidate] };
     expect(knowledgeVersionAction(document, current)).toBeNull();
     expect(knowledgeVersionAction(document, historical)).toBe('rollback');
-    expect(knowledgeVersionAction(document, draft)).toBe('publish');
+    expect(knowledgeVersionAction(document, candidate)).toBe('publish');
     expect(
       knowledgeVersionAction({ currentVersionId: null, versions: [historical] }, historical),
     ).toBeNull();
@@ -82,7 +91,8 @@ describe('knowledgeVersionFailure', () => {
         version({
           id: '00000000-0000-7000-8000-000000000109',
           versionNumber: current.versionNumber,
-          status: 'DRAFT',
+          status: 'READY',
+          publishedAt: null,
         }),
       ),
     ).toBeNull();
@@ -104,6 +114,19 @@ function version(
     chunkCount: 1,
     createdAt: '2026-07-20T00:00:00.000Z',
     publishedAt: null,
+    evaluationRunId: null,
+    evaluationDatasetVersionId: null,
+    evaluationSnapshotHash: null,
+    sourceUri: null,
+    parserName: 'utf8-text-v1',
+    parseQualityScore: 1,
+    parseReviewStatus: 'APPROVED',
+    parseReviewRevision: 1,
+    parseReviewedById: null,
+    parseReviewedAt: null,
+    parseReviewNote: null,
+    parseDiagnostics: {},
+    governance: testKnowledgeGovernance(),
     ingestionJob: null,
     ...overrides,
   };

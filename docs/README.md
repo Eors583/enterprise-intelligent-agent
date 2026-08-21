@@ -52,6 +52,7 @@
 - [企业知识库生产接线、验收与故障恢复](./runbooks/企业知识库生产接线与验收.md)
 - [真实语义检索与企业问题集验收](./runbooks/真实语义检索与企业问题集验收.md)
 - [数据库备份恢复与核心告警](./runbooks/数据库备份恢复与核心告警.md)
+- [外部能力状态与无损数据治理](./runbooks/外部能力状态与无损数据治理.md)
 - [API](../apps/api/README.md)
 - [管理后台](../apps/admin/README.md)
 - [桌面端](../apps/desktop/README.md)

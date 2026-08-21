@@ -83,10 +83,10 @@ class DatasetTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "coverage is insufficient"):
             validate_dataset_coverage(
                 dataset,
-                min_cases=30,
-                min_answerable=20,
-                min_no_answer=5,
-                min_acl_cases=5,
+                min_cases=200,
+                min_answerable=150,
+                min_no_answer=25,
+                min_acl_cases=25,
             )
 
 

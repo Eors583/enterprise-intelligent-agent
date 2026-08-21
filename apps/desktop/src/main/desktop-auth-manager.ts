@@ -3,19 +3,38 @@ import {
   changePasswordRequestSchema,
   changePasswordResponseSchema,
   loginRequestSchema,
+  loginResultSchema,
+  mfaLoginVerifyRequestSchema,
+  oidcLoginCallbackRequestSchema,
+  oidcLoginStartRequestSchema,
+  oidcLoginStartResponseSchema,
+  oidcPublicProviderListResponseSchema,
   registerTenantRequestSchema,
   type AuthAccount,
   type ChangePasswordRequest,
   type LoginRequest,
+  type MfaLoginVerifyRequest,
+  type OidcLoginCallbackRequest,
+  type OidcLoginStartRequest,
+  type OidcLoginStartResponse,
+  type OidcPublicProviderListResponse,
   type RegisterTenantRequest,
 } from '@enterprise/contracts';
 import type {
   DesktopApiRequest,
   DesktopApiResponse,
+  DesktopAgentRunStreamPayload,
+  DesktopAgentRunStreamRequest,
   DesktopAuthState,
+  DesktopImRealtimePayload,
+  DesktopImRealtimeRequest,
+  DesktopLoginResult,
+  DesktopOpenKnowledgeSourceRequest,
   DesktopPasswordChangeResult,
 } from '../shared/desktop-api';
 import { AccountStore } from './account-store';
+import { consumeAgentRunSse } from './agent-run-sse';
+import { runImRealtime } from './im-realtime';
 
 const MAX_REQUEST_BYTES = 2_100_000;
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -26,14 +45,119 @@ const BUSINESS_ROUTES: ReadonlyArray<{
   methods: ReadonlySet<DesktopApiRequest['method']>;
 }> = [
   { pattern: /^\/api\/v1\/bootstrap$/, methods: new Set(['GET']) },
-  { pattern: /^\/api\/v1\/conversations$/, methods: new Set(['GET', 'POST']) },
+  { pattern: /^\/api\/v1\/im\/session$/, methods: new Set(['GET']) },
+  { pattern: /^\/api\/v1\/role-assignments\/me$/, methods: new Set(['GET']) },
+  { pattern: /^\/api\/v1\/workbench\/objectives$/, methods: new Set(['GET']) },
+  { pattern: /^\/api\/v1\/workbench\/tasks$/, methods: new Set(['GET']) },
   {
-    pattern: new RegExp(`^/api/v1/conversations/${UUID}/messages$`),
+    pattern: /^\/api\/v1\/workbench\/people\/me\/personal-manual$/,
+    methods: new Set(['GET', 'PUT']),
+  },
+  {
+    pattern: /^\/api\/v1\/workbench\/people\/me\/work-availability$/,
+    methods: new Set(['GET', 'PUT']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/trace$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/collaborations$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/collaborations/${UUID}$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/corrections$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tasks/${UUID}/corrections/${UUID}/feedback$`),
+    methods: new Set(['POST']),
+  },
+  {
+    pattern: /^\/api\/v1\/workbench\/memories(?:\?[A-Za-z0-9%+._~=&-]{1,2000})?$/,
     methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/memories/${UUID}$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/memories/${UUID}/transitions$`),
+    methods: new Set(['POST']),
+  },
+  {
+    pattern: /^\/api\/v1\/workbench\/experiences$/,
+    methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: /^\/api\/v1\/workbench\/experiences\?[A-Za-z0-9%+._~=&-]{1,2000}$/,
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/experience-sources\\?taskId=${UUID}$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: /^\/api\/v1\/workbench\/ai-usage(?:\?[A-Za-z0-9%+._~=&-]{1,2000})?$/,
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tools\\?taskId=${UUID}$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tool-approvals\\?taskId=${UUID}$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: /^\/api\/v1\/workbench\/tool-invocations(?:\?cursor=[A-Za-z0-9%+._~=-]{1,2000})?$/,
+    methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tool-invocations/${UUID}$`),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/workbench/tool-invocations/${UUID}/actions$`),
+    methods: new Set(['POST']),
+  },
+  {
+    pattern: /^\/api\/v1\/conversations(?:\?[A-Za-z0-9%+._~=&-]{1,2000})?$/,
+    methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: new RegExp(
+      `^/api/v1/conversations/${UUID}/messages(?:\\?[A-Za-z0-9%+._~=&-]{1,2000})?$`,
+    ),
+    methods: new Set(['GET', 'POST']),
+  },
+  {
+    pattern: new RegExp(
+      `^/api/v1/conversations/${UUID}/messages/search\\?[A-Za-z0-9%+._~=&-]{1,2000}$`,
+    ),
+    methods: new Set(['GET']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/conversations/${UUID}/read$`),
+    methods: new Set(['POST']),
+  },
+  {
+    pattern: new RegExp(`^/api/v1/conversations/${UUID}/(?:state|group|group/members)$`),
+    methods: new Set(['PATCH']),
   },
   {
     pattern: new RegExp(`^/api/v1/conversations/${UUID}/runs/${UUID}/(?:cancel|retry)$`),
     methods: new Set(['POST']),
+  },
+  {
+    pattern: new RegExp(
+      `^/api/v1/conversations/${UUID}/runs/${UUID}/events\\?cursor=(?:0|[1-9][0-9]{0,3}|1000[01])&limit=(?:[1-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-6])$`,
+    ),
+    methods: new Set(['GET']),
   },
   {
     pattern: new RegExp(`^/api/v1/messages/${UUID}/feedback$`),
@@ -83,9 +207,63 @@ export class DesktopAuthManager {
     };
   }
 
-  async login(input: LoginRequest): Promise<DesktopAuthState> {
+  async login(input: LoginRequest): Promise<DesktopLoginResult> {
     const request = loginRequestSchema.parse(input);
-    const response = await this.authRequest('/api/v1/auth/login', request);
+    const response = await this.rawRequest('/api/v1/auth/login', {
+      method: 'POST',
+      body: request,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new AuthHttpError(response.status, responseMessage(response.body));
+    }
+    const parsed = loginResultSchema.safeParse(response.body);
+    if (!parsed.success) throw new Error('Authentication response failed contract validation.');
+    if ('kind' in parsed.data) return parsed.data;
+    await this.acceptBundle(parsed.data);
+    return this.state();
+  }
+
+  async verifyMfaLogin(input: MfaLoginVerifyRequest): Promise<DesktopAuthState> {
+    const request = mfaLoginVerifyRequestSchema.parse(input);
+    const response = await this.authRequest('/api/v1/auth/mfa/login/verify', request);
+    await this.acceptBundle(response);
+    return this.state();
+  }
+
+  async listOidcProviders(tenantSlug: string): Promise<OidcPublicProviderListResponse> {
+    const normalized = tenantSlug.trim().toLowerCase();
+    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(normalized) || normalized.length > 80) {
+      throw new Error('Enterprise identifier is invalid.');
+    }
+    const response = await this.rawRequest(
+      `/api/v1/auth/oidc/providers/${encodeURIComponent(normalized)}`,
+      { method: 'GET' },
+    );
+    if (response.status < 200 || response.status >= 300) {
+      throw new AuthHttpError(response.status, responseMessage(response.body));
+    }
+    const parsed = oidcPublicProviderListResponseSchema.safeParse(response.body);
+    if (!parsed.success) throw new Error('OIDC provider response failed contract validation.');
+    return parsed.data;
+  }
+
+  async startOidcLogin(input: OidcLoginStartRequest): Promise<OidcLoginStartResponse> {
+    const request = oidcLoginStartRequestSchema.parse(input);
+    const response = await this.rawRequest('/api/v1/auth/oidc/start', {
+      method: 'POST',
+      body: request,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new AuthHttpError(response.status, responseMessage(response.body));
+    }
+    const parsed = oidcLoginStartResponseSchema.safeParse(response.body);
+    if (!parsed.success) throw new Error('OIDC start response failed contract validation.');
+    return parsed.data;
+  }
+
+  async completeOidcLogin(input: OidcLoginCallbackRequest): Promise<DesktopAuthState> {
+    const request = oidcLoginCallbackRequestSchema.parse(input);
+    const response = await this.authRequest('/api/v1/auth/oidc/callback', request);
     await this.acceptBundle(response);
     return this.state();
   }
@@ -204,6 +382,174 @@ export class DesktopAuthManager {
       throw staleAccountError();
     }
     return response;
+  }
+
+  async downloadKnowledgeSource(
+    request: DesktopOpenKnowledgeSourceRequest,
+  ): Promise<{ readonly bytes: Uint8Array; readonly mimeType: string }> {
+    assertKnowledgeSourceRequest(request);
+    const activeSessionId = this.requireExpectedSession(request.expectedSessionId);
+    const requestGeneration = this.generation;
+    const path = `/api/v1/knowledge-citations/${request.documentVersionId}/chunks/${request.chunkId}/source?messageId=${request.messageId}`;
+    let token = await this.accessToken(activeSessionId);
+    this.requireExpectedSession(request.expectedSessionId);
+    let response = await this.rawBinaryRequest(path, token);
+    if (response.status === 401) {
+      token = await this.accessTokenAfterUnauthorized(activeSessionId, token);
+      this.requireExpectedSession(request.expectedSessionId);
+      response = await this.rawBinaryRequest(path, token);
+    }
+    this.requireExpectedSession(request.expectedSessionId);
+    if (requestGeneration !== this.generation) throw staleAccountError();
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`Knowledge source returned HTTP ${response.status}.`);
+    }
+    return { bytes: response.bytes, mimeType: response.mimeType };
+  }
+
+  async streamAgentRun(
+    request: DesktopAgentRunStreamRequest,
+    emit: (payload: DesktopAgentRunStreamPayload) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    assertAgentRunStreamRequest(request);
+    const requestGeneration = this.generation;
+    let cursor = request.cursor;
+    let reconnectDelayMs = 250;
+    let reconnecting = false;
+
+    while (!signal.aborted) {
+      this.requireExpectedSession(request.expectedSessionId);
+      if (requestGeneration !== this.generation) throw staleAccountError();
+      emit({
+        kind: 'state',
+        state: reconnecting ? 'reconnecting' : 'connecting',
+        cursor,
+      });
+
+      try {
+        const attempt = await this.openAgentRunStreamAttempt(request, cursor, signal);
+        emit({ kind: 'state', state: 'connected', cursor });
+        const result = await consumeAgentRunSse({
+          response: attempt,
+          runId: request.runId,
+          cursor,
+          signal,
+          onEvent: (event) => {
+            this.requireExpectedSession(request.expectedSessionId);
+            if (requestGeneration !== this.generation) throw staleAccountError();
+            cursor = event.sequence;
+            emit({ kind: 'event', event });
+          },
+        });
+        cursor = result.cursor;
+        if (result.terminal) {
+          emit({ kind: 'state', state: 'closed', cursor });
+          return;
+        }
+        reconnectDelayMs = 250;
+      } catch (error) {
+        if (signal.aborted) return;
+        if (isPermanentAgentRunStreamError(error)) throw error;
+        reconnectDelayMs = Math.min(5_000, reconnectDelayMs * 2);
+      }
+
+      reconnecting = true;
+      emit({ kind: 'state', state: 'reconnecting', cursor });
+      await abortableDelay(reconnectDelayMs, signal);
+    }
+  }
+
+  async streamImRealtime(
+    request: DesktopImRealtimeRequest,
+    emit: (payload: DesktopImRealtimePayload) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (!UUID_PATTERN.test(request.expectedSessionId)) {
+      throw new Error('Invalid realtime messaging subscription.');
+    }
+    const requestGeneration = this.generation;
+    let reconnectDelayMs = 250;
+    while (!signal.aborted) {
+      try {
+        await runImRealtime({
+          signal,
+          emit,
+          loadSession: async () => {
+            this.requireExpectedSession(request.expectedSessionId);
+            if (requestGeneration !== this.generation) throw staleAccountError();
+            const response = await this.apiRequest({
+              path: '/api/v1/im/session',
+              method: 'GET',
+              expectedSessionId: request.expectedSessionId,
+            });
+            if (response.status < 200 || response.status >= 300) {
+              throw new AuthHttpError(response.status, responseMessage(response.body));
+            }
+            return response.body;
+          },
+        });
+        return;
+      } catch (error) {
+        if (signal.aborted) return;
+        if (isPermanentImRealtimeError(error)) throw error;
+        emit({
+          kind: 'state',
+          state: 'reconnecting',
+          error: 'Realtime messaging connection was interrupted.',
+        });
+        await abortableDelay(reconnectDelayMs, signal);
+        reconnectDelayMs = Math.min(5_000, reconnectDelayMs * 2);
+      }
+    }
+  }
+
+  private async openAgentRunStreamAttempt(
+    request: DesktopAgentRunStreamRequest,
+    cursor: number,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    let token = await this.accessToken(request.expectedSessionId);
+    this.requireExpectedSession(request.expectedSessionId);
+    let response = await this.fetchAgentRunStream(request, cursor, token, signal);
+    if (response.status === 401) {
+      await response.body?.cancel().catch(() => undefined);
+      this.requireExpectedSession(request.expectedSessionId);
+      token = await this.accessTokenAfterUnauthorized(request.expectedSessionId, token);
+      this.requireExpectedSession(request.expectedSessionId);
+      response = await this.fetchAgentRunStream(request, cursor, token, signal);
+    }
+    if (response.status < 200 || response.status >= 300) {
+      const body = await readBoundedResponseBody(response);
+      throw new AgentRunStreamHttpError(response.status, responseMessage(body));
+    }
+    if (!response.headers.get('content-type')?.toLowerCase().startsWith('text/event-stream')) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new Error('Agent Run stream returned an invalid content type.');
+    }
+    return response;
+  }
+
+  private fetchAgentRunStream(
+    request: DesktopAgentRunStreamRequest,
+    cursor: number,
+    token: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    const path =
+      `/api/v1/conversations/${encodeURIComponent(request.conversationId)}` +
+      `/runs/${encodeURIComponent(request.runId)}/stream?cursor=${cursor}`;
+    return fetch(`${this.baseUrl.replace(/\/+$/, '')}${path}`, {
+      method: 'GET',
+      cache: 'no-store',
+      redirect: 'error',
+      signal,
+      headers: {
+        Accept: 'text/event-stream',
+        Authorization: `Bearer ${token}`,
+        ...(cursor === 0 ? {} : { 'Last-Event-ID': `${request.runId}:${cursor}` }),
+      },
+    });
   }
 
   private async accessToken(sessionId: string): Promise<string> {
@@ -336,6 +682,37 @@ export class DesktopAuthManager {
       clearTimeout(timeout);
     }
   }
+
+  private async rawBinaryRequest(
+    path: string,
+    authorization: string,
+  ): Promise<{ status: number; bytes: Uint8Array; mimeType: string }> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${this.baseUrl.replace(/\/+$/, '')}${path}`, {
+        method: 'GET',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: controller.signal,
+        headers: {
+          Accept: 'application/octet-stream,*/*',
+          Authorization: `Bearer ${authorization}`,
+        },
+      });
+      const body = new Uint8Array(await response.arrayBuffer());
+      if (body.byteLength > 50 * 1024 * 1024) {
+        throw new Error('Knowledge source exceeds the desktop safety limit.');
+      }
+      return {
+        status: response.status,
+        bytes: body,
+        mimeType: response.headers.get('content-type') ?? 'application/octet-stream',
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 function validateBaseUrl(value: string): void {
@@ -371,6 +748,33 @@ function assertBusinessRequest(request: DesktopApiRequest): void {
   }
 }
 
+function assertKnowledgeSourceRequest(request: DesktopOpenKnowledgeSourceRequest): void {
+  if (
+    !UUID_PATTERN.test(request.expectedSessionId) ||
+    !UUID_PATTERN.test(request.messageId) ||
+    !UUID_PATTERN.test(request.documentVersionId) ||
+    !UUID_PATTERN.test(request.chunkId) ||
+    typeof request.fileName !== 'string' ||
+    request.fileName.trim().length === 0 ||
+    request.fileName.length > 300
+  ) {
+    throw new Error('Invalid knowledge source request.');
+  }
+}
+
+function assertAgentRunStreamRequest(request: DesktopAgentRunStreamRequest): void {
+  if (
+    !UUID_PATTERN.test(request.expectedSessionId) ||
+    !UUID_PATTERN.test(request.conversationId) ||
+    !UUID_PATTERN.test(request.runId) ||
+    !Number.isSafeInteger(request.cursor) ||
+    request.cursor < 0 ||
+    request.cursor > 10_001
+  ) {
+    throw new Error('Invalid Agent Run stream request.');
+  }
+}
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 function staleAccountError(): Error {
@@ -387,4 +791,70 @@ function responseMessage(value: unknown): string {
     if (typeof message === 'string' && message.trim()) return message.slice(0, 500);
   }
   return 'Authentication request failed.';
+}
+
+class AgentRunStreamHttpError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function isPermanentAgentRunStreamError(error: unknown): boolean {
+  if (error instanceof AgentRunStreamHttpError) {
+    return (
+      error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429
+    );
+  }
+  return (
+    error instanceof Error &&
+    (error.name === 'StaleAccountError' ||
+      error.message.includes('contract validation') ||
+      error.message.includes('identity is invalid') ||
+      error.message.includes('not contiguous') ||
+      error.message.includes('invalid content type') ||
+      error.message.includes('safety limit'))
+  );
+}
+
+function isPermanentImRealtimeError(error: unknown): boolean {
+  if (error instanceof Error && error.name === 'StaleAccountError') return true;
+  return (
+    error instanceof AuthHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  );
+}
+
+async function readBoundedResponseBody(response: Response): Promise<unknown> {
+  const text = (await response.text()).slice(0, 4_096);
+  if (text.length === 0) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return { message: 'The server returned a non-JSON response.' };
+  }
+}
+
+function abortableDelay(delayMs: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, delayMs);
+    timer.unref();
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }

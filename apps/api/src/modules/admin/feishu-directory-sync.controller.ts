@@ -1,9 +1,15 @@
-import { Body, Controller, Get, Inject, Post, Put } from '@nestjs/common';
+import { Body, Controller, Get, Inject, Post, Put, Res } from '@nestjs/common';
 import {
+  applyFeishuDirectoryPreviewRequestSchema,
+  type ApplyFeishuDirectoryPreviewRequest,
   bindFeishuOrganizationRequestSchema,
   type BindFeishuOrganizationRequest,
+  type FeishuDirectoryPreview,
+  type FeishuDirectorySyncRunDetail,
+  type FeishuDirectorySyncRunList,
   type FeishuOrganizationSyncStatus,
 } from '@enterprise/contracts';
+import type { Response } from 'express';
 
 import { SchemaValidationPipe } from '../../common/pipes/schema-validation.pipe.js';
 import { FeishuDirectorySyncService } from './feishu-directory-sync.service.js';
@@ -20,9 +26,28 @@ export class FeishuDirectorySyncController {
     return this.sync.getStatus();
   }
 
-  @Post()
-  start(): Promise<FeishuOrganizationSyncStatus> {
-    return this.sync.startSync();
+  @Get('preview')
+  async getPreview(@Res() response: Response): Promise<void> {
+    const preview = await this.sync.getCurrentPreview();
+    response.status(200).json(preview);
+  }
+
+  @Post('preview')
+  preview(): Promise<FeishuDirectoryPreview> {
+    return this.sync.createPreview();
+  }
+
+  @Get('runs')
+  listRuns(): Promise<FeishuDirectorySyncRunList> {
+    return this.sync.listRuns();
+  }
+
+  @Post('runs')
+  applyPreview(
+    @Body(new SchemaValidationPipe(applyFeishuDirectoryPreviewRequestSchema))
+    request: ApplyFeishuDirectoryPreviewRequest,
+  ): Promise<FeishuDirectorySyncRunDetail> {
+    return this.sync.enqueuePreview(request);
   }
 
   @Put('connection')

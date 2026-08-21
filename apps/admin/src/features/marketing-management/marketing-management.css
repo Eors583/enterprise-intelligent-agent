@@ -1,0 +1,416 @@
+.marketing-page {
+  display: grid;
+  gap: 20px;
+  color: #14213d;
+}
+
+.marketing-hero,
+.marketing-card,
+.marketing-kpis article,
+.target-matrix,
+.governed-form {
+  border: 1px solid #dfe7ef;
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 10px 34px rgb(31 46 69 / 6%);
+}
+
+.marketing-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 24px 28px;
+  background: radial-gradient(circle at 92% 8%, rgb(84 103 255 / 12%), transparent 26%), #fff;
+}
+
+.marketing-hero h1 {
+  margin: 6px 0 8px;
+  font-size: 28px;
+}
+
+.marketing-hero p {
+  max-width: 840px;
+  margin: 0;
+  color: #607087;
+  line-height: 1.7;
+}
+
+.marketing-hero .eyebrow,
+.marketing-code {
+  color: #5260db;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.marketing-kpis {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.marketing-kpis article {
+  display: grid;
+  gap: 4px;
+  padding: 18px 20px;
+}
+
+.marketing-kpis strong {
+  font-size: 26px;
+  color: #283d82;
+}
+
+.marketing-kpis span,
+.marketing-card small {
+  color: #728096;
+}
+
+.marketing-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 5px;
+  border-radius: 14px;
+  background: #edf2f7;
+}
+
+.marketing-tabs button {
+  border: 0;
+  border-radius: 10px;
+  padding: 10px 16px;
+  color: #536078;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.marketing-tabs button.active {
+  color: #253a83;
+  background: #fff;
+  box-shadow: 0 4px 16px rgb(28 45 84 / 10%);
+  font-weight: 700;
+}
+
+.marketing-stack,
+.insight-list,
+.plan-list {
+  display: grid;
+  gap: 16px;
+}
+
+.five-look-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(190px, 1fr));
+  gap: 12px;
+  overflow-x: auto;
+}
+
+.marketing-card {
+  min-width: 0;
+  padding: 18px;
+}
+
+.marketing-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.marketing-card h2 {
+  margin: 3px 0 0;
+  font-size: 17px;
+}
+
+.observation-list,
+.master-list,
+.action-items {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.observation-list li,
+.master-list li,
+.action-items li {
+  display: grid;
+  gap: 7px;
+  padding: 12px;
+  border-radius: 12px;
+  background: #f7f9fc;
+}
+
+.observation-list strong {
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.assertion,
+.ai-candidate,
+.status {
+  display: inline-flex;
+  border-radius: 999px;
+  padding: 4px 8px;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.assertion-fact {
+  color: #08735f;
+  background: #e5f7f1;
+}
+
+.assertion-hypothesis {
+  color: #9a5a08;
+  background: #fff3db;
+}
+
+.assertion-inference,
+.ai-candidate {
+  color: #5546cc;
+  background: #efedff;
+}
+
+.ai-candidate {
+  margin-left: 6px;
+}
+
+.status {
+  color: #40508f;
+  background: #edf1ff;
+}
+
+.status-published {
+  color: #08735f;
+  background: #e5f7f1;
+}
+
+.status-rejected {
+  color: #aa3333;
+  background: #ffebeb;
+}
+
+.review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.review-actions input {
+  min-width: 260px;
+  flex: 1;
+}
+
+.review-actions em {
+  width: 100%;
+  color: #9a5a08;
+  font-size: 12px;
+}
+
+.review-actions button,
+.target-row button {
+  border: 1px solid #cfd8e8;
+  border-radius: 8px;
+  padding: 7px 11px;
+  background: #fff;
+  cursor: pointer;
+}
+
+.review-actions button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.governed-form {
+  padding: 12px;
+}
+
+.governed-form.compact {
+  margin: 14px 0;
+  border-radius: 12px;
+  box-shadow: none;
+}
+
+.form-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  color: #4055c7;
+  background: transparent;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.governed-form form {
+  margin-top: 14px;
+  border-top: 1px solid #edf1f6;
+  padding-top: 14px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.form-grid label {
+  display: grid;
+  gap: 6px;
+  color: #526078;
+  font-size: 12px;
+}
+
+.form-grid label.wide {
+  grid-column: 1 / -1;
+}
+
+.form-grid input,
+.form-grid select,
+.form-grid textarea,
+.review-actions input {
+  min-width: 0;
+  border: 1px solid #cfd8e8;
+  border-radius: 9px;
+  padding: 9px 10px;
+  color: #14213d;
+  background: #fff;
+  font: inherit;
+}
+
+.primary-button,
+.secondary-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 10px;
+  padding: 10px 14px;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.primary-button {
+  border: 0;
+  color: #fff;
+  background: #5062dc;
+}
+
+.secondary-button {
+  border: 1px solid #d3ddeb;
+  color: #3c4a61;
+  background: #fff;
+}
+
+.target-matrix {
+  overflow-x: auto;
+}
+
+.target-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1.4fr 1fr 1.4fr 1fr;
+  min-width: 820px;
+  border-top: 1px solid #edf1f6;
+}
+
+.target-row:first-child {
+  border-top: 0;
+}
+
+.target-row > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 15px;
+}
+
+.target-row > span > span {
+  display: grid;
+  gap: 3px;
+}
+
+.target-row small {
+  color: #7c899c;
+  font-size: 10px;
+}
+
+.target-head {
+  color: #66758c;
+  background: #f7f9fc;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.action-items {
+  margin-top: 14px;
+}
+
+.action-items li {
+  grid-template-columns: 28px 1fr;
+}
+
+.action-items li > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 7px;
+  color: #4858c8;
+  background: #e9edff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.action-items div {
+  display: grid;
+  gap: 4px;
+}
+
+.master-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.marketing-error {
+  border: 1px solid #f2b7b7;
+  border-radius: 12px;
+  padding: 12px 15px;
+  color: #a72e2e;
+  background: #fff0f0;
+}
+
+.marketing-loading,
+.marketing-empty {
+  color: #7c899c;
+}
+
+@media (max-width: 1080px) {
+  .marketing-kpis,
+  .master-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .form-grid {
+    grid-template-columns: repeat(2, minmax(170px, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .marketing-hero {
+    flex-direction: column;
+  }
+
+  .marketing-kpis,
+  .master-grid,
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+}

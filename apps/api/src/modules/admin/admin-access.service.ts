@@ -10,6 +10,8 @@ export interface AdminPrincipal extends TenantPrincipal {
 const DIRECTORY_READ_ROLES = new Set<TenantRole>(['OWNER', 'ADMIN', 'KNOWLEDGE_ADMIN']);
 const DIRECTORY_WRITE_ROLES = new Set<TenantRole>(['OWNER', 'ADMIN']);
 const KNOWLEDGE_WRITE_ROLES = DIRECTORY_READ_ROLES;
+const AUDIT_READ_ROLES = new Set<TenantRole>(['OWNER', 'ADMIN']);
+const AUDIT_EXPORT_ROLES = new Set<TenantRole>(['OWNER']);
 
 @Injectable()
 export class AdminAccessService {
@@ -25,6 +27,14 @@ export class AdminAccessService {
 
   requireKnowledgeWrite(): AdminPrincipal {
     return this.requireRole(KNOWLEDGE_WRITE_ROLES);
+  }
+
+  requireAuditRead(): AdminPrincipal {
+    return this.requireRole(AUDIT_READ_ROLES);
+  }
+
+  requireAuditExport(): AdminPrincipal {
+    return this.requireRole(AUDIT_EXPORT_ROLES);
   }
 
   assertCanAssignRole(actor: AdminPrincipal, targetRole: TenantRole): void {

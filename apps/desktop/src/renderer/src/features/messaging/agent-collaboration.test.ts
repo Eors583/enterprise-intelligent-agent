@@ -24,6 +24,12 @@ describe('listAgentCollaborationCandidates', () => {
       name: '研发智能体',
       status: 'online' as const,
       summary: '负责研发方案',
+      operationalAvailability: {
+        status: 'NOT_READY' as const,
+        evidenceStatus: 'INSUFFICIENT_EVIDENCE' as const,
+        reasonCodes: ['NO_RECENT_SUCCESSFUL_PROVIDER_EVIDENCE'],
+        checkedAt: '2026-07-28T01:00:00.000Z',
+      },
     };
     const result = listAgentCollaborationCandidates([
       member('user-1', { name: '林晓', agent: onlineAgent }),
@@ -33,6 +39,12 @@ describe('listAgentCollaborationCandidates', () => {
           id: '00000000-0000-7000-8000-000000000202',
           name: '离线智能体',
           status: 'offline',
+          operationalAvailability: {
+            status: 'NOT_READY',
+            evidenceStatus: 'INSUFFICIENT_EVIDENCE',
+            reasonCodes: ['AGENT_CONFIGURATION_NOT_ONLINE'],
+            checkedAt: null,
+          },
         },
       }),
       member('user-4', {
@@ -41,6 +53,12 @@ describe('listAgentCollaborationCandidates', () => {
           id: '00000000-0000-7000-8000-000000000203',
           name: '不可联系智能体',
           status: 'online',
+          operationalAvailability: {
+            status: 'AVAILABLE',
+            evidenceStatus: 'VERIFIED',
+            reasonCodes: [],
+            checkedAt: '2026-07-28T01:00:00.000Z',
+          },
         },
       }),
       member('user-5', {
@@ -49,6 +67,12 @@ describe('listAgentCollaborationCandidates', () => {
           id: '00000000-0000-7000-8000-000000000204',
           name: '离职成员智能体',
           status: 'online',
+          operationalAvailability: {
+            status: 'AVAILABLE',
+            evidenceStatus: 'VERIFIED',
+            reasonCodes: [],
+            checkedAt: '2026-07-28T01:00:00.000Z',
+          },
         },
       }),
     ]);
@@ -57,6 +81,7 @@ describe('listAgentCollaborationCandidates', () => {
       {
         id: onlineAgent.id,
         name: onlineAgent.name,
+        kind: 'member',
         ownerUserId: 'user-1',
         ownerName: '林晓',
         summary: onlineAgent.summary,

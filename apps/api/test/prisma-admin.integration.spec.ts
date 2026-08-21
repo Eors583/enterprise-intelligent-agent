@@ -6,7 +6,9 @@ import {
   authSessionResponseSchema,
   bootstrapResponseSchema,
   changePasswordResponseSchema,
+  feishuDirectorySyncRunListSchema,
   feishuOrganizationSyncStatusSchema,
+  issueMemberInvitationResponseSchema,
   knowledgeBaseListResponseSchema,
   knowledgeBaseSchema,
   knowledgeDocumentSchema,
@@ -17,38 +19,69 @@ import request from 'supertest';
 import { validateEnvironment, type EnvironmentVariables } from '../src/config/environment.js';
 import { OutboxPrismaService } from '../src/database/outbox-prisma.service.js';
 import { createTestApp } from '../src/testing/create-test-app.js';
+import { KnowledgeIngestionAvailabilityService } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion-availability.service.js';
 import { FeishuDirectoryClient } from '../src/modules/admin/feishu/feishu-directory.client.js';
+import { FeishuDirectorySyncWorker } from '../src/modules/admin/feishu-directory-sync.worker.js';
 import type { FeishuDirectorySnapshot } from '../src/modules/admin/feishu/feishu-directory.models.js';
 import { KnowledgeIngestionProcessor } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.service.js';
 import { KnowledgeIngestionWorker } from '../src/modules/knowledge-ingestion/application/knowledge-ingestion.worker.js';
 import { PrismaKnowledgeIngestionJobRepository } from '../src/modules/knowledge-ingestion/infrastructure/prisma-knowledge-ingestion-job.repository.js';
+import { cleanupDisposableTenants } from './database-test-harness.js';
 
 const enabled = process.env.RUN_DATABASE_TESTS === 'true';
 const tenantSlug = 'admin-http-integration';
 const ownerEmail = 'owner@admin-http.integration';
 const memberEmail = 'member@admin-http.integration';
+const importedRemoteEmail = 'alice.remote@admin-http.integration';
+const importedLoginEmail = 'alice.login@admin-http.integration';
+const importedChangedEmail = 'alice.changed@admin-http.integration';
 const password = 'IntegrationPassword!2026';
-const importedPassword = '1234567890';
-const changedImportedPassword = 'AliceChangedPassword!2026';
+const legacySharedImportedPassword = '1234567890';
+const activatedImportedPassword = 'AliceActivatedPassword!2026';
 const memberTemporaryPassword = 'MemberTemporaryPassword!2026';
 const changedMemberPassword = 'MemberChangedPassword!2026';
+
+type FeishuSyncCounters = {
+  readonly departments: {
+    readonly created: number;
+    readonly updated: number;
+    readonly archived: number;
+    readonly unchanged: number;
+    readonly failed: number;
+  };
+  readonly members: {
+    readonly created: number;
+    readonly updated: number;
+    readonly deactivated: number;
+    readonly unchanged: number;
+    readonly failed: number;
+  };
+  readonly conflictCount: number;
+};
 
 describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
   const administrator = new PrismaClient();
   const queueClient = createQueueClient();
   let app: INestApplication;
+  let feishuWorker: FeishuDirectorySyncWorker;
   let knowledgeWorker: KnowledgeIngestionWorker;
   let accessToken: string;
   let feishuSnapshot: FeishuDirectorySnapshot;
+  let feishuSyncRequestSequence = 0;
 
   beforeAll(async () => {
     await cleanup();
-    app = await createTestApp();
+    // The database runner intentionally enables a low authentication throttle
+    // for prisma-auth. This suite verifies member lifecycle instead, so replace
+    // only the limiter boundary rather than sharing that mutable test fixture.
+    app = await createTestApp({ loginAttemptLimiter: disabledLoginAttemptLimiter() });
+    feishuWorker = await app.resolve(FeishuDirectorySyncWorker);
     await queueClient.onModuleInit();
     knowledgeWorker = new KnowledgeIngestionWorker(
       createWorkerConfig(),
       new PrismaKnowledgeIngestionJobRepository(queueClient),
       app.get(KnowledgeIngestionProcessor),
+      app.get(KnowledgeIngestionAvailabilityService),
     );
     feishuSnapshot = {
       departments: [
@@ -67,7 +100,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
           openId: 'open-alice',
           unionId: 'union-alice',
           name: '飞书成员 Alice',
-          email: memberEmail,
+          email: importedRemoteEmail,
           active: true,
           departmentExternalIds: ['od-engineering', 'od-platform'],
           primaryDepartmentExternalId: 'od-platform',
@@ -190,7 +223,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    await expect(knowledgeWorker.runOnce()).resolves.toBe(1);
+    await runKnowledgeWorkerUntilClaimed();
     const document = knowledgeDocumentSchema.parse(
       (
         await request(app.getHttpServer())
@@ -203,7 +236,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       status: 'READY',
       ingestionJob: { status: 'SUCCEEDED', attempts: 1 },
     });
-    expect(document.checksum).toMatch(/^[a-f0-9]{64}$/);
+    expect(document.versions[0]?.checksum).toMatch(/^[a-f0-9]{64}$/);
 
     const updatedDocument = await request(app.getHttpServer())
       .patch(`/api/v1/admin/knowledge-bases/${knowledgeBase.id}/documents/${document.id}`)
@@ -220,7 +253,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       status: 'PROCESSING',
       ingestionJob: { status: 'PENDING', attempts: 0 },
     });
-    await expect(knowledgeWorker.runOnce()).resolves.toBe(1);
+    await runKnowledgeWorkerUntilClaimed();
     const updated = knowledgeDocumentSchema.parse(
       (
         await request(app.getHttpServer())
@@ -230,6 +263,10 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       ).body,
     );
     expect(updated.documentVersion).toBe(2);
+    expect(updated.versions.find((version) => version.versionNumber === 2)).toMatchObject({
+      status: 'READY',
+      ingestionJob: { status: 'SUCCEEDED', attempts: 1 },
+    });
 
     await request(app.getHttpServer())
       .delete(
@@ -343,11 +380,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       .expect(200);
     expect(feishuOrganizationSyncStatusSchema.parse(initialFeishuStatus.body).status).toBe('READY');
 
-    await request(app.getHttpServer())
-      .post('/api/v1/admin/integrations/feishu/organization-sync')
-      .set(bearer(accessToken))
-      .expect(201)
-      .expect(({ body }) => expect(body.status).toBe('RUNNING'));
+    await enqueueFeishuSync();
     const firstSync = await waitForFeishuSync();
     expect(firstSync.status).toBe('SUCCEEDED');
     expect(firstSync.run?.departments.created).toBe(2);
@@ -369,7 +402,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     const alice = synchronized.members.find((member) => member.displayName === '飞书成员 Alice');
     expect(platformDepartment?.source).toBe('FEISHU');
     expect(alice?.source).toBe('FEISHU');
-    expect(alice?.email).toBe(memberEmail);
+    expect(alice?.email).toBe(importedRemoteEmail);
     expect(alice?.employment?.orgUnitId).toBe(platformDepartment?.id);
     expect(alice?.id).not.toBe(createdMember.body.id);
 
@@ -388,33 +421,102 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       },
     });
     expect(aliceBinding.user.email).toMatch(/^feishu-[a-f0-9]{32}@external\.invalid$/);
-    expect(aliceBinding.user.email).not.toBe(memberEmail);
-    expect(aliceBinding.user.passwordCredential).toMatchObject({ mustChangePassword: true });
+    expect(aliceBinding.user.email).not.toBe(importedRemoteEmail);
+    expect(aliceBinding.user.passwordCredential).toBeNull();
     expect(aliceBinding.user.employments).toHaveLength(2);
     expect(aliceBinding.user.employments.filter((employment) => employment.isPrimary)).toHaveLength(
       1,
     );
+    const aliceSyntheticEmail = aliceBinding.user.email;
 
-    const importedLogin = await request(app.getHttpServer())
+    await request(app.getHttpServer())
       .post('/api/v1/auth/login')
       .send({
         tenantSlug,
-        email: aliceBinding.user.email,
-        password: importedPassword,
-        sessionLabel: 'Feishu first login',
+        email: aliceSyntheticEmail,
+        password: legacySharedImportedPassword,
+      })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({
+        tenantSlug,
+        email: importedRemoteEmail,
+        password: legacySharedImportedPassword,
+      })
+      .expect(401);
+
+    const locallyBoundAlice = await request(app.getHttpServer())
+      .patch(`/api/v1/admin/members/${alice!.id}`)
+      .set(bearer(accessToken))
+      .send({ email: importedLoginEmail })
+      .expect(200);
+    expect(locallyBoundAlice.body).toMatchObject({
+      id: alice!.id,
+      email: importedLoginEmail,
+      source: 'FEISHU',
+    });
+    const locallyBoundIdentity = await administrator.user.findUniqueOrThrow({
+      where: { id: alice!.id },
+      include: {
+        employments: {
+          where: { status: { not: 'TERMINATED' } },
+          select: { workEmail: true, workEmailOverridden: true },
+        },
+      },
+    });
+    expect(locallyBoundIdentity.email).toBe(importedLoginEmail);
+    expect(locallyBoundIdentity.emailNormalized).toBe(importedLoginEmail);
+    expect(locallyBoundIdentity.employments).toHaveLength(2);
+    expect(
+      locallyBoundIdentity.employments.every(
+        (employment) =>
+          employment.workEmail === importedLoginEmail && employment.workEmailOverridden,
+      ),
+    ).toBe(true);
+
+    const issuedActivation = await request(app.getHttpServer())
+      .post(`/api/v1/admin/members/${alice!.id}/invitation`)
+      .set(bearer(accessToken))
+      .expect(200);
+    const activationInvitation = issueMemberInvitationResponseSchema.parse(issuedActivation.body);
+    expect(activationInvitation.email).toBe(importedLoginEmail);
+    expect(activationInvitation.deliveryTargetEvidence).toBe('ISSUED');
+    expect(activationInvitation.deliveryKind).toBe('MANUAL_FALLBACK');
+    if (activationInvitation.fallback === null) throw new Error('Manual fallback was expected.');
+    const activationUrl = new URL(activationInvitation.fallback.acceptanceUrl);
+    const activationToken = new URLSearchParams(activationUrl.hash.split('?')[1]).get('token');
+    if (activationToken === null) throw new Error('Invitation token was missing.');
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/invitations/accept')
+      .send({
+        token: activationToken,
+        newPassword: activatedImportedPassword,
       })
       .expect(200);
-    const importedSession = authSessionResponseSchema.parse(importedLogin.body);
-    expect(importedSession.account.role).toBe('MEMBER');
-    expect(importedSession.account.passwordChangeRequired).toBe(true);
-    const changedPassword = await request(app.getHttpServer())
-      .post('/api/v1/auth/change-password')
-      .set(bearer(importedSession.accessToken))
-      .send({ currentPassword: importedPassword, newPassword: changedImportedPassword })
-      .expect(200);
-    expect(changePasswordResponseSchema.parse(changedPassword.body)).toMatchObject({
-      account: { passwordChangeRequired: false },
+    await expect(
+      administrator.passwordCredential.findUniqueOrThrow({
+        where: { userId: aliceBinding.user.id },
+        select: { mustChangePassword: true },
+      }),
+    ).resolves.toEqual({
+      mustChangePassword: false,
     });
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: aliceSyntheticEmail, password: activatedImportedPassword })
+      .expect(401);
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedRemoteEmail, password: activatedImportedPassword })
+      .expect(401);
+    const activatedLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedLoginEmail, password: activatedImportedPassword })
+      .expect(200);
+    expect(authSessionResponseSchema.parse(activatedLogin.body).account.email).toBe(
+      importedLoginEmail,
+    );
 
     await request(app.getHttpServer())
       .patch(`/api/v1/admin/org-units/${platformDepartment!.id}`)
@@ -462,10 +564,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       .sort();
     expect([...(bootstrapAlice?.departmentIds ?? [])].sort()).toEqual(synchronizedDepartmentIds);
 
-    await request(app.getHttpServer())
-      .post('/api/v1/admin/integrations/feishu/organization-sync')
-      .set(bearer(accessToken))
-      .expect(201);
+    await enqueueFeishuSync();
     const secondSync = await waitForFeishuSync();
     expect(secondSync.status).toBe('SUCCEEDED');
     expect(secondSync.run?.departments.created).toBe(0);
@@ -478,14 +577,53 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     });
     await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ tenantSlug, email: aliceBinding.user.email, password: importedPassword })
+      .send({ tenantSlug, email: importedRemoteEmail, password: activatedImportedPassword })
       .expect(401);
     const relogin = await request(app.getHttpServer())
       .post('/api/v1/auth/login')
-      .send({ tenantSlug, email: aliceBinding.user.email, password: changedImportedPassword })
+      .send({
+        tenantSlug,
+        email: importedLoginEmail,
+        password: activatedImportedPassword,
+      })
       .expect(200);
-    expect(authSessionResponseSchema.parse(relogin.body).account.passwordChangeRequired).toBe(
-      false,
+    expect(authSessionResponseSchema.parse(relogin.body).account).toMatchObject({
+      email: importedLoginEmail,
+      passwordChangeRequired: false,
+    });
+    const afterOverrideSync = await administrator.user.findUniqueOrThrow({
+      where: { id: alice!.id },
+      include: {
+        employments: {
+          where: { status: { not: 'TERMINATED' } },
+          select: { workEmail: true, workEmailOverridden: true },
+        },
+      },
+    });
+    expect(afterOverrideSync.email).toBe(importedLoginEmail);
+    expect(
+      afterOverrideSync.employments.every(
+        (employment) =>
+          employment.workEmail === importedLoginEmail && employment.workEmailOverridden,
+      ),
+    ).toBe(true);
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/admin/members/${alice!.id}`)
+      .set(bearer(accessToken))
+      .send({ email: importedChangedEmail })
+      .expect(200)
+      .expect(({ body }) => expect(body.email).toBe(importedChangedEmail));
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedLoginEmail, password: activatedImportedPassword })
+      .expect(401);
+    const changedEmailLogin = await request(app.getHttpServer())
+      .post('/api/v1/auth/login')
+      .send({ tenantSlug, email: importedChangedEmail, password: activatedImportedPassword })
+      .expect(200);
+    expect(authSessionResponseSchema.parse(changedEmailLogin.body).account.email).toBe(
+      importedChangedEmail,
     );
 
     feishuSnapshot = {
@@ -499,7 +637,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
           openId: 'open-alice',
           unionId: 'union-alice',
           name: '飞书成员 Alice',
-          email: memberEmail,
+          email: importedRemoteEmail,
           active: true,
           departmentExternalIds: ['od-engineering'],
           primaryDepartmentExternalId: 'od-engineering',
@@ -508,14 +646,27 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
         },
       ],
     };
-    await request(app.getHttpServer())
-      .post('/api/v1/admin/integrations/feishu/organization-sync')
-      .set(bearer(accessToken))
-      .expect(201);
+    await enqueueFeishuSync();
     const pendingRemoval = await waitForFeishuSync();
     expect(pendingRemoval.status).toBe('SUCCEEDED');
     expect(pendingRemoval.run?.departments.archived).toBe(0);
     expect(pendingRemoval.run?.members.deactivated).toBe(0);
+    const afterDepartmentChangeSync = await administrator.user.findUniqueOrThrow({
+      where: { id: alice!.id },
+      include: {
+        employments: {
+          where: { status: 'ACTIVE' },
+          select: { workEmail: true, workEmailOverridden: true },
+        },
+      },
+    });
+    expect(afterDepartmentChangeSync.email).toBe(importedChangedEmail);
+    expect(
+      afterDepartmentChangeSync.employments.every(
+        (employment) =>
+          employment.workEmail === importedChangedEmail && employment.workEmailOverridden,
+      ),
+    ).toBe(true);
 
     const confirmedMissingSince = new Date(Date.now() - 2 * 60 * 60_000);
     await administrator.directoryEmploymentBinding.updateMany({
@@ -531,10 +682,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
       data: { missingSinceAt: confirmedMissingSince },
     });
 
-    await request(app.getHttpServer())
-      .post('/api/v1/admin/integrations/feishu/organization-sync')
-      .set(bearer(accessToken))
-      .expect(201);
+    await enqueueFeishuSync();
     const confirmedRemoval = await waitForFeishuSync();
     expect(confirmedRemoval.status).toBe('SUCCEEDED');
     expect(confirmedRemoval.run?.departments.archived).toBe(1);
@@ -570,10 +718,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     expect(feishuOrganizationSyncStatusSchema.parse(legacyFingerprintStatus.body).status).toBe(
       'SUCCEEDED',
     );
-    await request(app.getHttpServer())
-      .post('/api/v1/admin/integrations/feishu/organization-sync')
-      .set(bearer(accessToken))
-      .expect(201);
+    await enqueueFeishuSync();
     expect((await waitForFeishuSync()).status).toBe('SUCCEEDED');
     await administrator.directoryIntegration.update({
       where: { id: integration.id },
@@ -600,10 +745,7 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
           : user,
       ),
     };
-    await request(app.getHttpServer())
-      .post('/api/v1/admin/integrations/feishu/organization-sync')
-      .set(bearer(accessToken))
-      .expect(201);
+    await enqueueFeishuSync();
     const ownershipConflict = await waitForFeishuSync();
     expect(ownershipConflict.status).toBe('FAILED');
     expect(ownershipConflict.run?.errorMessage).toBeTruthy();
@@ -621,17 +763,54 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     return { Authorization: `Bearer ${token}` };
   }
 
+  async function enqueueFeishuSync(): Promise<void> {
+    const preview = await request(app.getHttpServer())
+      .post('/api/v1/admin/integrations/feishu/organization-sync/preview')
+      .set(bearer(accessToken))
+      .expect(201);
+    await request(app.getHttpServer())
+      .post('/api/v1/admin/integrations/feishu/organization-sync/runs')
+      .set(bearer(accessToken))
+      .send({
+        previewId: String(preview.body.id),
+        idempotencyKey: `admin-integration-feishu-sync-${++feishuSyncRequestSequence}`,
+      })
+      .expect(201)
+      .expect(({ body }) => expect(['QUEUED', 'RUNNING']).toContain(body.status));
+    await feishuWorker.runOnce();
+  }
+
   async function waitForFeishuSync() {
+    let latestRun: unknown;
     for (let attempt = 0; attempt < 200; attempt += 1) {
       const response = await request(app.getHttpServer())
-        .get('/api/v1/admin/integrations/feishu/organization-sync')
+        .get('/api/v1/admin/integrations/feishu/organization-sync/runs')
         .set(bearer(accessToken))
         .expect(200);
-      const status = feishuOrganizationSyncStatusSchema.parse(response.body);
-      if (status.status !== 'RUNNING') return status;
+      const [run] = feishuDirectorySyncRunListSchema.parse(response.body).items;
+      latestRun = run;
+      if (run !== undefined && run.status !== 'QUEUED' && run.status !== 'RUNNING') {
+        const summary = (run.summary ?? {}) as Partial<FeishuSyncCounters>;
+        return {
+          status: run.status,
+          run: {
+            departments:
+              summary.departments ??
+              ({ created: 0, updated: 0, archived: 0, unchanged: 0, failed: 0 } as const),
+            members:
+              summary.members ??
+              ({ created: 0, updated: 0, deactivated: 0, unchanged: 0, failed: 0 } as const),
+            conflictCount: summary.conflictCount ?? 0,
+            errorMessage: run.lastErrorCode,
+          },
+        };
+      }
+      await feishuWorker.runOnce();
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
-    throw new Error('Timed out waiting for Feishu directory synchronization.');
+    throw new Error(
+      `Timed out waiting for Feishu directory synchronization: ${JSON.stringify(latestRun)}`,
+    );
   }
 
   async function cleanup(): Promise<void> {
@@ -641,38 +820,15 @@ describe.runIf(enabled)('PostgreSQL admin HTTP integration', () => {
     });
     if (!tenant) return;
     const tenantId = tenant.id;
-    await administrator.directoryEmploymentBinding.deleteMany({ where: { tenantId } });
-    await administrator.directoryOrgUnitBinding.deleteMany({ where: { tenantId } });
-    await administrator.directoryUserBinding.deleteMany({ where: { tenantId } });
-    await administrator.directoryIntegration.deleteMany({ where: { tenantId } });
-    await administrator.authSession.deleteMany({ where: { tenantId } });
-    await administrator.agentRun.deleteMany({ where: { tenantId } });
-    await administrator.outboxEvent.deleteMany({ where: { tenantId } });
-    await administrator.message.deleteMany({ where: { tenantId } });
-    await administrator.conversationParticipant.deleteMany({ where: { tenantId } });
-    await administrator.conversation.deleteMany({ where: { tenantId } });
-    await administrator.agentInstance.deleteMany({ where: { tenantId } });
-    await administrator.agentVersion.deleteMany({ where: { tenantId } });
-    await administrator.agentTemplate.deleteMany({ where: { tenantId } });
-    await administrator.knowledgeIngestionJob.deleteMany({ where: { tenantId } });
-    await administrator.knowledgeChunk.deleteMany({ where: { tenantId } });
-    await administrator.knowledgeDocument.updateMany({
-      where: { tenantId },
-      data: { currentVersionId: null },
-    });
-    await administrator.knowledgeDocumentVersion.deleteMany({ where: { tenantId } });
-    await administrator.knowledgeDocument.deleteMany({ where: { tenantId } });
-    await administrator.knowledgeBaseOrgUnit.deleteMany({ where: { tenantId } });
-    await administrator.knowledgeBase.deleteMany({ where: { tenantId } });
-    await administrator.auditEvent.deleteMany({ where: { tenantId } });
-    await administrator.managerRelation.deleteMany({ where: { tenantId } });
-    await administrator.employment.deleteMany({ where: { tenantId } });
-    await administrator.position.deleteMany({ where: { tenantId } });
-    await administrator.passwordCredential.deleteMany({ where: { tenantId } });
-    await administrator.orgUnit.deleteMany({ where: { tenantId } });
-    await administrator.organization.deleteMany({ where: { tenantId } });
-    await administrator.user.deleteMany({ where: { tenantId } });
-    await administrator.tenant.delete({ where: { id: tenantId } });
+    await cleanupDisposableTenants(administrator, [tenantId]);
+  }
+
+  async function runKnowledgeWorkerUntilClaimed(): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if ((await knowledgeWorker.runOnce()) > 0) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error('The knowledge ingestion job was not visible to the worker connection.');
   }
 });
 
@@ -694,4 +850,12 @@ function createWorkerConfig(): ConfigService<EnvironmentVariables, true> {
     KNOWLEDGE_INGESTION_MAX_ATTEMPTS: '1',
   });
   return new ConfigService<EnvironmentVariables, true>(values);
+}
+
+function disabledLoginAttemptLimiter() {
+  return {
+    createContext: () => ({ accountKeyHash: 'admin-integration-disabled', networkKeyHash: null }),
+    beginAttempt: () => Promise.resolve(),
+    clearSuccessfulAttempt: () => Promise.resolve(),
+  };
 }

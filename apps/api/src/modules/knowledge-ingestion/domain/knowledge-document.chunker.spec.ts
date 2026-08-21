@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { chunkKnowledgeDocument, estimateTokenCount } from './knowledge-document.chunker.js';
+import {
+  chunkKnowledgeDocument,
+  chunkKnowledgeDocumentWithParents,
+  estimateTokenCount,
+} from './knowledge-document.chunker.js';
 
 describe('chunkKnowledgeDocument', () => {
   it.each(['TEXT', 'MARKDOWN'] as const)(
@@ -88,6 +92,31 @@ describe('chunkKnowledgeDocument', () => {
     ).toEqual(unix);
     expect(unix[0]?.contentHash).toMatch(/^[a-f0-9]{64}$/u);
     expect(unix[0]?.tokenCount).toBe(estimateTokenCount(unix[0]?.content ?? '', 2));
+  });
+
+  it('keeps explicit parent lineage while precise child chunks split and overlap', () => {
+    const hierarchy = chunkKnowledgeDocumentWithParents(
+      {
+        content: `# 制度\n${'年假申请必须提前提交。'.repeat(20)}\n## 审批\n直属负责人审批。`,
+        sourceType: 'MARKDOWN',
+      },
+      { targetTokens: 40, overlapTokens: 8, charactersPerToken: 1 },
+    );
+
+    expect(
+      hierarchy.parents.map(({ parentIndex, headingPath }) => ({ parentIndex, headingPath })),
+    ).toEqual([
+      { parentIndex: 0, headingPath: ['制度'] },
+      { parentIndex: 1, headingPath: ['制度', '审批'] },
+    ]);
+    expect(hierarchy.chunks.length).toBeGreaterThan(hierarchy.parents.length);
+    expect(hierarchy.chunks.filter(({ parentIndex }) => parentIndex === 0).length).toBeGreaterThan(
+      1,
+    );
+    expect(hierarchy.chunks.at(-1)).toMatchObject({
+      parentIndex: 1,
+      headingPath: ['制度', '审批'],
+    });
   });
 
   it('rejects invalid sizing options that could make chunking non-progressing', () => {

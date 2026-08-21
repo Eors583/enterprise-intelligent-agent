@@ -1,14 +1,45 @@
-import type { CreateConversationRequest } from '@enterprise/contracts';
-import { useEffect, useMemo, useState } from 'react';
+import type {
+  Conversation,
+  CreateConversationRequest,
+  RoleAssignment,
+} from '@enterprise/contracts';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { DesktopRuntimeInfo } from '../../../../shared/desktop-api';
 import { ApiClientError } from '../../shared/api/client';
+import type { AccountMenuDestination } from '../auth/AccountSwitcher';
 import { ConversationWorkspace, MessagingSidebar } from '../messaging/MessagingWorkspace';
-import { listAgentCollaborationCandidates } from '../messaging/agent-collaboration';
+import {
+  listAgentCollaborationCandidates,
+  type AgentCollaborationCandidate,
+} from '../messaging/agent-collaboration';
 import { useConversations, useCreateDirectConversation } from '../messaging/hooks';
+import { RoleWorkspace } from '../roles/RoleWorkspace';
+import { useMyRoleAssignments } from '../roles/hooks';
+import { defaultRoleAssignmentId, roleAgentAvailability } from '../roles/role-assignment-view';
+import { WorkbenchTaskWorkspace } from '../workbench/WorkbenchWorkspace';
+import { useWorkbenchObjectives, useWorkbenchTasks } from '../workbench/hooks';
 import type { BootstrapPayload, Department, Member } from './bootstrap';
+import { EmployeeWorkbenchOverview } from './EmployeeWorkbenchOverview';
+import {
+  buildEmployeeNavigation,
+  employeeSectionForLegacyId,
+  initialEmployeeSection,
+  type EmployeeSection,
+} from './employee-navigation';
+import {
+  AboutWorkspace,
+  AccountSecurityWorkspace,
+  MyOverviewWorkspace,
+  type MySection,
+} from './MyWorkspace';
+import { NewConversationDialog } from './NewConversationDialog';
+import { PersonalManualWorkspace } from '../personal-manual/PersonalManualWorkspace';
 
 interface DirectoryWorkspaceProps {
   payload: BootstrapPayload;
+  navigationRequest?: { destination: AccountMenuDestination; requestId: number } | null | undefined;
+  onOpenAccountMenu?: (() => void) | undefined;
+  onChangePassword?: (() => void) | undefined;
 }
 
 type ContactKind = 'human' | 'agent';
@@ -16,23 +47,49 @@ type ContactKind = 'human' | 'agent';
 interface ContactOperation {
   kind: ContactKind;
   memberId: string;
+  assignmentId?: string | undefined;
   request: CreateConversationRequest;
   status: 'pending' | 'error';
   message?: string | undefined;
 }
 
-const DIRECTORY_IDS = new Set(['directory', 'contacts', 'organization', 'org']);
-const MESSAGE_IDS = new Set(['messages', 'messaging', 'conversations', 'chat']);
+type UnifiedSearchResult =
+  | {
+      readonly kind: 'member';
+      readonly id: string;
+      readonly label: string;
+      readonly detail: string;
+      readonly member: Member;
+    }
+  | {
+      readonly kind: 'agent';
+      readonly id: string;
+      readonly label: string;
+      readonly detail: string;
+      readonly agentId: string;
+      readonly ownerUserId: string;
+    }
+  | {
+      readonly kind: 'conversation';
+      readonly id: string;
+      readonly label: string;
+      readonly detail: string;
+      readonly conversationId: string;
+    };
 
-export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.JSX.Element {
-  const directoryNavigation =
-    payload.navigation.find((item) => DIRECTORY_IDS.has(item.id.toLowerCase())) ??
-    payload.navigation[0];
-  const messageNavigation = payload.navigation.find((item) =>
-    MESSAGE_IDS.has(item.id.toLowerCase()),
+export function DirectoryWorkspace({
+  payload,
+  navigationRequest,
+  onOpenAccountMenu = () => undefined,
+  onChangePassword = () => undefined,
+}: DirectoryWorkspaceProps): React.JSX.Element {
+  const employeeNavigation = useMemo(
+    () => buildEmployeeNavigation(payload.navigation),
+    [payload.navigation],
   );
-
-  const [activeNavigationId, setActiveNavigationId] = useState(directoryNavigation?.id ?? '');
+  const [activeNavigationId, setActiveNavigationId] = useState<EmployeeSection>(() =>
+    initialEmployeeSection(globalThis.location?.hash ?? '', employeeNavigation),
+  );
   const [selectedMemberId, setSelectedMemberId] = useState<string | null>(
     payload.members.find((member) => member.status === 'active')?.id ??
       payload.members[0]?.id ??
@@ -40,40 +97,146 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
   );
   const [contactOperation, setContactOperation] = useState<ContactOperation | null>(null);
   const [selectedConversationId, setSelectedConversationId] = useState<string | null>(null);
+  const [preferredResponseTarget, setPreferredResponseTarget] = useState<{
+    conversationId: string;
+    kind: ContactKind;
+  } | null>(null);
+  const [selectedRoleAssignmentId, setSelectedRoleAssignmentId] = useState<string | null>(null);
+  const [selectedObjectiveId, setSelectedObjectiveId] = useState<string | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [mySection, setMySection] = useState<MySection>('overview');
+  const [newConversationKind, setNewConversationKind] = useState<'all' | 'agent' | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchFocused, setSearchFocused] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const runtimeInfo = useRuntimeInfo();
-  const isDirectoryActive = activeNavigationId === directoryNavigation?.id;
-  const isMessagesActive = activeNavigationId === messageNavigation?.id;
-  const conversations = useConversations(messageNavigation !== undefined);
+  const isDirectoryActive = activeNavigationId === 'directory';
+  const isMessagesActive = activeNavigationId === 'messages';
+  const isWorkbenchActive = activeNavigationId === 'workbench';
+  const isMyActive = activeNavigationId === 'my';
+  const canUseMessages = employeeNavigation.some((item) => item.id === 'messages');
+  const conversations = useConversations(canUseMessages);
+  const roleAssignments = useMyRoleAssignments(isMyActive);
+  const workbenchObjectives = useWorkbenchObjectives(isWorkbenchActive);
+  const workbenchTasks = useWorkbenchTasks(isWorkbenchActive);
   const createConversation = useCreateDirectConversation();
+
+  useEffect(() => {
+    if (!navigationRequest) return;
+    if (!employeeNavigation.some((item) => item.id === navigationRequest.destination)) return;
+    setActiveNavigationId(navigationRequest.destination);
+    if (navigationRequest.destination === 'my') setMySection('overview');
+  }, [employeeNavigation, navigationRequest]);
 
   const departmentById = useMemo(
     () => new Map(payload.departments.map((department) => [department.id, department])),
     [payload.departments],
   );
   const collaborationAgents = useMemo(
-    () => listAgentCollaborationCandidates(payload.members),
-    [payload.members],
+    () => listAgentCollaborationCandidates(payload.members, payload.departmentAgents),
+    [payload.departmentAgents, payload.members],
   );
   const selectedMember =
     payload.members.find((member) => member.id === selectedMemberId) ?? payload.members[0] ?? null;
   const selectedConversation =
     conversations.data?.find((conversation) => conversation.id === selectedConversationId) ?? null;
+  const selectedRoleAssignment =
+    roleAssignments.data?.find((assignment) => assignment.id === selectedRoleAssignmentId) ?? null;
+  const selectedObjective =
+    workbenchObjectives.data?.find((objective) => objective.id === selectedObjectiveId) ?? null;
+  const selectedTask = workbenchTasks.data?.find((task) => task.id === selectedTaskId) ?? null;
+  const searchResults = useMemo(
+    () => unifiedSearchResults(searchQuery, payload.members, conversations.data ?? []),
+    [conversations.data, payload.members, searchQuery],
+  );
+
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+        setSearchFocused(true);
+      }
+      if (event.key === 'Escape' && document.activeElement === searchInputRef.current) {
+        setSearchQuery('');
+        setSearchFocused(false);
+        searchInputRef.current?.blur();
+      }
+    };
+    window.addEventListener('keydown', focusSearch);
+    return () => window.removeEventListener('keydown', focusSearch);
+  }, []);
+
+  useEffect(() => {
+    const followCompatibleHash = (): void => {
+      const section = employeeSectionForLegacyId(window.location?.hash ?? '');
+      if (section && employeeNavigation.some((item) => item.id === section)) {
+        setActiveNavigationId(section);
+      }
+    };
+    window.addEventListener('hashchange', followCompatibleHash);
+    return () => window.removeEventListener('hashchange', followCompatibleHash);
+  }, [employeeNavigation]);
+
+  useEffect(() => {
+    if (!employeeNavigation.some((item) => item.id === activeNavigationId)) {
+      setActiveNavigationId(initialEmployeeSection('', employeeNavigation));
+      return;
+    }
+    if (!window.location || !window.history) return;
+    const nextHash = `#${activeNavigationId}`;
+    if (window.location.hash !== nextHash) {
+      window.history.replaceState(null, '', nextHash);
+    }
+  }, [activeNavigationId, employeeNavigation]);
 
   useEffect(() => {
     if (!isMessagesActive || !conversations.data) return;
+    if (contactOperation?.status === 'pending' || contactOperation?.status === 'error') return;
     if (!conversations.data.some((conversation) => conversation.id === selectedConversationId)) {
       setSelectedConversationId(conversations.data[0]?.id ?? null);
     }
-  }, [conversations.data, isMessagesActive, selectedConversationId]);
+  }, [contactOperation?.status, conversations.data, isMessagesActive, selectedConversationId]);
+
+  useEffect(() => {
+    if (!roleAssignments.data) return;
+    if (
+      selectedRoleAssignmentId === null ||
+      !roleAssignments.data.some((assignment) => assignment.id === selectedRoleAssignmentId)
+    ) {
+      setSelectedRoleAssignmentId(defaultRoleAssignmentId(roleAssignments.data));
+    }
+  }, [roleAssignments.data, selectedRoleAssignmentId]);
+
+  useEffect(() => {
+    if (!workbenchObjectives.data) return;
+    if (
+      selectedObjectiveId === null ||
+      !workbenchObjectives.data.some((objective) => objective.id === selectedObjectiveId)
+    ) {
+      setSelectedObjectiveId(
+        workbenchObjectives.data.find((objective) => objective.parentObjectiveId === null)?.id ??
+          workbenchObjectives.data[0]?.id ??
+          null,
+      );
+    }
+  }, [selectedObjectiveId, workbenchObjectives.data]);
+
+  useEffect(() => {
+    if (!workbenchTasks.data) return;
+    if (selectedTaskId === null) return;
+    if (workbenchTasks.data.some((task) => task.id === selectedTaskId)) return;
+    setSelectedTaskId(null);
+  }, [selectedTaskId, workbenchTasks.data]);
 
   function selectMember(memberId: string): void {
     setSelectedMemberId(memberId);
     setContactOperation(null);
-    if (directoryNavigation) setActiveNavigationId(directoryNavigation.id);
+    setActiveNavigationId('directory');
   }
 
   function runContactOperation(operation: ContactOperation): void {
-    if (!messageNavigation) {
+    if (!canUseMessages) {
       setContactOperation({
         ...operation,
         status: 'error',
@@ -82,12 +245,28 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
       return;
     }
 
+    const existing = findDirectConversation(conversations.data ?? [], operation.request);
+    if (existing !== null) {
+      setSelectedConversationId(existing.id);
+      setPreferredResponseTarget({ conversationId: existing.id, kind: operation.kind });
+      setActiveNavigationId('messages');
+      setContactOperation(null);
+      setNewConversationKind(null);
+      return;
+    }
+
     setContactOperation({ ...operation, status: 'pending', message: undefined });
+    setSelectedConversationId(null);
+    setPreferredResponseTarget(null);
+    setActiveNavigationId('messages');
+    setNewConversationKind(null);
     createConversation.mutate(operation.request, {
       onSuccess: (conversation) => {
         setSelectedConversationId(conversation.id);
-        setActiveNavigationId(messageNavigation.id);
+        setPreferredResponseTarget({ conversationId: conversation.id, kind: operation.kind });
+        setActiveNavigationId('messages');
         setContactOperation(null);
+        setNewConversationKind(null);
       },
       onError: (error) => {
         setContactOperation({
@@ -100,7 +279,15 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
   }
 
   function contactMember(member: Member, kind: ContactKind): void {
-    const target: CreateConversationRequest['target'] =
+    if (
+      kind === 'agent' &&
+      (member.agent === null ||
+        !member.capabilities.canContactAgent ||
+        member.agent.status !== 'online')
+    ) {
+      return;
+    }
+    const target: Extract<CreateConversationRequest, { type: 'direct' }>['target'] =
       kind === 'human'
         ? { type: 'human', userId: member.id }
         : { type: 'agent', agentId: member.agent!.id };
@@ -112,11 +299,85 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
     });
   }
 
+  function contactStandaloneAgent(agent: AgentCollaborationCandidate): void {
+    runContactOperation({
+      memberId: agent.ownerUserId ?? agent.departmentId ?? agent.id,
+      kind: 'agent',
+      request: { type: 'direct', target: { type: 'agent', agentId: agent.id } },
+      status: 'pending',
+    });
+  }
+
+  function createGroupConversation(
+    title: string,
+    memberUserIds: readonly string[],
+    agentIds: readonly string[],
+  ): void {
+    createConversation.mutate(
+      { type: 'group', title, memberUserIds: [...memberUserIds], agentIds: [...agentIds] },
+      {
+        onSuccess: (conversation) => {
+          setSelectedConversationId(conversation.id);
+          setPreferredResponseTarget(null);
+          setActiveNavigationId('messages');
+          setContactOperation(null);
+          setNewConversationKind(null);
+        },
+        onError: (error) => {
+          setContactOperation({
+            kind: 'human',
+            memberId: memberUserIds[0] ?? payload.currentUser.id,
+            request: {
+              type: 'group',
+              title,
+              memberUserIds: [...memberUserIds],
+              agentIds: [...agentIds],
+            },
+            status: 'error',
+            message: readableContactError(error),
+          });
+        },
+      },
+    );
+  }
+
+  function openRoleAgent(assignment: RoleAssignment): void {
+    if (!roleAgentAvailability(assignment).available) return;
+    runContactOperation({
+      assignmentId: assignment.id,
+      memberId: assignment.assignee.id,
+      kind: 'agent',
+      request: { type: 'direct', target: { type: 'agent', agentId: assignment.agent.id } },
+      status: 'pending',
+    });
+  }
+
+  function selectSearchResult(result: UnifiedSearchResult): void {
+    setSearchQuery('');
+    setSearchFocused(false);
+    searchInputRef.current?.blur();
+    if (result.kind === 'member') {
+      selectMember(result.member.id);
+      return;
+    }
+    if (result.kind === 'conversation') {
+      setSelectedConversationId(result.conversationId);
+      if (canUseMessages) setActiveNavigationId('messages');
+      return;
+    }
+    runContactOperation({
+      memberId: result.ownerUserId,
+      kind: 'agent',
+      request: { type: 'direct', target: { type: 'agent', agentId: result.agentId } },
+      status: 'pending',
+    });
+  }
+
   async function startAgentCollaboration(
     agentIds: [string, string],
     turnLimit: number,
   ): Promise<void> {
-    if (!messageNavigation) {
+    if (!canUseMessages) {
       throw new Error('当前账号未获得消息模块权限，无法创建智能体协作。');
     }
     const conversation = await createConversation.mutateAsync({
@@ -124,7 +385,7 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
       target: { type: 'agent_pair', agentIds, turnLimit },
     });
     setSelectedConversationId(conversation.id);
-    setActiveNavigationId(messageNavigation.id);
+    setActiveNavigationId('messages');
   }
 
   return (
@@ -137,60 +398,61 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
             <small>{payload.tenant.name}</small>
           </div>
         </div>
-        <label className="design-global-search">
-          <span aria-hidden="true">⌕</span>
-          <input type="search" placeholder="搜索成员、智能体或会话" />
-          <kbd>Ctrl K</kbd>
-        </label>
-        <div className="design-titlebar-actions">
-          <span className="design-security-state">
-            <i /> 安全连接
-          </span>
-          <button type="button" className="design-icon-button" aria-label="通知">
-            ◌
-          </button>
-          <span className="design-current-user" title={payload.currentUser.name}>
-            {initials(payload.currentUser.name)}
-          </span>
-        </div>
+        <span />
+        <div className="design-titlebar-actions" />
       </header>
 
       <div className="desktop-layout">
-        <aside className="primary-rail" aria-label="主导航">
-          <div className="rail-brand" aria-label="企业 AI 协同">
-            E
-          </div>
-          <div className="tenant-chip" title={payload.tenant.name}>
-            {initials(payload.tenant.name)}
-          </div>
-          <nav className="rail-navigation">
-            {payload.navigation.map((item) => (
-              <button
-                type="button"
-                key={item.id}
-                className={item.id === activeNavigationId ? 'rail-item active' : 'rail-item'}
-                aria-current={item.id === activeNavigationId ? 'page' : undefined}
-                aria-label={item.label}
-                title={item.label}
-                onClick={() => setActiveNavigationId(item.id)}
+        <div className={`desktop-search-dock${isMessagesActive ? ' messaging-hidden' : ''}`}>
+          <label className="design-global-search">
+            <span aria-hidden="true">⌕</span>
+            <input
+              ref={searchInputRef}
+              type="search"
+              value={searchQuery}
+              placeholder="搜索成员、智能体或会话"
+              aria-label="统一搜索"
+              aria-expanded={searchFocused && searchQuery.trim().length > 0}
+              aria-controls="desktop-unified-search-results"
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
+              onChange={(event) => setSearchQuery(event.target.value)}
+            />
+            <kbd>Ctrl K</kbd>
+            {searchFocused && searchQuery.trim().length > 0 ? (
+              <div
+                id="desktop-unified-search-results"
+                className="desktop-unified-search-results"
+                role="listbox"
+                aria-label="搜索结果"
+                onMouseDown={(event) => event.preventDefault()}
               >
-                <span className="rail-glyph" aria-hidden="true">
-                  {navigationGlyph(item.id, item.label)}
-                </span>
-                <small>{item.label}</small>
-              </button>
-            ))}
-          </nav>
-          <div
-            className="rail-user"
-            title={`${payload.currentUser.name} · ${payload.currentUser.title ?? '成员'}`}
-          >
-            {initials(payload.currentUser.name)}
-            <span className="presence-dot" aria-label="在线" />
-          </div>
-        </aside>
-
-        {isDirectoryActive || isMessagesActive ? (
+                {searchResults.length === 0 ? (
+                  <p>没有找到可访问的成员、智能体或会话。</p>
+                ) : (
+                  searchResults.map((result) => (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected="false"
+                      key={`${result.kind}:${result.id}`}
+                      onClick={() => selectSearchResult(result)}
+                    >
+                      <span className={`unified-search-kind ${result.kind}`}>
+                        {result.kind === 'member' ? '人' : result.kind === 'agent' ? 'AI' : '聊'}
+                      </span>
+                      <span>
+                        <strong>{result.label}</strong>
+                        <small>{result.detail}</small>
+                      </span>
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+          </label>
+        </div>
+        <>
           <MessagingSidebar
             organizationPanel={
               <OrganizationTreePanel
@@ -209,106 +471,184 @@ export function DirectoryWorkspace({ payload }: DirectoryWorkspaceProps): React.
             currentUserId={payload.currentUser.id}
             onSelect={(conversationId) => {
               setSelectedConversationId(conversationId);
-              if (messageNavigation) setActiveNavigationId(messageNavigation.id);
+              setPreferredResponseTarget(null);
+              setActiveNavigationId('messages');
             }}
             onRetry={() => conversations.refetch()}
+            onStartConversation={() => setNewConversationKind('all')}
+            enableAgentPairCollaboration={false}
             onCreateAgentPair={startAgentCollaboration}
           />
-        ) : (
-          <aside className="directory-sidebar module-sidebar">
-            <p className="eyebrow">企业工作台</p>
-            <h2>{payload.navigation.find((item) => item.id === activeNavigationId)?.label}</h2>
-            <p>该模块尚未接入当前桌面里程碑。</p>
-          </aside>
-        )}
 
-        <main className={isMessagesActive ? 'workspace messaging-active' : 'workspace'}>
-          <section className="assistant-launcher" aria-label="智能体快捷入口">
-            <div className="assistant-launcher-heading">
-              <span>✣</span>
-              <strong>智能体</strong>
-              <small>选择助手开始对话</small>
-            </div>
-            <div className="assistant-launcher-list">
-              {collaborationAgents.map((agent, index) => (
-                <button
-                  type="button"
-                  className="assistant-launcher-card"
-                  key={agent.id}
-                  disabled={createConversation.isPending}
-                  onClick={() =>
-                    runContactOperation({
-                      memberId: agent.ownerUserId,
-                      kind: 'agent',
-                      request: { type: 'direct', target: { type: 'agent', agentId: agent.id } },
-                      status: 'pending',
-                    })
+          <main
+            className={
+              isMessagesActive
+                ? 'workspace messaging-active'
+                : isWorkbenchActive
+                  ? 'workspace workbench-active'
+                  : isMyActive
+                    ? 'workspace my-active'
+                    : 'workspace'
+            }
+          >
+            <header className="workspace-topbar">
+              <div>
+                <strong>{payload.tenant.name}</strong>
+                <span className="topbar-divider" />
+                <span>
+                  {isWorkbenchActive
+                    ? '工作台'
+                    : isDirectoryActive
+                      ? '企业通讯录'
+                      : isMessagesActive
+                        ? '消息'
+                        : '我的'}
+                </span>
+              </div>
+            </header>
+
+            {isWorkbenchActive ? (
+              selectedTask ? (
+                <WorkbenchTaskWorkspace
+                  task={selectedTask}
+                  objective={
+                    workbenchObjectives.data?.find(
+                      (objective) => objective.id === selectedTask.objectiveId,
+                    ) ?? selectedObjective
                   }
-                >
-                  <span className={`assistant-launcher-icon ${agentTone(index)}`}>AI</span>
-                  <span>
-                    <strong>{agent.name}</strong>
-                    <small>{agent.summary ?? `${agent.ownerName} 的个人智能体`}</small>
-                  </span>
-                </button>
-              ))}
-              {!collaborationAgents.length && (
-                <p className="assistant-launcher-empty">暂无可联系的智能体</p>
-              )}
-            </div>
-          </section>
-          <header className="workspace-topbar">
-            <div>
-              <strong>{payload.tenant.name}</strong>
-              <span className="topbar-divider" />
-              <span>{isDirectoryActive ? '企业通讯录' : isMessagesActive ? '消息' : '工作台'}</span>
-            </div>
-            <div className="runtime-info" title="客户端运行信息">
-              <span className="secure-dot" />
-              桌面安全模式
-              {runtimeInfo &&
-                ` · v${runtimeInfo.appVersion} · ${platformLabel(runtimeInfo.platform)}`}
-            </div>
-          </header>
-
-          {isDirectoryActive ? (
-            selectedMember ? (
-              <MemberWorkspace
-                member={selectedMember}
-                currentUserId={payload.currentUser.id}
-                departments={selectedMember.departmentIds
-                  .map((departmentId) => departmentById.get(departmentId))
-                  .filter((department): department is Department => department !== undefined)}
-                contactOperation={
-                  contactOperation?.memberId === selectedMember.id ? contactOperation : null
-                }
-                onContact={(kind) => contactMember(selectedMember, kind)}
-                onRetryContact={() => {
-                  if (contactOperation) runContactOperation(contactOperation);
-                }}
-              />
+                  isLoading={workbenchObjectives.isPending || workbenchTasks.isPending}
+                />
+              ) : (
+                <EmployeeWorkbenchOverview
+                  userName={payload.currentUser.name}
+                  objectives={workbenchObjectives.data ?? []}
+                  tasks={workbenchTasks.data ?? []}
+                  loading={workbenchObjectives.isPending || workbenchTasks.isPending}
+                  onSelectTask={setSelectedTaskId}
+                  onAskAgent={() => setNewConversationKind('agent')}
+                />
+              )
+            ) : isDirectoryActive ? (
+              selectedMember ? (
+                <MemberWorkspace
+                  member={selectedMember}
+                  currentUserId={payload.currentUser.id}
+                  departments={selectedMember.departmentIds
+                    .map((departmentId) => departmentById.get(departmentId))
+                    .filter((department): department is Department => department !== undefined)}
+                  contactOperation={
+                    contactOperation?.assignmentId === undefined &&
+                    contactOperation?.memberId === selectedMember.id
+                      ? contactOperation
+                      : null
+                  }
+                  onContact={(kind) => contactMember(selectedMember, kind)}
+                  onRetryContact={() => {
+                    if (contactOperation) runContactOperation(contactOperation);
+                  }}
+                />
+              ) : (
+                <EmptyWorkspace title="没有可显示的成员" description="组织中尚未返回成员数据。" />
+              )
+            ) : isMessagesActive ? (
+              contactOperation !== null && selectedConversation === null ? (
+                <ConversationWorkspace
+                  conversation={null}
+                  currentUserId={payload.currentUser.id}
+                  pendingContact={{
+                    name:
+                      payload.members.find((member) => member.id === contactOperation.memberId)
+                        ?.name ?? '联系人',
+                    kind: contactOperation.kind,
+                    status: contactOperation.status,
+                    message: contactOperation.message,
+                    onRetry: () => runContactOperation(contactOperation),
+                  }}
+                />
+              ) : conversations.isPending ? (
+                <EmptyWorkspace
+                  title="正在加载会话"
+                  description="正在从企业服务读取可访问的会话…"
+                />
+              ) : conversations.isError && conversations.data === undefined ? (
+                <EmptyWorkspace
+                  title="会话列表加载失败"
+                  description={readableContactError(conversations.error)}
+                />
+              ) : (
+                <ConversationWorkspace
+                  conversation={selectedConversation}
+                  currentUserId={payload.currentUser.id}
+                  preferredResponseTargetKind={
+                    preferredResponseTarget !== null &&
+                    preferredResponseTarget.conversationId === selectedConversation?.id
+                      ? preferredResponseTarget.kind
+                      : null
+                  }
+                />
+              )
+            ) : isMyActive ? (
+              mySection === 'manual' ? (
+                <PersonalManualWorkspace members={payload.members} />
+              ) : mySection === 'roles' ? (
+                <RoleWorkspace
+                  assignment={selectedRoleAssignment}
+                  isLoading={roleAssignments.isPending}
+                  operation={
+                    contactOperation?.assignmentId
+                      ? {
+                          assignmentId: contactOperation.assignmentId,
+                          status: contactOperation.status,
+                          ...(contactOperation.message === undefined
+                            ? {}
+                            : { message: contactOperation.message }),
+                        }
+                      : null
+                  }
+                  onOpenAgent={openRoleAgent}
+                  onRetryAgent={() => {
+                    if (contactOperation?.assignmentId) runContactOperation(contactOperation);
+                  }}
+                />
+              ) : mySection === 'security' ? (
+                <AccountSecurityWorkspace
+                  onOpenAccountMenu={onOpenAccountMenu}
+                  onChangePassword={onChangePassword}
+                />
+              ) : mySection === 'about' ? (
+                <AboutWorkspace runtimeInfo={runtimeInfo} />
+              ) : (
+                <MyOverviewWorkspace
+                  user={payload.currentUser}
+                  assignments={roleAssignments.data ?? []}
+                  onOpenManual={() => setMySection('manual')}
+                  onOpenRoles={() => setMySection('roles')}
+                  onOpenAccountMenu={onOpenAccountMenu}
+                  onChangePassword={onChangePassword}
+                  onOpenSecurity={() => setMySection('security')}
+                  onOpenAbout={() => setMySection('about')}
+                />
+              )
             ) : (
-              <EmptyWorkspace title="没有可显示的成员" description="组织中尚未返回成员数据。" />
-            )
-          ) : isMessagesActive ? (
-            conversations.isPending ? (
-              <EmptyWorkspace title="正在加载会话" description="正在从企业服务读取可访问的会话…" />
-            ) : conversations.isError && conversations.data === undefined ? (
-              <EmptyWorkspace
-                title="会话列表加载失败"
-                description={readableContactError(conversations.error)}
-              />
-            ) : (
-              <ConversationWorkspace
-                conversation={selectedConversation}
-                currentUserId={payload.currentUser.id}
-              />
-            )
-          ) : (
-            <EmptyWorkspace title="模块正在建设" description="该模块尚未接入当前桌面里程碑。" />
-          )}
-        </main>
+              <EmptyWorkspace title="模块正在建设" description="该模块尚未接入当前桌面里程碑。" />
+            )}
+          </main>
+        </>
       </div>
+      {newConversationKind && (
+        <NewConversationDialog
+          members={payload.members}
+          agents={collaborationAgents}
+          currentUserId={payload.currentUser.id}
+          initialKind={newConversationKind}
+          pending={createConversation.isPending}
+          onClose={() => setNewConversationKind(null)}
+          onSelectMember={(member) => contactMember(member, 'human')}
+          onSelectAgent={(member) => contactMember(member, 'agent')}
+          onSelectStandaloneAgent={contactStandaloneAgent}
+          onCreateGroup={createGroupConversation}
+        />
+      )}
     </div>
   );
 }
@@ -374,40 +714,52 @@ function OrganizationTreePanel({
         {isExpanded && (
           <div className="organization-node-content" role="group">
             {members.map((member) => (
-              <button
-                type="button"
+              <div
                 key={member.id}
                 className={
                   member.id === selectedMemberId ? 'tree-member-row selected' : 'tree-member-row'
                 }
                 style={{ '--tree-depth': depth } as React.CSSProperties}
-                aria-current={member.id === selectedMemberId ? 'true' : undefined}
-                onClick={(event) => {
-                  if ((event.target as HTMLElement).closest('[data-agent-action="true"]')) {
-                    onContactAgent(member);
-                    return;
-                  }
-                  onSelectMember(member.id);
-                }}
               >
-                <Avatar name={member.name} status={member.status} size="small" />
-                <span className="member-row-copy">
-                  <strong>{member.name}</strong>
-                  <small>{member.title || '未设置职位'}</small>
-                </span>
+                <button
+                  type="button"
+                  className="tree-member-main"
+                  aria-current={member.id === selectedMemberId ? 'true' : undefined}
+                  onClick={() => onSelectMember(member.id)}
+                >
+                  <Avatar name={member.name} status={member.status} size="small" />
+                  <span className="member-row-copy">
+                    <strong>{member.name}</strong>
+                    <small>{member.title || '未设置职位'}</small>
+                  </span>
+                </button>
                 {member.agent && member.agent.status !== 'disabled' ? (
-                  <span
-                    className="tree-member-ai"
-                    title={`与 ${member.agent.name} 对话`}
-                    aria-label={`与 ${member.agent.name} 对话`}
-                    data-agent-action="true"
+                  <button
+                    type="button"
+                    className={
+                      member.capabilities.canContactAgent
+                        ? 'tree-member-ai'
+                        : 'tree-member-ai unavailable'
+                    }
+                    title={
+                      member.capabilities.canContactAgent
+                        ? `与 ${member.agent.name} 对话`
+                        : agentOperationalDescription(member.agent)
+                    }
+                    aria-label={
+                      member.capabilities.canContactAgent
+                        ? `与 ${member.agent.name} 对话`
+                        : `${member.agent.name}：${agentOperationalDescription(member.agent)}`
+                    }
+                    disabled={!member.capabilities.canContactAgent}
+                    onClick={() => onContactAgent(member)}
                   >
                     AI
-                  </span>
+                  </button>
                 ) : (
                   <span className="tree-member-ai placeholder" aria-hidden="true" />
                 )}
-              </button>
+              </div>
             ))}
             {children.map((child) => renderDepartment(child, depth + 1))}
             {!members.length && !children.length && (
@@ -464,8 +816,10 @@ function MemberWorkspace({
   const canContactAgent =
     member.capabilities.canContactAgent &&
     member.agent !== null &&
-    member.agent.status !== 'disabled';
+    member.agent.status === 'online';
   const contactPending = contactOperation?.status === 'pending';
+  const canOpenSharedConversation = canContactHuman || canContactAgent;
+  const defaultContactKind: ContactKind = canContactHuman ? 'human' : 'agent';
 
   return (
     <div className="member-workspace">
@@ -491,29 +845,19 @@ function MemberWorkspace({
         <div className="contact-actions" aria-label="联系入口">
           <button
             type="button"
-            className={
-              contactOperation?.kind === 'human' ? 'secondary-button selected' : 'secondary-button'
+            className="primary-button"
+            disabled={!canOpenSharedConversation || contactPending}
+            title={
+              member.agent !== null && !canContactAgent && canContactHuman
+                ? `可联系本人；${agentOperationalDescription(member.agent)}`
+                : '成员本人和其智能体共用同一个会话窗口'
             }
-            disabled={!canContactHuman || contactPending}
-            onClick={() => onContact('human')}
+            onClick={() => onContact(defaultContactKind)}
           >
             <span className="button-icon" aria-hidden="true">
-              人
+              讯
             </span>
-            {contactPending && contactOperation.kind === 'human' ? '正在进入…' : '联系本人'}
-          </button>
-          <button
-            type="button"
-            className={
-              contactOperation?.kind === 'agent' ? 'primary-button selected' : 'primary-button'
-            }
-            disabled={!canContactAgent || contactPending}
-            onClick={() => onContact('agent')}
-          >
-            <span className="button-icon ai" aria-hidden="true">
-              AI
-            </span>
-            {contactPending && contactOperation.kind === 'agent' ? '正在进入…' : '联系智能体'}
+            {contactPending ? '正在进入…' : '打开共享会话'}
           </button>
         </div>
       </section>
@@ -585,6 +929,12 @@ function MemberWorkspace({
                   <span />
                   {agentStatusLabel(member.agent.status)}
                 </div>
+                <div
+                  className={`agent-operational-status ${member.agent.operationalAvailability.status.toLocaleLowerCase().replace('_', '-')}`}
+                >
+                  <strong>{agentOperationalLabel(member.agent)}</strong>
+                  <small>{agentOperationalReason(member.agent)}</small>
+                </div>
                 <p className="agent-summary">
                   {member.agent.summary || '该成员尚未公开智能体能力说明。'}
                 </p>
@@ -609,6 +959,58 @@ function MemberWorkspace({
       </div>
     </div>
   );
+}
+
+export function unifiedSearchResults(
+  query: string,
+  members: Member[],
+  conversations: Conversation[],
+): UnifiedSearchResult[] {
+  const normalized = query.normalize('NFKC').trim().toLocaleLowerCase('zh-CN');
+  if (normalized.length === 0) return [];
+  const includes = (...values: Array<string | null | undefined>): boolean =>
+    values.some((value) =>
+      value?.normalize('NFKC').toLocaleLowerCase('zh-CN').includes(normalized),
+    );
+  const results: UnifiedSearchResult[] = [];
+  for (const member of members) {
+    if (includes(member.name, member.title)) {
+      results.push({
+        kind: 'member',
+        id: member.id,
+        label: member.name,
+        detail: `${member.title || '成员'} · ${member.status === 'active' ? '在职' : '已停用'}`,
+        member,
+      });
+    }
+    if (
+      member.agent &&
+      member.capabilities.canContactAgent &&
+      member.agent.status === 'online' &&
+      includes(member.agent.name, member.agent.summary, member.name)
+    ) {
+      results.push({
+        kind: 'agent',
+        id: member.agent.id,
+        label: member.agent.name,
+        detail: `${member.name} 的智能体 · 已授权`,
+        agentId: member.agent.id,
+        ownerUserId: member.id,
+      });
+    }
+  }
+  for (const conversation of conversations) {
+    if (includes(conversation.title, ...conversation.participants.map(({ name }) => name))) {
+      results.push({
+        kind: 'conversation',
+        id: conversation.id,
+        label: conversation.title ?? '未命名会话',
+        detail: `${conversation.participants.length} 位参与者 · 历史会话`,
+        conversationId: conversation.id,
+      });
+    }
+  }
+  return results.slice(0, 12);
 }
 
 function ContactOperationCard({
@@ -728,29 +1130,69 @@ function initials(value: string): string {
   return [...normalized].slice(-2).join('').toLocaleUpperCase('zh-CN');
 }
 
-function navigationGlyph(id: string, label: string): string {
-  const glyphs: Record<string, string> = {
-    messages: '讯',
-    messaging: '讯',
-    directory: '录',
-    contacts: '录',
-    workbench: '工',
-    projects: '项',
-    knowledge: '知',
-    automation: '自',
-    admin: '管',
-  };
-  return glyphs[id.toLowerCase()] ?? [...label][0] ?? '·';
-}
-
-function agentTone(index: number): string {
-  return ['violet', 'cyan', 'green', 'purple', 'orange', 'red', 'pink', 'amber', 'blue'][
-    index % 9
-  ]!;
+function findDirectConversation(
+  conversations: readonly Conversation[],
+  request: CreateConversationRequest,
+): Conversation | null {
+  if (request.type !== 'direct' || request.target.type === 'agent_pair') return null;
+  const participantType = request.target.type === 'human' ? 'user' : 'agent';
+  const participantId =
+    request.target.type === 'human' ? request.target.userId : request.target.agentId;
+  return (
+    conversations.find(
+      (conversation) =>
+        conversation.type === 'direct' &&
+        conversation.participants.some(
+          (participant) => participant.type === participantType && participant.id === participantId,
+        ),
+    ) ?? null
+  );
 }
 
 function agentStatusLabel(status: NonNullable<Member['agent']>['status']): string {
-  return { online: '智能体在线', offline: '智能体离线', disabled: '智能体已停用' }[status];
+  return { online: '配置已启用', offline: '配置已离线', disabled: '配置已停用' }[status];
+}
+
+function agentOperationalLabel(agent: NonNullable<Member['agent']>): string {
+  if (agent.status === 'offline') return '配置已离线，运行不可用';
+  if (agent.status === 'disabled') return '配置已停用，运行不可用';
+  return {
+    AVAILABLE: '模型运行可用',
+    NOT_READY: '配置已启用，但模型未就绪',
+    DEGRADED: '模型服务处于降级状态',
+    UNKNOWN: '模型可用性证据不足',
+  }[agent.operationalAvailability.status];
+}
+
+function agentOperationalReason(agent: NonNullable<Member['agent']>): string {
+  if (agent.status === 'offline') return '管理员尚未启用该智能体配置';
+  if (agent.status === 'disabled') return '该智能体配置已被管理员停用';
+  const reason = agent.operationalAvailability.reasonCodes[0];
+  if (reason === undefined && agent.operationalAvailability.status === 'AVAILABLE') {
+    return 'Runtime 路由与近期真实成功凭据均已验证';
+  }
+  return (
+    {
+      RUNTIME_READINESS_UNAVAILABLE: '模型运行服务探针暂不可达',
+      RUNTIME_READINESS_STALE: '模型运行证据已经过期',
+      RUNTIME_ALLOWLIST_MISMATCH: '模型路由尚未进入 Runtime 精确允许列表',
+      RUNTIME_PROVIDER_NOT_READY: '模型供应商尚未就绪',
+      RUNTIME_TRUSTED_ROUTE_NOT_READY: '可信模型路由尚未就绪',
+      NO_RECENT_SUCCESSFUL_PROVIDER_EVIDENCE: '缺少近期真实成功调用凭据',
+      MODEL_CIRCUIT_OPEN: '模型路由熔断器当前已打开',
+      NO_PUBLISHED_ROUTE_POLICY: '尚未发布匹配的模型路由策略',
+      NO_PUBLISHED_ROUTE_CANDIDATE: '模型路由策略没有可执行候选',
+      ROUTE_POLICY_INCOMPATIBLE: '智能体模型策略与已发布路由不兼容',
+      AGENT_CONFIGURATION_NOT_ONLINE: '智能体配置当前未启用',
+      AGENT_CONFIGURATION_DISABLED: '智能体配置已停用',
+      AGENT_VERSION_NOT_PUBLISHED: '智能体版本尚未发布',
+      READINESS_DATA_UNAVAILABLE: '模型就绪度数据暂不可用',
+    }[reason ?? ''] ?? '模型运行证据未通过完整校验'
+  );
+}
+
+function agentOperationalDescription(agent: NonNullable<Member['agent']>): string {
+  return `${agentOperationalLabel(agent)}：${agentOperationalReason(agent)}`;
 }
 
 function readableContactError(error: unknown): string {
@@ -760,16 +1202,14 @@ function readableContactError(error: unknown): string {
   return error instanceof Error ? error.message : '发生未知错误，请重试。';
 }
 
-function platformLabel(platform: DesktopRuntimeInfo['platform']): string {
-  return { win32: 'Windows', darwin: 'macOS', linux: 'Linux', other: 'Desktop' }[platform];
-}
-
 function useRuntimeInfo(): DesktopRuntimeInfo | null {
   const [runtimeInfo, setRuntimeInfo] = useState<DesktopRuntimeInfo | null>(null);
 
   useEffect(() => {
     let disposed = false;
-    void window.enterpriseDesktop
+    const desktopBridge = window.enterpriseDesktop;
+    if (!desktopBridge) return;
+    void desktopBridge
       .getRuntimeInfo()
       .then((info) => {
         if (!disposed) setRuntimeInfo(info);

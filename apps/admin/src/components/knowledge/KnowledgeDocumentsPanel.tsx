@@ -1,26 +1,35 @@
 import type {
+  AdminOrganizationResponse,
   KnowledgeBase,
   KnowledgeDocumentSummary,
   KnowledgeDocumentVersionSummary,
 } from '@enterprise/contracts';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import {
   archiveKnowledgeDocument,
-  publishKnowledgeDocumentVersion,
-  rebuildKnowledgeDocumentEmbeddings,
+  deleteKnowledgeFolder,
   retryKnowledgeDocumentIngestion,
-  rollbackKnowledgeDocumentVersion,
 } from '@/api/admin-api';
 import { messageFromError } from '@/api/client';
 import { Icon } from '@/components/Icons';
-import { EmptyState, FieldError, Spinner, StatusPill } from '@/components/ui';
+import { EmptyState, FieldError, Modal, Notice, Spinner, StatusPill } from '@/components/ui';
 
 import { KnowledgeUploadModal } from './KnowledgeUploadModal';
+import {
+  KnowledgeCreateFolderModal,
+  KnowledgeFolderUploadModal,
+} from './KnowledgeFolderUploadModal';
+import { KnowledgeDocumentAccessModal } from './KnowledgeDocumentAccessModal';
 import { KnowledgeChunkPreviewModal } from './KnowledgeChunkPreviewModal';
+import { KnowledgeWebImportModal } from './KnowledgeWebImportModal';
+import { KnowledgeSourceConnectorsPanel } from './KnowledgeSourceConnectorsPanel';
+import {
+  knowledgeFolderProcessingSummary,
+  type KnowledgeFolderProcessingSummary,
+} from '@/features/knowledge/knowledge-folder-processing';
 import {
   currentPublishedKnowledgeVersion,
-  knowledgeVersionAction,
   knowledgeVersionFailure,
   latestKnowledgeVersion,
 } from './knowledge-ingestion-outcome';
@@ -32,6 +41,11 @@ import {
 } from './knowledge-view-model';
 
 interface ChunkPreviewTarget {
+  readonly document: KnowledgeDocumentSummary;
+  readonly version: KnowledgeDocumentVersionSummary;
+}
+
+interface DocumentAccessTarget {
   readonly document: KnowledgeDocumentSummary;
   readonly version: KnowledgeDocumentVersionSummary;
 }
@@ -48,6 +62,7 @@ function formatDate(value: string): string {
 function sourceLabel(document: KnowledgeDocumentSummary): string {
   if (document.sourceType === 'MARKDOWN') return 'Markdown';
   if (document.sourceType === 'TEXT') return '纯文本';
+  if (document.sourceType === 'WEB') return 'HTTPS 网页';
   const extension = document.fileName?.split('.').pop()?.toUpperCase();
   return extension || document.mimeType || '文件';
 }
@@ -55,10 +70,16 @@ function sourceLabel(document: KnowledgeDocumentSummary): string {
 function sourceGlyph(document: KnowledgeDocumentSummary): string {
   if (document.sourceType === 'MARKDOWN') return 'MD';
   if (document.sourceType === 'TEXT') return 'TXT';
+  if (document.sourceType === 'WEB') return 'WEB';
   return document.fileName?.split('.').pop()?.slice(0, 4).toUpperCase() || 'FILE';
 }
 
-function stageLabel(stage: string): string {
+function stageLabel(stage: string, progress: number): string {
+  if (stage === 'INDEXING') {
+    if (progress < 78) return '生成向量';
+    if (progress < 90) return '写入检索索引';
+    return '保存切片与向量';
+  }
   return (
     {
       UPLOADED: '已上传',
@@ -78,44 +99,78 @@ function documentStatusLabel(status: string): string {
       PROCESSING: '处理中',
       READY: '可用',
       FAILED: '处理失败',
-      ARCHIVED: '已归档',
+      ARCHIVED: '已删除',
     }[status] ?? status
   );
 }
 
 export function KnowledgeDocumentsPanel({
   item,
+  organization,
+  organizationReady,
   onCreateDocument,
   onEditDocument,
   onChanged,
 }: {
   item: KnowledgeBase;
+  organization: AdminOrganizationResponse | null;
+  organizationReady: boolean;
   onCreateDocument: () => void;
   onEditDocument: (document: KnowledgeDocumentSummary) => void;
   onChanged: (message: string) => void;
 }): ReactNode {
   const [uploadTarget, setUploadTarget] = useState<KnowledgeDocumentSummary | 'new' | null>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [folderUploadFiles, setFolderUploadFiles] = useState<readonly File[] | null>(null);
+  const [createFolderOpen, setCreateFolderOpen] = useState(false);
+  const [currentFolderId, setCurrentFolderId] = useState<string | null>(null);
+  const [webImportOpen, setWebImportOpen] = useState(false);
+  const [sourceConnectorsOpen, setSourceConnectorsOpen] = useState(false);
   const [retryingVersionId, setRetryingVersionId] = useState<string | null>(null);
-  const [changingVersionId, setChangingVersionId] = useState<string | null>(null);
-  const [rebuildingVersionId, setRebuildingVersionId] = useState<string | null>(null);
+  const [optimisticRetryVersionId, setOptimisticRetryVersionId] = useState<string | null>(null);
   const [archivingDocumentId, setArchivingDocumentId] = useState<string | null>(null);
+  const [deletingFolderId, setDeletingFolderId] = useState<string | null>(null);
   const [query, setQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<KnowledgeDocumentSourceFilter>('ALL');
   const [statusFilter, setStatusFilter] = useState<KnowledgeDocumentStatusFilter>('ALL');
   const [chunkPreviewTarget, setChunkPreviewTarget] = useState<ChunkPreviewTarget | null>(null);
+  const [documentAccessTarget, setDocumentAccessTarget] = useState<DocumentAccessTarget | null>(
+    null,
+  );
   const [error, setError] = useState<string | null>(null);
+  const folders = item.folders ?? [];
+  const currentFolder = folders.find((folder) => folder.id === currentFolderId) ?? null;
+  const breadcrumbFolders = knowledgeFolderAncestors(currentFolder, folders);
+  const childFolders = folders.filter((folder) => folder.parentId === currentFolderId);
+  const directoryDocuments = item.documents.filter(
+    (document) => document.folderId === currentFolderId,
+  );
   const filteredDocuments = filterKnowledgeDocuments(
-    item.documents,
+    directoryDocuments,
     query,
     sourceFilter,
     statusFilter,
   );
+  const managedByLexiang = item.storageProvider === 'LEXIANG';
+  const lexiangWritable = !managedByLexiang || item.externalSpace?.status === 'ACTIVE';
+  const writesDisabled = item.status === 'ARCHIVED' || !lexiangWritable;
+
+  useEffect(() => {
+    if (optimisticRetryVersionId === null) return;
+    const serverVersion = item.documents
+      .flatMap((document) => document.versions)
+      .find((version) => version.id === optimisticRetryVersionId);
+    if (serverVersion !== undefined && serverVersion.status !== 'FAILED') {
+      setOptimisticRetryVersionId(null);
+    }
+  }, [item.documents, optimisticRetryVersionId]);
 
   const retry = async (
     document: KnowledgeDocumentSummary,
     version: KnowledgeDocumentVersionSummary,
   ): Promise<void> => {
     setRetryingVersionId(version.id);
+    setOptimisticRetryVersionId(version.id);
     setError(null);
     try {
       const result = await retryKnowledgeDocumentIngestion(item.id, document.id, version.id);
@@ -127,6 +182,7 @@ export function KnowledgeDocumentsPanel({
       }
       onChanged(`“${document.title}”已重新提交解析。`);
     } catch (caught) {
+      setOptimisticRetryVersionId(null);
       setError(messageFromError(caught));
     } finally {
       setRetryingVersionId(null);
@@ -134,12 +190,17 @@ export function KnowledgeDocumentsPanel({
   };
 
   const archive = async (document: KnowledgeDocumentSummary): Promise<void> => {
-    if (!window.confirm(`确认归档“${document.title}”吗？`)) return;
+    if (
+      !window.confirm(
+        `确认删除“${document.title}”吗？删除后不会再参与智能体检索，但历史版本和审计记录仍会保留。`,
+      )
+    )
+      return;
     setArchivingDocumentId(document.id);
     setError(null);
     try {
       await archiveKnowledgeDocument(item.id, document.id, document.documentVersion);
-      onChanged(`“${document.title}”已归档。`);
+      onChanged(`“${document.title}”已删除，不再参与智能体检索。`);
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
@@ -147,81 +208,27 @@ export function KnowledgeDocumentsPanel({
     }
   };
 
-  const publish = async (
-    document: KnowledgeDocumentSummary,
-    version: KnowledgeDocumentVersionSummary,
-  ): Promise<void> => {
-    if (!window.confirm(`确认发布“${document.title}”的 v${version.versionNumber} 吗？`)) return;
-    setChangingVersionId(version.id);
+  const deleteFolder = async (folder: KnowledgeBase['folders'][number]): Promise<void> => {
+    const processing = knowledgeFolderProcessingSummary(folder, item.documents);
+    const documentWarning =
+      processing.totalDocuments > 0
+        ? `目录及子目录中的 ${processing.totalDocuments} 篇文档也会被删除。`
+        : '空的子文件夹也会一并删除。';
+    if (!window.confirm(`确认删除文件夹“${folder.name}”吗？${documentWarning}`)) return;
+    setDeletingFolderId(folder.id);
     setError(null);
     try {
-      const result = await publishKnowledgeDocumentVersion(item.id, document.id, version.id);
-      const publishedVersion = result.versions.find((candidate) => candidate.id === version.id);
-      const failure = knowledgeVersionFailure(publishedVersion);
-      if (failure !== null) {
-        setError(`“${document.title}”${failure}`);
-        return;
-      }
-      if (result.currentVersionId !== version.id || publishedVersion?.status !== 'READY') {
-        setError('发布未切换为当前版本，请刷新后重试。');
-        return;
-      }
-      onChanged(`“${document.title}”v${version.versionNumber} 已发布。`);
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setChangingVersionId(null);
-    }
-  };
-
-  const rollback = async (
-    document: KnowledgeDocumentSummary,
-    version: KnowledgeDocumentVersionSummary,
-  ): Promise<void> => {
-    if (document.currentVersionId === null) {
-      setError('当前没有已发布版本，无法执行回滚。');
-      return;
-    }
-    if (
-      !window.confirm(
-        `确认将“${document.title}”回滚到 v${version.versionNumber} 的内容吗？系统会创建并发布一个新的回滚版本。`,
-      )
-    ) {
-      return;
-    }
-    setChangingVersionId(version.id);
-    setError(null);
-    try {
-      const result = await rollbackKnowledgeDocumentVersion(item.id, document.id, version.id, {
-        expectedCurrentVersionId: document.currentVersionId,
-      });
-      if (result.currentVersionId === null || result.currentVersionId === version.id) {
-        setError('回滚版本未正确创建，请刷新后重试。');
-        return;
-      }
-      onChanged(`“${document.title}”已基于 v${version.versionNumber} 创建并发布回滚版本。`);
-    } catch (caught) {
-      setError(messageFromError(caught));
-    } finally {
-      setChangingVersionId(null);
-    }
-  };
-
-  const rebuildEmbeddings = async (
-    document: KnowledgeDocumentSummary,
-    version: KnowledgeDocumentVersionSummary,
-  ): Promise<void> => {
-    setRebuildingVersionId(version.id);
-    setError(null);
-    try {
-      const result = await rebuildKnowledgeDocumentEmbeddings(item.id, document.id, version.id);
+      await deleteKnowledgeFolder(item.id, folder.id);
+      if (currentFolderId === folder.id) setCurrentFolderId(folder.parentId);
       onChanged(
-        `“${document.title}”v${version.versionNumber} 已用 ${result.embeddingModel} 重建 ${result.chunkCount} 个向量。`,
+        processing.totalDocuments > 0
+          ? `文件夹“${folder.name}”及其中 ${processing.totalDocuments} 篇文档已删除。`
+          : `文件夹“${folder.name}”已删除。`,
       );
     } catch (caught) {
       setError(messageFromError(caught));
     } finally {
-      setRebuildingVersionId(null);
+      setDeletingFolderId(null);
     }
   };
 
@@ -231,28 +238,102 @@ export function KnowledgeDocumentsPanel({
         <header className="card-header">
           <div>
             <h2>知识文档</h2>
-            <p>当前 {item.documents.length} 篇；文件会自动完成解析、切片和索引。</p>
+            <p>
+              当前 {item.documents.length} 篇；
+              {managedByLexiang ? '此知识库由腾讯乐享托管。' : '文件会自动完成解析、切片和索引。'}
+            </p>
           </div>
           <div className="knowledge-document-actions">
-            <button
-              className="button secondary compact"
-              type="button"
-              onClick={onCreateDocument}
-              disabled={item.status === 'ARCHIVED'}
-            >
-              <Icon name="plus" size={16} /> 手工录入
-            </button>
+            <input
+              className="visually-hidden"
+              ref={(node) => {
+                folderInputRef.current = node;
+                node?.setAttribute('webkitdirectory', '');
+              }}
+              type="file"
+              multiple
+              aria-label="选择需要上传的文件夹"
+              onChange={(event) => {
+                const selected = [...(event.target.files ?? [])];
+                event.target.value = '';
+                if (selected.length > 0) setFolderUploadFiles(selected);
+              }}
+            />
             <button
               className="button primary compact"
               type="button"
-              onClick={() => setUploadTarget('new')}
-              disabled={item.status === 'ARCHIVED'}
+              onClick={() => folderInputRef.current?.click()}
+              disabled={writesDisabled}
             >
-              <span aria-hidden="true">↑</span> 上传文件
+              <span aria-hidden="true">↑</span> 导入文件夹
             </button>
+            <button
+              className="button secondary compact"
+              type="button"
+              onClick={() => setCreateFolderOpen(true)}
+              disabled={writesDisabled}
+            >
+              <Icon name="plus" size={16} /> 新建文件夹
+            </button>
+            {!managedByLexiang ? (
+              <>
+                <button
+                  className="button secondary compact"
+                  type="button"
+                  onClick={() => setWebImportOpen(true)}
+                  disabled={writesDisabled}
+                >
+                  导入网页
+                </button>
+                <button
+                  className="button primary compact"
+                  type="button"
+                  onClick={() => setUploadTarget('new')}
+                  disabled={writesDisabled}
+                >
+                  <span aria-hidden="true">↑</span> 上传文件
+                </button>
+                <button
+                  className="button secondary compact"
+                  type="button"
+                  onClick={() => setSourceConnectorsOpen(true)}
+                  disabled={writesDisabled}
+                >
+                  其他来源接入
+                </button>
+                <button
+                  className="button secondary compact"
+                  type="button"
+                  onClick={onCreateDocument}
+                  disabled={writesDisabled}
+                >
+                  <Icon name="plus" size={16} /> 粘贴文本
+                </button>
+              </>
+            ) : null}
           </div>
         </header>
-        {item.documents.length > 0 ? (
+        {managedByLexiang ? (
+          <Notice tone="info">
+            {lexiangWritable
+              ? '这里上传的文件夹和文件会写入腾讯乐享；本系统只保存受权限控制的目录映射，不复制远端文件内容。可用资料会通过权限受控的乐享 AI 搜索参与智能体回答。'
+              : '该乐享知识库尚未通过隐私范围校验，已禁止从本系统上传资料；请修正乐享权限后重新同步。'}
+          </Notice>
+        ) : null}
+        {item.documents.length > 0 || folders.length > 0 ? (
+          <nav className="knowledge-folder-breadcrumb" aria-label="当前文件夹路径">
+            <button type="button" onClick={() => setCurrentFolderId(null)}>
+              全部资料
+            </button>
+            {breadcrumbFolders.map((folder) => (
+              <button type="button" key={folder.id} onClick={() => setCurrentFolderId(folder.id)}>
+                <span aria-hidden="true">/</span>
+                {folder.name}
+              </button>
+            ))}
+          </nav>
+        ) : null}
+        {item.documents.length > 0 || folders.length > 0 ? (
           <div className="knowledge-document-toolbar">
             <label className="search-input">
               <span aria-hidden="true">⌕</span>
@@ -274,6 +355,7 @@ export function KnowledgeDocumentsPanel({
               >
                 <option value="ALL">全部来源</option>
                 <option value="FILE">上传文件</option>
+                <option value="WEB">HTTPS 网页</option>
                 <option value="MARKDOWN">Markdown</option>
                 <option value="TEXT">纯文本</option>
               </select>
@@ -288,38 +370,72 @@ export function KnowledgeDocumentsPanel({
                 }
               >
                 <option value="ALL">全部状态</option>
-                <option value="READY">已发布</option>
+                <option value="READY">可用</option>
                 <option value="DRAFT">草稿</option>
                 <option value="PROCESSING">处理中</option>
                 <option value="FAILED">处理失败</option>
-                <option value="ARCHIVED">已归档</option>
               </select>
             </label>
             <span className="knowledge-filter-count">
-              显示 {filteredDocuments.length} / {item.documents.length}
+              显示 {childFolders.length} 个文件夹、{filteredDocuments.length} /{' '}
+              {directoryDocuments.length} 篇文档
             </span>
           </div>
         ) : null}
         <FieldError message={error} />
-        {item.documents.length === 0 ? (
+        {childFolders.length > 0 ? (
+          <div className="knowledge-folder-grid">
+            {childFolders.map((folder) => (
+              <KnowledgeFolderCard
+                key={folder.id}
+                folder={folder}
+                processing={knowledgeFolderProcessingSummary(folder, item.documents)}
+                onOpen={() => setCurrentFolderId(folder.id)}
+                onDelete={() => void deleteFolder(folder)}
+                deleting={deletingFolderId === folder.id}
+                managedByLexiang={managedByLexiang}
+              />
+            ))}
+          </div>
+        ) : null}
+        {item.documents.length === 0 && folders.length === 0 ? (
           <EmptyState
             title="还没有文档"
-            description="上传 PDF、Word、TXT 或 Markdown，也可以直接录入文本。"
+            description={
+              managedByLexiang
+                ? '乐享知识库当前没有文件夹或文档；可直接选择本地文件夹上传到乐享。'
+                : '优先上传 PDF、Word、Excel、TXT 或 Markdown 文件；网页和粘贴文本作为辅助来源。'
+            }
             action={
-              <button
-                className="button primary"
-                type="button"
-                onClick={() => setUploadTarget('new')}
-                disabled={item.status === 'ARCHIVED'}
-              >
-                上传第一份资料
-              </button>
+              managedByLexiang ? (
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => folderInputRef.current?.click()}
+                  disabled={writesDisabled}
+                >
+                  上传第一个文件夹
+                </button>
+              ) : (
+                <button
+                  className="button primary"
+                  type="button"
+                  onClick={() => setUploadTarget('new')}
+                  disabled={writesDisabled}
+                >
+                  上传第一份资料
+                </button>
+              )
             }
           />
-        ) : filteredDocuments.length === 0 ? (
+        ) : filteredDocuments.length === 0 && childFolders.length === 0 ? (
           <EmptyState
-            title="没有匹配的知识文档"
-            description="请调整标题关键词、来源或处理状态筛选条件。"
+            title={currentFolder ? '这个文件夹还是空的' : '没有匹配的知识文档'}
+            description={
+              currentFolder
+                ? '可以上传文件、上传子文件夹，或新建空文件夹。'
+                : '请调整标题关键词、来源或处理状态筛选条件。'
+            }
           />
         ) : (
           <div className="document-list knowledge-document-list">
@@ -328,18 +444,46 @@ export function KnowledgeDocumentsPanel({
               const currentPublished = currentPublishedKnowledgeVersion(document);
               const previewVersion = previewableKnowledgeVersion(document);
               const job = latest?.ingestionJob ?? null;
+              const retryQueued = optimisticRetryVersionId === latest?.id;
               const inProgress =
+                retryQueued ||
                 latest?.status === 'PROCESSING' ||
                 job?.status === 'PENDING' ||
                 job?.status === 'RUNNING';
-              const failed = latest?.status === 'FAILED' || job?.status === 'FAILED';
+              const failed =
+                !retryQueued && (latest?.status === 'FAILED' || job?.status === 'FAILED');
               const editable =
-                document.sourceType !== 'FILE' && !inProgress && document.status !== 'ARCHIVED';
+                (document.sourceType === 'TEXT' || document.sourceType === 'MARKDOWN') &&
+                !inProgress &&
+                document.status !== 'ARCHIVED';
+              const displayedStatus =
+                managedByLexiang && document.status !== 'ARCHIVED'
+                  ? { value: 'DRAFT', label: '已同步目录' }
+                  : document.status === 'ARCHIVED'
+                    ? { value: 'ARCHIVED', label: '已删除' }
+                    : retryQueued && latest
+                      ? {
+                          value: 'PROCESSING',
+                          label: `最新 v${latest.versionNumber} · 等待处理`,
+                        }
+                      : latest && (inProgress || failed || currentPublished === null)
+                        ? {
+                            value: latest.status,
+                            label: `最新 v${latest.versionNumber} · ${documentStatusLabel(latest.status)}`,
+                          }
+                        : currentPublished
+                          ? {
+                              value: 'READY',
+                              label: `当前可用 v${currentPublished.versionNumber}`,
+                            }
+                          : { value: 'DRAFT', label: '当前不可用' };
 
               return (
                 <article className="knowledge-document-entry" key={document.id}>
                   <div className="knowledge-document-row">
-                    <span className="document-icon">{sourceGlyph(document)}</span>
+                    <span className="document-icon">
+                      {managedByLexiang ? 'LX' : sourceGlyph(document)}
+                    </span>
                     <button
                       className="document-copy knowledge-document-open"
                       type="button"
@@ -359,34 +503,12 @@ export function KnowledgeDocumentsPanel({
                     >
                       <strong>{document.title}</strong>
                       <small>
-                        {sourceLabel(document)} · 最新 v
-                        {latest?.versionNumber ?? document.documentVersion} ·{' '}
+                        {managedByLexiang ? '腾讯乐享托管' : sourceLabel(document)} ·{' '}
                         {formatDate(document.updatedAt)}
                       </small>
                     </button>
                     <div className="knowledge-document-status-stack">
-                      <StatusPill
-                        value={
-                          document.status === 'ARCHIVED'
-                            ? 'ARCHIVED'
-                            : currentPublished
-                              ? 'READY'
-                              : 'DRAFT'
-                        }
-                        label={
-                          document.status === 'ARCHIVED'
-                            ? '已归档'
-                            : currentPublished
-                              ? `当前发布 v${currentPublished.versionNumber}`
-                              : '当前未发布'
-                        }
-                      />
-                      {latest ? (
-                        <StatusPill
-                          value={latest.status}
-                          label={`最新 v${latest.versionNumber} · ${documentStatusLabel(latest.status)}`}
-                        />
-                      ) : null}
+                      <StatusPill value={displayedStatus.value} label={displayedStatus.label} />
                     </div>
                     {failed && latest ? (
                       <button
@@ -398,20 +520,40 @@ export function KnowledgeDocumentsPanel({
                         {retryingVersionId === latest.id ? <Spinner label="重试中…" /> : '重试'}
                       </button>
                     ) : null}
-                    {document.sourceType === 'FILE' && document.status !== 'ARCHIVED' ? (
+                    {!managedByLexiang && document.status !== 'ARCHIVED' ? (
                       <div className="knowledge-document-row-actions">
                         <button
                           className="button secondary compact"
                           type="button"
                           disabled={
-                            inProgress ||
-                            archivingDocumentId === document.id ||
-                            item.status === 'ARCHIVED'
+                            currentPublished === null ||
+                            currentPublished.versionNumber !== document.documentVersion ||
+                            organization === null ||
+                            !organizationReady ||
+                            archivingDocumentId === document.id
                           }
-                          onClick={() => setUploadTarget(document)}
+                          onClick={() => {
+                            if (currentPublished !== null) {
+                              setDocumentAccessTarget({ document, version: currentPublished });
+                            }
+                          }}
                         >
-                          上传新版本
+                          权限变更
                         </button>
+                        {document.sourceType === 'FILE' ? (
+                          <button
+                            className="button secondary compact"
+                            type="button"
+                            disabled={
+                              inProgress ||
+                              archivingDocumentId === document.id ||
+                              item.status === 'ARCHIVED'
+                            }
+                            onClick={() => setUploadTarget(document)}
+                          >
+                            上传新版本
+                          </button>
+                        ) : null}
                         <button
                           className="button danger-ghost compact"
                           type="button"
@@ -419,22 +561,32 @@ export function KnowledgeDocumentsPanel({
                           onClick={() => void archive(document)}
                         >
                           {archivingDocumentId === document.id ? (
-                            <Spinner label="归档中…" />
+                            <Spinner label="删除中…" />
                           ) : (
-                            '归档'
+                            '删除'
                           )}
                         </button>
                       </div>
                     ) : null}
                   </div>
 
-                  {inProgress && job ? (
+                  {inProgress && job && !retryQueued ? (
                     <div className="knowledge-ingestion-state" aria-live="polite">
                       <div>
-                        <span>{stageLabel(job.stage)}</span>
+                        <span>{stageLabel(job.stage, job.progress)}</span>
                         <strong>{job.progress}%</strong>
                       </div>
                       <progress max={100} value={job.progress} />
+                    </div>
+                  ) : null}
+
+                  {retryQueued ? (
+                    <div className="knowledge-ingestion-state" aria-live="polite">
+                      <div>
+                        <span>已提交，等待处理</span>
+                        <strong>0%</strong>
+                      </div>
+                      <progress max={100} value={0} />
                     </div>
                   ) : null}
 
@@ -456,7 +608,7 @@ export function KnowledgeDocumentsPanel({
                               <span>
                                 <strong>v{version.versionNumber}</strong>
                                 {document.currentVersionId === version.id ? (
-                                  <em>当前发布</em>
+                                  <em>当前可用</em>
                                 ) : null}
                               </span>
                               <small>
@@ -468,77 +620,6 @@ export function KnowledgeDocumentsPanel({
                                   value={version.status}
                                   label={documentStatusLabel(version.status)}
                                 />
-                                <button
-                                  className="button secondary compact"
-                                  type="button"
-                                  disabled={version.chunkCount === 0}
-                                  title={
-                                    version.chunkCount > 0
-                                      ? `查看 v${version.versionNumber} 的解析切片`
-                                      : '当前版本没有切片'
-                                  }
-                                  onClick={() => setChunkPreviewTarget({ document, version })}
-                                >
-                                  查看切片
-                                </button>
-                                {version.chunkCount > 0 &&
-                                (version.status === 'READY' || version.status === 'ARCHIVED') ? (
-                                  <button
-                                    className="button secondary compact"
-                                    type="button"
-                                    disabled={
-                                      rebuildingVersionId !== null ||
-                                      inProgress ||
-                                      item.status === 'ARCHIVED' ||
-                                      document.status === 'ARCHIVED'
-                                    }
-                                    onClick={() => void rebuildEmbeddings(document, version)}
-                                  >
-                                    {rebuildingVersionId === version.id ? (
-                                      <Spinner label="向量重建中…" />
-                                    ) : (
-                                      '重建向量'
-                                    )}
-                                  </button>
-                                ) : null}
-                                {knowledgeVersionAction(document, version) === 'publish' ? (
-                                  <button
-                                    className="button primary compact"
-                                    type="button"
-                                    disabled={
-                                      changingVersionId !== null ||
-                                      inProgress ||
-                                      item.status === 'ARCHIVED' ||
-                                      document.status === 'ARCHIVED'
-                                    }
-                                    onClick={() => void publish(document, version)}
-                                  >
-                                    {changingVersionId === version.id ? (
-                                      <Spinner label="发布中…" />
-                                    ) : (
-                                      '发布'
-                                    )}
-                                  </button>
-                                ) : null}
-                                {knowledgeVersionAction(document, version) === 'rollback' ? (
-                                  <button
-                                    className="button secondary compact"
-                                    type="button"
-                                    disabled={
-                                      changingVersionId !== null ||
-                                      inProgress ||
-                                      item.status === 'ARCHIVED' ||
-                                      document.status === 'ARCHIVED'
-                                    }
-                                    onClick={() => void rollback(document, version)}
-                                  >
-                                    {changingVersionId === version.id ? (
-                                      <Spinner label="回滚中…" />
-                                    ) : (
-                                      '回滚到此版本'
-                                    )}
-                                  </button>
-                                ) : null}
                               </div>
                             </div>
                           ))}
@@ -554,9 +635,11 @@ export function KnowledgeDocumentsPanel({
 
       {uploadTarget !== null ? (
         <KnowledgeUploadModal
-          knowledgeBaseId={item.id}
-          knowledgeBaseName={item.name}
+          knowledgeBase={item}
+          organization={organization}
+          organizationReady={organizationReady}
           {...(uploadTarget === 'new' ? {} : { document: uploadTarget })}
+          {...(uploadTarget === 'new' ? { folderId: currentFolderId } : {})}
           onClose={() => setUploadTarget(null)}
           onUploaded={() => {
             const message =
@@ -568,6 +651,66 @@ export function KnowledgeDocumentsPanel({
           }}
         />
       ) : null}
+      {folderUploadFiles !== null ? (
+        <KnowledgeFolderUploadModal
+          knowledgeBase={item}
+          files={folderUploadFiles}
+          onClose={() => setFolderUploadFiles(null)}
+          onUploaded={(message) => {
+            setFolderUploadFiles(null);
+            onChanged(message);
+          }}
+        />
+      ) : null}
+      {createFolderOpen ? (
+        <KnowledgeCreateFolderModal
+          knowledgeBaseId={item.id}
+          parentPath={breadcrumbFolders.map((folder) => folder.name).join('/') || null}
+          onClose={() => setCreateFolderOpen(false)}
+          onCreated={(message) => {
+            setCreateFolderOpen(false);
+            onChanged(message);
+          }}
+        />
+      ) : null}
+
+      {documentAccessTarget !== null && organization !== null ? (
+        <KnowledgeDocumentAccessModal
+          knowledgeBase={item}
+          document={documentAccessTarget.document}
+          version={documentAccessTarget.version}
+          organization={organization}
+          onClose={() => setDocumentAccessTarget(null)}
+          onChanged={(message) => {
+            setDocumentAccessTarget(null);
+            onChanged(message);
+          }}
+        />
+      ) : null}
+      {webImportOpen ? (
+        <KnowledgeWebImportModal
+          knowledgeBaseId={item.id}
+          onClose={() => setWebImportOpen(false)}
+          onImported={() => {
+            setWebImportOpen(false);
+            onChanged('网页已安全抓取并进入处理队列，解析和索引完成后会自动可用。');
+          }}
+        />
+      ) : null}
+      {sourceConnectorsOpen ? (
+        <Modal
+          title="其他来源接入"
+          description="连接企业网盘或文档源，需要时同步资料；日常文档列表只保留上传和管理操作。"
+          size="wide"
+          onClose={() => setSourceConnectorsOpen(false)}
+        >
+          <KnowledgeSourceConnectorsPanel
+            knowledgeBaseId={item.id}
+            disabled={item.status === 'ARCHIVED'}
+            onChanged={onChanged}
+          />
+        </Modal>
+      ) : null}
       {chunkPreviewTarget ? (
         <KnowledgeChunkPreviewModal
           knowledgeBaseId={item.id}
@@ -578,4 +721,96 @@ export function KnowledgeDocumentsPanel({
       ) : null}
     </>
   );
+}
+
+function KnowledgeFolderCard({
+  folder,
+  processing,
+  onOpen,
+  onDelete,
+  deleting,
+  managedByLexiang,
+}: {
+  folder: KnowledgeBase['folders'][number];
+  processing: KnowledgeFolderProcessingSummary;
+  onOpen: () => void;
+  onDelete: () => void;
+  deleting: boolean;
+  managedByLexiang: boolean;
+}): ReactNode {
+  const statusText =
+    processing.state === 'EMPTY'
+      ? '暂无文档'
+      : processing.state === 'READY'
+        ? `已完成 ${processing.completedDocuments}/${processing.totalDocuments} · ${processing.chunkCount} 个切片`
+        : processing.state === 'FAILED'
+          ? `完成 ${processing.completedDocuments}/${processing.totalDocuments} · ${processing.chunkCount} 个切片 · ${processing.failedDocuments} 个异常`
+          : `完成 ${processing.completedDocuments}/${processing.totalDocuments} · ${processing.chunkCount} 个切片 · ${processing.processingDocuments} 个处理中`;
+  const progressLabel = processing.state === 'EMPTY' ? '尚未开始' : `${processing.progress}%`;
+
+  return (
+    <article
+      className={`knowledge-folder-card ${processing.state.toLowerCase()}`}
+      aria-label={`${folder.name}，${managedByLexiang ? `已同步 ${processing.totalDocuments} 篇乐享文档` : `${statusText}，切片与索引进度${progressLabel}`}`}
+    >
+      <button
+        className="knowledge-folder-open"
+        type="button"
+        onClick={onOpen}
+        aria-label={`${folder.name}，${managedByLexiang ? `已同步 ${processing.totalDocuments} 篇乐享文档` : `${statusText}，切片与索引进度${progressLabel}`}`}
+      >
+        <span className="knowledge-folder-icon" aria-hidden="true">
+          ▰
+        </span>
+        <span className="knowledge-folder-card-content">
+          <span className="knowledge-folder-card-heading">
+            <strong>{folder.name}</strong>
+            {processing.failedDocuments > 0 ? <em>{processing.failedDocuments} 个异常</em> : null}
+          </span>
+          <small>
+            {folder.directChildCount} 个子文件夹 · {processing.totalDocuments} 篇文档（含子目录）
+          </small>
+          {managedByLexiang ? (
+            <small className="knowledge-folder-processing-empty">目录已从腾讯乐享同步</small>
+          ) : processing.state !== 'EMPTY' ? (
+            <span className="knowledge-folder-processing">
+              <span>
+                <small>切片与索引</small>
+                <strong>{processing.progress}%</strong>
+              </span>
+              <progress max={100} value={processing.progress} />
+              <small>{statusText}</small>
+            </span>
+          ) : (
+            <small className="knowledge-folder-processing-empty">尚未上传可处理的文档</small>
+          )}
+        </span>
+      </button>
+      {!managedByLexiang ? (
+        <button
+          className="button danger compact knowledge-folder-delete"
+          type="button"
+          onClick={onDelete}
+          disabled={deleting}
+        >
+          {deleting ? '删除中…' : '删除'}
+        </button>
+      ) : null}
+    </article>
+  );
+}
+
+function knowledgeFolderAncestors(
+  current: KnowledgeBase['folders'][number] | null,
+  folders: KnowledgeBase['folders'],
+): KnowledgeBase['folders'] {
+  const ancestors: KnowledgeBase['folders'][number][] = [];
+  const visited = new Set<string>();
+  let folder = current;
+  while (folder !== null && !visited.has(folder.id)) {
+    ancestors.unshift(folder);
+    visited.add(folder.id);
+    folder = folders.find((candidate) => candidate.id === folder?.parentId) ?? null;
+  }
+  return ancestors;
 }

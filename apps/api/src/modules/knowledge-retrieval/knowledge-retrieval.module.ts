@@ -1,16 +1,39 @@
 import { Module } from '@nestjs/common';
 
+import { AuthorizationModule } from '../authorization/authorization.module.js';
 import { KnowledgeSemanticModule } from '../knowledge-semantic/knowledge-semantic.module.js';
+import { KnowledgeSearchIndexModule } from '../knowledge-search-index/knowledge-search-index.module.js';
+import { KnowledgeObjectStoreModule } from '../knowledge-ingestion/infrastructure/knowledge-object-store.module.js';
+import { KnowledgeProviderModule } from '../knowledge-provider/knowledge-provider.module.js';
 
 import { IdentityModule } from '../identity/identity.module.js';
 import { KnowledgeCitationController } from './knowledge-citation.controller.js';
 import { KnowledgeCitationService } from './knowledge-citation.service.js';
+import { KnowledgeRelationshipExpander } from './domain/knowledge-relationship-expander.port.js';
+import { PrismaKnowledgeRelationshipExpander } from './infrastructure/prisma-knowledge-relationship.expander.js';
 import { KnowledgeRetrievalService } from './knowledge-retrieval.service.js';
+import { KnowledgeStructuredQueryService } from './knowledge-structured-query.service.js';
 
 @Module({
-  imports: [IdentityModule, KnowledgeSemanticModule],
+  imports: [
+    AuthorizationModule,
+    IdentityModule,
+    KnowledgeSemanticModule,
+    KnowledgeSearchIndexModule,
+    KnowledgeObjectStoreModule,
+    KnowledgeProviderModule,
+  ],
   controllers: [KnowledgeCitationController],
-  providers: [KnowledgeCitationService, KnowledgeRetrievalService],
+  providers: [
+    KnowledgeCitationService,
+    KnowledgeStructuredQueryService,
+    PrismaKnowledgeRelationshipExpander,
+    {
+      provide: KnowledgeRelationshipExpander,
+      useExisting: PrismaKnowledgeRelationshipExpander,
+    },
+    KnowledgeRetrievalService,
+  ],
   exports: [KnowledgeCitationService, KnowledgeRetrievalService],
 })
 export class KnowledgeRetrievalModule {}

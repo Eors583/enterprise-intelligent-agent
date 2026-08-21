@@ -1,0 +1,445 @@
+.runtime-governance-page {
+  --runtime-ink: #172033;
+  --runtime-muted: #68748b;
+  --runtime-line: #dde3ee;
+  --runtime-accent: #4e5bd9;
+  --runtime-soft: #f5f7fc;
+}
+
+.runtime-governance-header {
+  align-items: flex-end;
+}
+
+.runtime-governance-header p {
+  max-width: 760px;
+}
+
+.runtime-governance-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.runtime-governance-tabs > button {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 14px 16px;
+  color: var(--runtime-muted);
+  text-align: left;
+  background: #fff;
+  border: 1px solid var(--runtime-line);
+  border-radius: 12px;
+  cursor: pointer;
+}
+
+.runtime-governance-tabs > button strong {
+  color: var(--runtime-ink);
+  font-size: 15px;
+}
+
+.runtime-governance-tabs > button small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-governance-tabs > button.active {
+  background: #f0f2ff;
+  border-color: #aab2f5;
+  box-shadow: inset 3px 0 0 var(--runtime-accent);
+}
+
+.runtime-governance-layout {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.7fr) minmax(0, 1.6fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.runtime-governance-layout > .notice {
+  grid-column: 1 / -1;
+}
+
+.runtime-record-list {
+  position: sticky;
+  top: 78px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  max-height: calc(100vh - 125px);
+  padding: 14px;
+  overflow: auto;
+}
+
+.runtime-record-list > header,
+.runtime-steps-card > header,
+.runtime-reference-list > header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.runtime-record-list > header > div,
+.runtime-steps-card > header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.runtime-record-list > header small,
+.runtime-steps-card > header small {
+  color: var(--runtime-muted);
+}
+
+.runtime-record-list > div:not(.runtime-empty) {
+  display: grid;
+  gap: 7px;
+}
+
+.runtime-record-list > div > button {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  padding: 11px;
+  color: var(--runtime-ink);
+  text-align: left;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.runtime-record-list > div > button:hover,
+.runtime-record-list > div > button.selected {
+  background: #f5f6ff;
+  border-color: #d9dcfb;
+}
+
+.runtime-record-list > div > button.selected {
+  box-shadow: inset 3px 0 0 var(--runtime-accent);
+}
+
+.runtime-record-list > div > button > span:last-child {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.runtime-record-list strong,
+.runtime-record-list small,
+.runtime-record-list code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-record-list small {
+  color: var(--runtime-muted);
+}
+
+.runtime-record-list code,
+.runtime-detail-card code,
+.runtime-step-list code,
+.runtime-reference-list code {
+  color: #52617a;
+  font-size: 11px;
+}
+
+.runtime-mark,
+.runtime-step-state {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  color: #4e5bd9;
+  font-weight: 800;
+  background: #e9ebff;
+  border-radius: 10px;
+}
+
+.runtime-mark.failed,
+.runtime-mark.compensation_failed,
+.runtime-mark.dead_lettered,
+.runtime-step-state.failed,
+.runtime-step-state.compensation_failed,
+.runtime-step-state.timed_out {
+  color: #b42318;
+  background: #feeceb;
+}
+
+.runtime-mark.completed,
+.runtime-mark.compensated,
+.runtime-mark.processed,
+.runtime-step-state.completed,
+.runtime-step-state.compensated {
+  color: #167551;
+  background: #e7f8f0;
+}
+
+.runtime-mark.event {
+  color: #8d5a12;
+  background: #fff3dc;
+}
+
+.runtime-detail-stack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.runtime-detail-card,
+.runtime-steps-card {
+  display: grid;
+  gap: 18px;
+  min-width: 0;
+  padding: 20px;
+}
+
+.runtime-detail-card > header {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.runtime-detail-card h2 {
+  margin: 3px 0 6px;
+  color: var(--runtime-ink);
+  font-size: 22px;
+}
+
+.runtime-detail-card header p {
+  margin: 0;
+  color: var(--runtime-muted);
+}
+
+.runtime-detail-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 9px;
+  align-items: center;
+}
+
+.runtime-identity-grid,
+.runtime-time-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 9px;
+  margin: 0;
+}
+
+.runtime-identity-grid > div,
+.runtime-time-grid > div {
+  min-width: 0;
+  padding: 11px 12px;
+  background: var(--runtime-soft);
+  border: 1px solid #e9edf4;
+  border-radius: 9px;
+}
+
+.runtime-identity-grid dt,
+.runtime-time-grid dt {
+  margin-bottom: 5px;
+  color: var(--runtime-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.runtime-identity-grid dd,
+.runtime-time-grid dd {
+  margin: 0;
+  overflow: hidden;
+  color: var(--runtime-ink);
+  font-size: 12px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-failure {
+  display: grid;
+  gap: 4px;
+  padding: 12px 14px;
+  color: #8e2118;
+  background: #fff2f0;
+  border: 1px solid #ffd2cc;
+  border-radius: 9px;
+}
+
+.runtime-json-snapshot {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-json-snapshot pre {
+  max-height: 280px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  color: #d8e4ff;
+  font:
+    12px/1.55 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  background: #152037;
+  border-radius: 10px;
+}
+
+.runtime-step-list {
+  display: grid;
+  gap: 8px;
+}
+
+.runtime-step-list > article {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: center;
+  padding: 11px 12px;
+  background: #fbfcfe;
+  border: 1px solid var(--runtime-line);
+  border-radius: 10px;
+}
+
+.runtime-step-list > article > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.runtime-step-list > article > div:last-child {
+  justify-items: end;
+}
+
+.runtime-step-list small,
+.runtime-muted,
+.runtime-reference-list p {
+  color: var(--runtime-muted);
+}
+
+.runtime-load-state {
+  display: grid;
+  gap: 9px;
+  place-items: center;
+  min-height: 260px;
+  padding: 24px;
+  text-align: center;
+  background: #fff;
+  border: 1px solid var(--runtime-line);
+  border-radius: 12px;
+}
+
+.runtime-load-state.compact {
+  min-height: 150px;
+  border-style: dashed;
+}
+
+.runtime-load-state.error {
+  color: #8e2118;
+  background: #fff8f7;
+}
+
+.runtime-load-state p {
+  max-width: 620px;
+  margin: 0;
+}
+
+.runtime-empty {
+  display: grid;
+  gap: 6px;
+  place-items: center;
+  min-height: 170px;
+  padding: 20px;
+  color: var(--runtime-muted);
+  text-align: center;
+  border: 1px dashed var(--runtime-line);
+  border-radius: 10px;
+}
+
+.runtime-empty > span {
+  font-size: 28px;
+}
+
+.runtime-empty p {
+  margin: 0;
+}
+
+.runtime-reference-list {
+  display: grid;
+  gap: 9px;
+}
+
+.runtime-event-picker {
+  display: grid;
+  gap: 5px;
+  color: var(--runtime-muted);
+  font-size: 12px;
+}
+
+.runtime-event-picker select {
+  width: 100%;
+  min-width: 0;
+}
+
+.runtime-reference-list > header > span {
+  display: grid;
+  place-items: center;
+  min-width: 24px;
+  height: 24px;
+  color: #4e5bd9;
+  background: #eceeff;
+  border-radius: 12px;
+}
+
+.runtime-reference-list > code {
+  display: block;
+  padding: 9px 11px;
+  background: var(--runtime-soft);
+  border-radius: 8px;
+}
+
+.runtime-command-form > code {
+  padding: 9px 11px;
+  color: #47536a;
+  background: #f3f5f9;
+  border-radius: 8px;
+}
+
+@media (max-width: 980px) {
+  .runtime-governance-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-record-list {
+    position: static;
+    max-height: none;
+  }
+}
+
+@media (max-width: 680px) {
+  .runtime-governance-tabs,
+  .runtime-identity-grid,
+  .runtime-time-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-detail-card > header,
+  .runtime-detail-actions {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .runtime-step-list > article {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+
+  .runtime-step-list > article > div:last-child {
+    grid-column: 1 / -1;
+    justify-items: stretch;
+  }
+}

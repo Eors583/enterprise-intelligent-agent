@@ -1,6 +1,19 @@
 import { isAbsolute } from 'node:path';
+import { isIP } from 'node:net';
 
 export type NodeEnvironment = 'development' | 'test' | 'production';
+
+declare const s3KmsKeyReferenceBrand: unique symbol;
+export type S3KmsKeyReference = string & {
+  readonly [s3KmsKeyReferenceBrand]: 'S3KmsKeyReference';
+};
+
+export interface ToolEndpointBinding {
+  readonly url: string;
+  readonly method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  readonly headers: Readonly<Record<string, string>>;
+  readonly signingSecret: string | null;
+}
 
 export interface EnvironmentVariables {
   readonly NODE_ENV: NodeEnvironment;
@@ -12,7 +25,15 @@ export interface EnvironmentVariables {
   readonly OUTBOX_DATABASE_URL?: string;
   readonly AUTH_DATABASE_URL?: string;
   readonly ADMIN_DATABASE_URL?: string;
+  readonly LIFECYCLE_DATABASE_URL?: string;
+  readonly SCIM_DATABASE_URL?: string;
   readonly AUTH_TOKEN_PEPPER: string;
+  readonly CONNECTOR_CREDENTIAL_KEYRING: Readonly<Record<string, string>>;
+  readonly CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID?: string;
+  readonly IDENTITY_SECRET_KEYRING: Readonly<Record<string, string>>;
+  readonly IDENTITY_SECRET_ACTIVE_KEY_ID?: string;
+  readonly AUTH_MFA_CHALLENGE_TTL_SECONDS: number;
+  readonly IDENTITY_OIDC_HTTP_TIMEOUT_MS: number;
   readonly AUTH_ACCESS_TTL_SECONDS: number;
   readonly AUTH_REFRESH_TTL_SECONDS: number;
   readonly AUTH_LOGIN_RATE_LIMIT_ENABLED: boolean;
@@ -27,6 +48,7 @@ export interface EnvironmentVariables {
   readonly AUTH_RECOVERY_RATE_LIMIT_WINDOW_SECONDS?: number;
   readonly AUTH_PASSWORD_RESET_TTL_SECONDS?: number;
   readonly AUTH_MEMBER_INVITATION_TTL_SECONDS?: number;
+  readonly AUTH_MEMBER_INVITATION_FALLBACK_TTL_SECONDS?: number;
   readonly AUTH_RECOVERY_EMAIL_PROVIDER?: 'disabled' | 'resend';
   readonly AUTH_RECOVERY_EMAIL_API_KEY?: string;
   readonly AUTH_RECOVERY_EMAIL_FROM?: string;
@@ -38,7 +60,7 @@ export interface EnvironmentVariables {
   readonly DEV_USER_ID: string;
   readonly TRUST_PROXY_IDENTITY_HEADERS: boolean;
   readonly IM_OUTBOX_ENABLED: boolean;
-  readonly IM_PROVIDER: 'local' | 'tencent';
+  readonly IM_PROVIDER: 'local' | 'tencent' | 'wukong';
   readonly IM_OUTBOX_POLL_INTERVAL_MS: number;
   readonly IM_OUTBOX_BATCH_SIZE: number;
   readonly IM_OUTBOX_MAX_ATTEMPTS: number;
@@ -52,17 +74,46 @@ export interface EnvironmentVariables {
   readonly TENCENT_IM_API_BASE_URL: string;
   readonly TENCENT_IM_USER_SIG_TTL_SECONDS: number;
   readonly TENCENT_IM_HTTP_TIMEOUT_MS: number;
+  readonly WUKONG_IM_API_BASE_URL: string;
+  readonly WUKONG_IM_PUBLIC_WS_URL: string;
+  readonly WUKONG_IM_API_TOKEN?: string;
+  readonly WUKONG_IM_TOKEN_SIGNING_SECRET?: string;
+  readonly WUKONG_IM_HTTP_TIMEOUT_MS: number;
+  readonly WUKONG_IM_VERIFIED_AUTH_ENABLED: boolean;
   readonly AGENT_RUN_WORKER_ENABLED: boolean;
   readonly AGENT_RUN_WORKER_CONCURRENCY: number;
   readonly AGENT_RUN_POLL_INTERVAL_MS: number;
   readonly AGENT_RUN_CLAIM_TTL_MS: number;
+  readonly AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS: number;
+  readonly TOOL_EXECUTION_WORKER_ENABLED: boolean;
+  readonly TOOL_EXECUTION_WORKER_CONCURRENCY: number;
+  readonly TOOL_EXECUTION_POLL_INTERVAL_MS: number;
+  readonly TOOL_EXECUTION_CLAIM_TTL_MS: number;
+  readonly TOOL_MAX_CONCURRENT_PER_VERSION: number;
+  readonly TOOL_MAX_STARTS_PER_MINUTE_PER_VERSION: number;
+  readonly TOOL_PROVIDER_MAX_RESPONSE_BYTES: number;
+  readonly TOOL_CIRCUIT_FAILURE_THRESHOLD: number;
+  readonly TOOL_CIRCUIT_OPEN_MS: number;
+  readonly TOOL_ENDPOINT_BINDINGS: Readonly<Record<string, ToolEndpointBinding>>;
+  readonly TOOL_DNS_SERVERS: readonly string[];
+  readonly FINOPS_PROJECTION_WORKER_ENABLED: boolean;
+  readonly FINOPS_PROJECTION_BATCH_SIZE: number;
+  readonly FINOPS_PROJECTION_POLL_INTERVAL_MS: number;
+  readonly FINOPS_PROJECTION_CLAIM_TTL_MS: number;
   readonly AI_RUNTIME_URL: string;
   readonly AI_RUNTIME_HTTP_TIMEOUT_MS: number;
+  readonly AI_RUNTIME_SERVICE_TOKEN?: string;
+  readonly AI_EVALUATION_RUNNER_HMAC_SECRET?: string;
   readonly KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: boolean;
   readonly KNOWLEDGE_RERANK_ENABLED: boolean;
   readonly KNOWLEDGE_AI_TIMEOUT_MS: number;
-  readonly KNOWLEDGE_EMBEDDING_DIMENSIONS: 1536;
+  readonly KNOWLEDGE_EMBEDDING_DIMENSIONS: number;
   readonly KNOWLEDGE_VECTOR_SEARCH_MODE: 'exact' | 'hnsw';
+  readonly KNOWLEDGE_SEARCH_INDEX_DRIVER: 'postgres' | 'qdrant';
+  readonly KNOWLEDGE_QDRANT_URL?: string;
+  readonly KNOWLEDGE_QDRANT_API_KEY?: string;
+  readonly KNOWLEDGE_QDRANT_COLLECTION: string;
+  readonly KNOWLEDGE_QDRANT_TIMEOUT_MS: number;
   readonly KNOWLEDGE_OBJECT_STORE_DRIVER: 'local' | 's3';
   readonly KNOWLEDGE_OBJECT_STORE_MAX_BYTES: number;
   readonly KNOWLEDGE_OBJECT_STORE_LOCAL_ROOT?: string;
@@ -74,6 +125,7 @@ export interface EnvironmentVariables {
   readonly KNOWLEDGE_OBJECT_STORE_S3_SECRET_ACCESS_KEY?: string;
   readonly KNOWLEDGE_OBJECT_STORE_S3_FORCE_PATH_STYLE: boolean;
   readonly KNOWLEDGE_OBJECT_STORE_S3_PREFIX: string;
+  readonly KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID?: S3KmsKeyReference;
   readonly KNOWLEDGE_FILE_SCANNER_DRIVER: 'disabled' | 'clamav';
   readonly KNOWLEDGE_FILE_SCANNER_CLAMAV_HOST: string;
   readonly KNOWLEDGE_FILE_SCANNER_CLAMAV_PORT: number;
@@ -83,6 +135,19 @@ export interface EnvironmentVariables {
   readonly KNOWLEDGE_DOCLING_API_KEY?: string;
   readonly KNOWLEDGE_DOCLING_TIMEOUT_MS: number;
   readonly KNOWLEDGE_DOCLING_MAX_RESPONSE_BYTES: number;
+  readonly KNOWLEDGE_TIKA_BASE_URL?: string;
+  readonly KNOWLEDGE_TIKA_TIMEOUT_MS?: number;
+  readonly KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES?: number;
+  readonly KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS: readonly string[];
+  readonly KNOWLEDGE_WEB_IMPORT_TIMEOUT_MS: number;
+  readonly KNOWLEDGE_WEB_IMPORT_MAX_BYTES: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS: readonly string[];
+  readonly KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_MAX_PAGES: number;
+  readonly KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE: boolean;
+  readonly KNOWLEDGE_LOCAL_BACKEND_ENABLED: boolean;
+  readonly KNOWLEDGE_PERSISTENT_WRITES_ENABLED: boolean;
   readonly KNOWLEDGE_INGESTION_WORKER_ENABLED: boolean;
   readonly KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: number;
   readonly KNOWLEDGE_INGESTION_BATCH_SIZE: number;
@@ -92,13 +157,19 @@ export interface EnvironmentVariables {
   readonly KNOWLEDGE_INGESTION_CLAIM_TTL_MS: number;
   readonly FEISHU_DIRECTORY_SYNC_ENABLED: boolean;
   readonly FEISHU_DIRECTORY_RECONCILE_REMOVALS: boolean;
-  readonly FEISHU_DIRECTORY_INITIAL_PASSWORD: string;
   readonly FEISHU_DIRECTORY_TARGET_TENANT_SLUG?: string;
   readonly FEISHU_APP_ID?: string;
   readonly FEISHU_APP_SECRET?: string;
   readonly FEISHU_API_BASE_URL: string;
   readonly FEISHU_HTTP_TIMEOUT_MS: number;
   readonly FEISHU_SYNC_LEASE_MS: number;
+  readonly FEISHU_SYNC_PREVIEW_TTL_MS: number;
+  readonly FEISHU_SYNC_WORKER_ENABLED: boolean;
+  readonly FEISHU_SYNC_WORKER_POLL_INTERVAL_MS: number;
+  readonly FEISHU_SYNC_WORKER_BATCH_SIZE: number;
+  readonly FEISHU_SYNC_MAX_ATTEMPTS: number;
+  readonly FEISHU_SYNC_RETRY_BASE_MS: number;
+  readonly FEISHU_SYNC_RETRY_MAX_MS: number;
 }
 
 /**
@@ -124,6 +195,8 @@ const DEFAULT_TENANT_ID = '00000000-0000-7000-8000-000000000001';
 const DEFAULT_USER_ID = '00000000-0000-7000-8000-000000000101';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TENCENT_IM_DEFAULT_API_BASE_URL = 'https://console.tim.qq.com';
+const WUKONG_IM_DEFAULT_API_BASE_URL = 'http://127.0.0.1:5501';
+const WUKONG_IM_DEFAULT_PUBLIC_WS_URL = 'ws://127.0.0.1:5520';
 const TENCENT_IM_ACCOUNT_PATTERN = /^[A-Za-z0-9_-]+$/;
 const TENANT_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const FEISHU_DEFAULT_API_BASE_URL = 'https://open.feishu.cn';
@@ -159,9 +232,23 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const configuredOutboxDatabaseUrl = parseOptionalString(source.OUTBOX_DATABASE_URL);
   const configuredAuthDatabaseUrl = parseOptionalString(source.AUTH_DATABASE_URL);
   const configuredAdminDatabaseUrl = parseOptionalString(source.ADMIN_DATABASE_URL);
+  const configuredLifecycleDatabaseUrl = parseOptionalString(source.LIFECYCLE_DATABASE_URL);
+  const configuredScimDatabaseUrl = parseOptionalString(source.SCIM_DATABASE_URL);
   const authTokenPepper =
     parseOptionalString(source.AUTH_TOKEN_PEPPER) ??
     'development-only-token-pepper-change-before-production';
+  const connectorCredentialKeyring = parseConnectorCredentialKeyring(
+    source.CONNECTOR_CREDENTIAL_KEYRING_JSON,
+  );
+  const connectorCredentialActiveKeyId = parseConnectorCredentialKeyId(
+    source.CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID,
+    'CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID',
+  );
+  const identitySecretKeyring = parseIdentitySecretKeyring(source.IDENTITY_SECRET_KEYRING_JSON);
+  const identitySecretActiveKeyId = parseConnectorCredentialKeyId(
+    source.IDENTITY_SECRET_ACTIVE_KEY_ID,
+    'IDENTITY_SECRET_ACTIVE_KEY_ID',
+  );
   const authAccessTtlSeconds = parseInteger(
     source.AUTH_ACCESS_TTL_SECONDS,
     'AUTH_ACCESS_TTL_SECONDS',
@@ -175,6 +262,20 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     2_592_000,
     3_600,
     31_536_000,
+  );
+  const authMfaChallengeTtlSeconds = parseInteger(
+    source.AUTH_MFA_CHALLENGE_TTL_SECONDS,
+    'AUTH_MFA_CHALLENGE_TTL_SECONDS',
+    300,
+    60,
+    600,
+  );
+  const identityOidcHttpTimeoutMs = parseInteger(
+    source.IDENTITY_OIDC_HTTP_TIMEOUT_MS,
+    'IDENTITY_OIDC_HTTP_TIMEOUT_MS',
+    10_000,
+    500,
+    60_000,
   );
   const authLoginRateLimitEnabled = parseBoolean(
     source.AUTH_LOGIN_RATE_LIMIT_ENABLED,
@@ -254,6 +355,18 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     900,
     2_592_000,
   );
+  const authMemberInvitationFallbackTtlSeconds = parseInteger(
+    source.AUTH_MEMBER_INVITATION_FALLBACK_TTL_SECONDS,
+    'AUTH_MEMBER_INVITATION_FALLBACK_TTL_SECONDS',
+    900,
+    300,
+    3_600,
+  );
+  if (authMemberInvitationFallbackTtlSeconds > authMemberInvitationTtlSeconds) {
+    throw new Error(
+      'AUTH_MEMBER_INVITATION_FALLBACK_TTL_SECONDS must not exceed AUTH_MEMBER_INVITATION_TTL_SECONDS.',
+    );
+  }
   const authRecoveryEmailProvider = parseAuthRecoveryEmailProvider(
     source.AUTH_RECOVERY_EMAIL_PROVIDER,
   );
@@ -318,7 +431,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const imOutboxClaimTtlMs = parseInteger(
     source.IM_OUTBOX_CLAIM_TTL_MS,
     'IM_OUTBOX_CLAIM_TTL_MS',
-    30_000,
+    90_000,
     1_000,
     3_600_000,
   );
@@ -352,6 +465,27 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     500,
     60_000,
   );
+  const wukongApiBaseUrl = parseWukongApiBaseUrl(
+    source.WUKONG_IM_API_BASE_URL ?? WUKONG_IM_DEFAULT_API_BASE_URL,
+    imProvider === 'wukong' ? nodeEnvironment : 'development',
+  );
+  const wukongPublicWsUrl = parseWukongPublicWsUrl(
+    source.WUKONG_IM_PUBLIC_WS_URL ?? WUKONG_IM_DEFAULT_PUBLIC_WS_URL,
+    imProvider === 'wukong' ? nodeEnvironment : 'development',
+  );
+  const wukongApiToken = parseOptionalSecret(source.WUKONG_IM_API_TOKEN, 'WUKONG_IM_API_TOKEN');
+  const wukongTokenSigningSecret = parseOptionalSecret(
+    source.WUKONG_IM_TOKEN_SIGNING_SECRET,
+    'WUKONG_IM_TOKEN_SIGNING_SECRET',
+  );
+  const wukongHttpTimeoutMs = parseInteger(
+    source.WUKONG_IM_HTTP_TIMEOUT_MS,
+    'WUKONG_IM_HTTP_TIMEOUT_MS',
+    5_000,
+    500,
+    60_000,
+  );
+  const wukongVerifiedAuthEnabled = parseBoolean(source.WUKONG_IM_VERIFIED_AUTH_ENABLED, false);
   const agentRunWorkerEnabled = parseBoolean(
     source.AGENT_RUN_WORKER_ENABLED,
     nodeEnvironment === 'development' && repositoryDriver === 'prisma',
@@ -359,7 +493,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const agentRunWorkerConcurrency = parseInteger(
     source.AGENT_RUN_WORKER_CONCURRENCY,
     'AGENT_RUN_WORKER_CONCURRENCY',
-    1,
+    4,
     1,
     8,
   );
@@ -373,18 +507,118 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   const agentRunClaimTtlMs = parseInteger(
     source.AGENT_RUN_CLAIM_TTL_MS,
     'AGENT_RUN_CLAIM_TTL_MS',
-    120_000,
+    360_000,
     5_000,
     3_600_000,
   );
+  const agentRunUnknownReconciliationDelayMs = parseInteger(
+    source.AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS,
+    'AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS',
+    300_000,
+    10_000,
+    86_400_000,
+  );
+  const toolExecutionWorkerEnabled = parseBoolean(
+    source.TOOL_EXECUTION_WORKER_ENABLED,
+    nodeEnvironment === 'development' && repositoryDriver === 'prisma',
+  );
+  const toolExecutionWorkerConcurrency = parseInteger(
+    source.TOOL_EXECUTION_WORKER_CONCURRENCY,
+    'TOOL_EXECUTION_WORKER_CONCURRENCY',
+    2,
+    1,
+    32,
+  );
+  const toolExecutionPollIntervalMs = parseInteger(
+    source.TOOL_EXECUTION_POLL_INTERVAL_MS,
+    'TOOL_EXECUTION_POLL_INTERVAL_MS',
+    500,
+    10,
+    60_000,
+  );
+  const toolExecutionClaimTtlMs = parseInteger(
+    source.TOOL_EXECUTION_CLAIM_TTL_MS,
+    'TOOL_EXECUTION_CLAIM_TTL_MS',
+    180_000,
+    135_001,
+    3_600_000,
+  );
+  const finopsProjectionWorkerEnabled = parseBoolean(
+    source.FINOPS_PROJECTION_WORKER_ENABLED,
+    nodeEnvironment === 'development' && repositoryDriver === 'prisma',
+  );
+  const finopsProjectionBatchSize = parseInteger(
+    source.FINOPS_PROJECTION_BATCH_SIZE,
+    'FINOPS_PROJECTION_BATCH_SIZE',
+    25,
+    1,
+    500,
+  );
+  const finopsProjectionPollIntervalMs = parseInteger(
+    source.FINOPS_PROJECTION_POLL_INTERVAL_MS,
+    'FINOPS_PROJECTION_POLL_INTERVAL_MS',
+    5_000,
+    100,
+    300_000,
+  );
+  const finopsProjectionClaimTtlMs = parseInteger(
+    source.FINOPS_PROJECTION_CLAIM_TTL_MS,
+    'FINOPS_PROJECTION_CLAIM_TTL_MS',
+    60_000,
+    5_000,
+    3_600_000,
+  );
+  const toolMaxConcurrentPerVersion = parseInteger(
+    source.TOOL_MAX_CONCURRENT_PER_VERSION,
+    'TOOL_MAX_CONCURRENT_PER_VERSION',
+    4,
+    1,
+    1_000,
+  );
+  const toolMaxStartsPerMinutePerVersion = parseInteger(
+    source.TOOL_MAX_STARTS_PER_MINUTE_PER_VERSION,
+    'TOOL_MAX_STARTS_PER_MINUTE_PER_VERSION',
+    60,
+    1,
+    100_000,
+  );
+  const toolProviderMaxResponseBytes = parseInteger(
+    source.TOOL_PROVIDER_MAX_RESPONSE_BYTES,
+    'TOOL_PROVIDER_MAX_RESPONSE_BYTES',
+    1_048_576,
+    1_024,
+    16_777_216,
+  );
+  const toolCircuitFailureThreshold = parseInteger(
+    source.TOOL_CIRCUIT_FAILURE_THRESHOLD,
+    'TOOL_CIRCUIT_FAILURE_THRESHOLD',
+    5,
+    2,
+    100,
+  );
+  const toolCircuitOpenMs = parseInteger(
+    source.TOOL_CIRCUIT_OPEN_MS,
+    'TOOL_CIRCUIT_OPEN_MS',
+    30_000,
+    1_000,
+    3_600_000,
+  );
+  const toolEndpointBindings = parseToolEndpointBindings(
+    source.TOOL_ENDPOINT_BINDINGS_JSON,
+    nodeEnvironment,
+    toolExecutionWorkerEnabled,
+  );
+  const toolDnsServers = parseToolDnsServers(source.TOOL_DNS_SERVERS);
   const aiRuntimeUrl = parseAiRuntimeUrl(source.AI_RUNTIME_URL ?? 'http://127.0.0.1:8100');
   const aiRuntimeHttpTimeoutMs = parseInteger(
     source.AI_RUNTIME_HTTP_TIMEOUT_MS,
     'AI_RUNTIME_HTTP_TIMEOUT_MS',
-    90_000,
+    330_000,
     1_000,
     600_000,
   );
+  const aiRuntimeServiceToken = parseOptionalString(source.AI_RUNTIME_SERVICE_TOKEN);
+  const aiEvaluationRunnerHmacSecret = parseOptionalString(source.AI_EVALUATION_RUNNER_HMAC_SECRET);
   const knowledgeSemanticSearchEnabled = parseBoolean(
     source.KNOWLEDGE_SEMANTIC_SEARCH_ENABLED,
     false,
@@ -401,11 +635,31 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     source.KNOWLEDGE_EMBEDDING_DIMENSIONS,
     'KNOWLEDGE_EMBEDDING_DIMENSIONS',
     1_536,
-    1_536,
-    1_536,
-  ) as 1536;
+    1,
+    16_000,
+  );
   const knowledgeVectorSearchMode = parseKnowledgeVectorSearchMode(
     source.KNOWLEDGE_VECTOR_SEARCH_MODE,
+  );
+  const knowledgeSearchIndexDriver = parseKnowledgeSearchIndexDriver(
+    source.KNOWLEDGE_SEARCH_INDEX_DRIVER,
+  );
+  const knowledgeQdrantUrl = parseOptionalServiceOrigin(
+    source.KNOWLEDGE_QDRANT_URL,
+    'KNOWLEDGE_QDRANT_URL',
+    nodeEnvironment,
+  );
+  const knowledgeQdrantApiKey = parseOptionalSecret(
+    source.KNOWLEDGE_QDRANT_API_KEY,
+    'KNOWLEDGE_QDRANT_API_KEY',
+  );
+  const knowledgeQdrantCollection = parseQdrantCollection(source.KNOWLEDGE_QDRANT_COLLECTION);
+  const knowledgeQdrantTimeoutMs = parseInteger(
+    source.KNOWLEDGE_QDRANT_TIMEOUT_MS,
+    'KNOWLEDGE_QDRANT_TIMEOUT_MS',
+    10_000,
+    500,
+    120_000,
   );
   const knowledgeObjectStoreDriver = parseKnowledgeObjectStoreDriver(
     source.KNOWLEDGE_OBJECT_STORE_DRIVER,
@@ -415,7 +669,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     'KNOWLEDGE_OBJECT_STORE_MAX_BYTES',
     52_428_800,
     1_048_576,
-    536_870_912,
+    2_147_483_647,
   );
   const knowledgeObjectStoreLocalRoot = parseOptionalAbsolutePath(
     source.KNOWLEDGE_OBJECT_STORE_LOCAL_ROOT,
@@ -447,6 +701,11 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     true,
   );
   const knowledgeObjectStoreS3Prefix = parseS3Prefix(source.KNOWLEDGE_OBJECT_STORE_S3_PREFIX);
+  const knowledgeObjectStoreS3KmsKeyId = parseOptionalS3KmsKeyReference(
+    source.KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID,
+    nodeEnvironment,
+    knowledgeObjectStoreS3Region,
+  );
   const knowledgeFileScannerDriver = parseKnowledgeFileScannerDriver(
     source.KNOWLEDGE_FILE_SCANNER_DRIVER,
   );
@@ -495,10 +754,83 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     1_024,
     134_217_728,
   );
-  const knowledgeIngestionWorkerEnabled = parseBoolean(
-    source.KNOWLEDGE_INGESTION_WORKER_ENABLED,
-    nodeEnvironment === 'development' && repositoryDriver === 'prisma',
+  const knowledgeTikaBaseUrl = parseOptionalServiceOrigin(
+    source.KNOWLEDGE_TIKA_BASE_URL,
+    'KNOWLEDGE_TIKA_BASE_URL',
+    nodeEnvironment,
   );
+  const knowledgeTikaTimeoutMs = parseInteger(
+    source.KNOWLEDGE_TIKA_TIMEOUT_MS,
+    'KNOWLEDGE_TIKA_TIMEOUT_MS',
+    120_000,
+    1_000,
+    900_000,
+  );
+  const knowledgeTikaMaxResponseBytes = parseInteger(
+    source.KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES,
+    'KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES',
+    33_554_432,
+    1_024,
+    134_217_728,
+  );
+  const knowledgeWebImportAllowedHosts = parseKnowledgeWebImportAllowedHosts(
+    source.KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS,
+  );
+  const knowledgeWebImportTimeoutMs = parseInteger(
+    source.KNOWLEDGE_WEB_IMPORT_TIMEOUT_MS,
+    'KNOWLEDGE_WEB_IMPORT_TIMEOUT_MS',
+    15_000,
+    500,
+    60_000,
+  );
+  const knowledgeWebImportMaxBytes = parseInteger(
+    source.KNOWLEDGE_WEB_IMPORT_MAX_BYTES,
+    'KNOWLEDGE_WEB_IMPORT_MAX_BYTES',
+    5_242_880,
+    1_024,
+    20_971_520,
+  );
+  const knowledgeSourceSyncAllowedHosts = parseKnowledgeSourceSyncAllowedHosts(
+    source.KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS,
+  );
+  const knowledgeSourceSyncTimeoutMs = parseInteger(
+    source.KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS,
+    'KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS',
+    20_000,
+    500,
+    120_000,
+  );
+  const knowledgeSourceSyncManifestMaxBytes = parseInteger(
+    source.KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES,
+    'KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES',
+    2_097_152,
+    1_024,
+    10_485_760,
+  );
+  const knowledgeSourceSyncMaxPages = parseInteger(
+    source.KNOWLEDGE_SOURCE_SYNC_MAX_PAGES,
+    'KNOWLEDGE_SOURCE_SYNC_MAX_PAGES',
+    100,
+    1,
+    1_000,
+  );
+  const knowledgeSourceSyncAllowLocalFixture = parseBoolean(
+    source.KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE,
+    false,
+  );
+  const knowledgeLocalBackendEnabled = parseBoolean(source.KNOWLEDGE_LOCAL_BACKEND_ENABLED, true);
+  const knowledgePersistentWritesEnabled =
+    knowledgeLocalBackendEnabled &&
+    parseBoolean(
+      source.KNOWLEDGE_PERSISTENT_WRITES_ENABLED,
+      nodeEnvironment !== 'production' && repositoryDriver === 'prisma',
+    );
+  const knowledgeIngestionWorkerEnabled =
+    knowledgeLocalBackendEnabled &&
+    parseBoolean(
+      source.KNOWLEDGE_INGESTION_WORKER_ENABLED,
+      nodeEnvironment === 'development' && repositoryDriver === 'prisma',
+    );
   const knowledgeIngestionPollIntervalMs = parseInteger(
     source.KNOWLEDGE_INGESTION_POLL_INTERVAL_MS,
     'KNOWLEDGE_INGESTION_POLL_INTERVAL_MS',
@@ -546,8 +878,6 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     source.FEISHU_DIRECTORY_RECONCILE_REMOVALS,
     false,
   );
-  const feishuDirectoryInitialPassword =
-    parseOptionalString(source.FEISHU_DIRECTORY_INITIAL_PASSWORD) ?? '1234567890';
   const feishuDirectoryTargetTenantSlug = parseOptionalTenantSlug(
     source.FEISHU_DIRECTORY_TARGET_TENANT_SLUG,
     'FEISHU_DIRECTORY_TARGET_TENANT_SLUG',
@@ -570,6 +900,52 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     1_800_000,
     900_000,
     3_600_000,
+  );
+  const feishuSyncPreviewTtlMs = parseInteger(
+    source.FEISHU_SYNC_PREVIEW_TTL_MS,
+    'FEISHU_SYNC_PREVIEW_TTL_MS',
+    900_000,
+    60_000,
+    86_400_000,
+  );
+  const feishuSyncWorkerEnabled = parseBoolean(
+    source.FEISHU_SYNC_WORKER_ENABLED,
+    repositoryDriver === 'prisma',
+  );
+  const feishuSyncWorkerPollIntervalMs = parseInteger(
+    source.FEISHU_SYNC_WORKER_POLL_INTERVAL_MS,
+    'FEISHU_SYNC_WORKER_POLL_INTERVAL_MS',
+    2_000,
+    250,
+    60_000,
+  );
+  const feishuSyncWorkerBatchSize = parseInteger(
+    source.FEISHU_SYNC_WORKER_BATCH_SIZE,
+    'FEISHU_SYNC_WORKER_BATCH_SIZE',
+    2,
+    1,
+    20,
+  );
+  const feishuSyncMaxAttempts = parseInteger(
+    source.FEISHU_SYNC_MAX_ATTEMPTS,
+    'FEISHU_SYNC_MAX_ATTEMPTS',
+    4,
+    1,
+    20,
+  );
+  const feishuSyncRetryBaseMs = parseInteger(
+    source.FEISHU_SYNC_RETRY_BASE_MS,
+    'FEISHU_SYNC_RETRY_BASE_MS',
+    10_000,
+    1_000,
+    3_600_000,
+  );
+  const feishuSyncRetryMaxMs = parseInteger(
+    source.FEISHU_SYNC_RETRY_MAX_MS,
+    'FEISHU_SYNC_RETRY_MAX_MS',
+    300_000,
+    1_000,
+    86_400_000,
   );
 
   if (nodeEnvironment === 'production' && repositoryDriver === 'memory') {
@@ -608,18 +984,79 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   if (nodeEnvironment === 'production' && authTokenPepper.length < 32) {
     throw new Error('AUTH_TOKEN_PEPPER must contain at least 32 characters in production.');
   }
+  if (nodeEnvironment === 'production' && connectorCredentialActiveKeyId === undefined) {
+    throw new Error(
+      'CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID is required in production so connector credentials do not reuse AUTH_TOKEN_PEPPER.',
+    );
+  }
+  if (
+    Object.keys(connectorCredentialKeyring).length > 0 &&
+    connectorCredentialActiveKeyId === undefined
+  ) {
+    throw new Error(
+      'CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID is required when CONNECTOR_CREDENTIAL_KEYRING_JSON is configured.',
+    );
+  }
+  if (
+    connectorCredentialActiveKeyId !== undefined &&
+    connectorCredentialKeyring[connectorCredentialActiveKeyId] === undefined
+  ) {
+    throw new Error(
+      'CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID must reference a key in CONNECTOR_CREDENTIAL_KEYRING_JSON.',
+    );
+  }
+  if (nodeEnvironment === 'production' && identitySecretActiveKeyId === undefined) {
+    throw new Error(
+      'IDENTITY_SECRET_ACTIVE_KEY_ID is required in production for MFA and enterprise IdP secrets.',
+    );
+  }
+  if (Object.keys(identitySecretKeyring).length > 0 && identitySecretActiveKeyId === undefined) {
+    throw new Error(
+      'IDENTITY_SECRET_ACTIVE_KEY_ID is required when IDENTITY_SECRET_KEYRING_JSON is configured.',
+    );
+  }
+  if (
+    identitySecretActiveKeyId !== undefined &&
+    identitySecretKeyring[identitySecretActiveKeyId] === undefined
+  ) {
+    throw new Error(
+      'IDENTITY_SECRET_ACTIVE_KEY_ID must reference a key in IDENTITY_SECRET_KEYRING_JSON.',
+    );
+  }
   if (imOutboxEnabled && repositoryDriver !== 'prisma') {
     throw new Error('IM_OUTBOX_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
   }
   if (agentRunWorkerEnabled && repositoryDriver !== 'prisma') {
     throw new Error('AGENT_RUN_WORKER_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
   }
+  if (toolExecutionWorkerEnabled && repositoryDriver !== 'prisma') {
+    throw new Error('TOOL_EXECUTION_WORKER_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
+  }
+  if (finopsProjectionWorkerEnabled && repositoryDriver !== 'prisma') {
+    throw new Error('FINOPS_PROJECTION_WORKER_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
+  }
   if (knowledgeIngestionWorkerEnabled && repositoryDriver !== 'prisma') {
     throw new Error('KNOWLEDGE_INGESTION_WORKER_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
   }
+  if (knowledgePersistentWritesEnabled && repositoryDriver !== 'prisma') {
+    throw new Error('KNOWLEDGE_PERSISTENT_WRITES_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
+  }
   if (
     nodeEnvironment === 'production' &&
-    (imOutboxEnabled || agentRunWorkerEnabled || knowledgeIngestionWorkerEnabled)
+    knowledgePersistentWritesEnabled &&
+    !knowledgeIngestionWorkerEnabled
+  ) {
+    throw new Error(
+      'KNOWLEDGE_PERSISTENT_WRITES_ENABLED=true requires KNOWLEDGE_INGESTION_WORKER_ENABLED=true in production.',
+    );
+  }
+  if (
+    nodeEnvironment === 'production' &&
+    (imOutboxEnabled ||
+      agentRunWorkerEnabled ||
+      toolExecutionWorkerEnabled ||
+      finopsProjectionWorkerEnabled ||
+      knowledgeIngestionWorkerEnabled)
   ) {
     if (configuredOutboxDatabaseUrl === undefined) {
       throw new Error('OUTBOX_DATABASE_URL is required for an enabled production outbox worker.');
@@ -629,9 +1066,24 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
       configuredOutboxDatabaseUrl,
       'OUTBOX_DATABASE_URL',
     );
-    if (outboxDatabaseUsername === apiDatabaseUsername) {
+    const conflictingCapabilityUsernames = [
+      apiDatabaseUsername,
+      ...(configuredAuthDatabaseUrl === undefined
+        ? []
+        : [parseDatabaseUsername(configuredAuthDatabaseUrl, 'AUTH_DATABASE_URL')]),
+      ...(configuredAdminDatabaseUrl === undefined
+        ? []
+        : [parseDatabaseUsername(configuredAdminDatabaseUrl, 'ADMIN_DATABASE_URL')]),
+      ...(configuredLifecycleDatabaseUrl === undefined
+        ? []
+        : [parseDatabaseUsername(configuredLifecycleDatabaseUrl, 'LIFECYCLE_DATABASE_URL')]),
+      ...(configuredScimDatabaseUrl === undefined
+        ? []
+        : [parseDatabaseUsername(configuredScimDatabaseUrl, 'SCIM_DATABASE_URL')]),
+    ];
+    if (conflictingCapabilityUsernames.includes(outboxDatabaseUsername)) {
       throw new Error(
-        'OUTBOX_DATABASE_URL must use a different production username from DATABASE_URL.',
+        'OUTBOX_DATABASE_URL must use a different production username from DATABASE_URL, AUTH_DATABASE_URL, ADMIN_DATABASE_URL, LIFECYCLE_DATABASE_URL, and SCIM_DATABASE_URL.',
       );
     }
   }
@@ -642,20 +1094,45 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   ) {
     throw new Error('AI_RUNTIME_URL must use HTTPS for an enabled production Agent worker.');
   }
+  if (
+    nodeEnvironment === 'production' &&
+    (agentRunWorkerEnabled || knowledgeSemanticSearchEnabled || knowledgeRerankEnabled) &&
+    (aiRuntimeServiceToken === undefined || aiRuntimeServiceToken.length < 32)
+  ) {
+    throw new Error(
+      'AI_RUNTIME_SERVICE_TOKEN must contain at least 32 characters when production AI Runtime access is enabled.',
+    );
+  }
+  if (
+    nodeEnvironment === 'production' &&
+    aiEvaluationRunnerHmacSecret !== undefined &&
+    aiEvaluationRunnerHmacSecret.length < 32
+  ) {
+    throw new Error(
+      'AI_EVALUATION_RUNNER_HMAC_SECRET must contain at least 32 characters in production.',
+    );
+  }
   if (nodeEnvironment === 'production' && repositoryDriver === 'prisma') {
-    if (configuredAuthDatabaseUrl === undefined || configuredAdminDatabaseUrl === undefined) {
+    if (
+      configuredAuthDatabaseUrl === undefined ||
+      configuredAdminDatabaseUrl === undefined ||
+      configuredLifecycleDatabaseUrl === undefined ||
+      configuredScimDatabaseUrl === undefined
+    ) {
       throw new Error(
-        'AUTH_DATABASE_URL and ADMIN_DATABASE_URL are required for the production Prisma adapter.',
+        'AUTH_DATABASE_URL, ADMIN_DATABASE_URL, LIFECYCLE_DATABASE_URL, and SCIM_DATABASE_URL are required for the production Prisma adapter.',
       );
     }
     const usernames = [
       parseDatabaseUsername(databaseUrl, 'DATABASE_URL'),
       parseDatabaseUsername(configuredAuthDatabaseUrl, 'AUTH_DATABASE_URL'),
       parseDatabaseUsername(configuredAdminDatabaseUrl, 'ADMIN_DATABASE_URL'),
+      parseDatabaseUsername(configuredLifecycleDatabaseUrl, 'LIFECYCLE_DATABASE_URL'),
+      parseDatabaseUsername(configuredScimDatabaseUrl, 'SCIM_DATABASE_URL'),
     ];
     if (new Set(usernames).size !== usernames.length) {
       throw new Error(
-        'DATABASE_URL, AUTH_DATABASE_URL, and ADMIN_DATABASE_URL must use different production usernames.',
+        'DATABASE_URL, AUTH_DATABASE_URL, ADMIN_DATABASE_URL, LIFECYCLE_DATABASE_URL, and SCIM_DATABASE_URL must use different production usernames.',
       );
     }
   }
@@ -678,6 +1155,27 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
       throw new Error('TENCENT_IM_HTTP_TIMEOUT_MS must be less than IM_PROVIDER_TIMEOUT_MS.');
     }
   }
+  if (imProvider === 'wukong') {
+    if (wukongTokenSigningSecret === undefined) {
+      throw new Error('WUKONG_IM_TOKEN_SIGNING_SECRET is required when IM_PROVIDER=wukong.');
+    }
+    if (nodeEnvironment === 'production' && wukongTokenSigningSecret.length < 32) {
+      throw new Error(
+        'WUKONG_IM_TOKEN_SIGNING_SECRET must contain at least 32 characters in production.',
+      );
+    }
+    if (nodeEnvironment === 'production' && wukongApiToken === undefined) {
+      throw new Error('WUKONG_IM_API_TOKEN is required when production uses WuKongIM.');
+    }
+    if (nodeEnvironment === 'production' && !wukongVerifiedAuthEnabled) {
+      throw new Error(
+        'WUKONG_IM_VERIFIED_AUTH_ENABLED=true is required after REST proxy and gateway token verification have been independently tested.',
+      );
+    }
+    if (imOutboxEnabled && wukongHttpTimeoutMs >= imProviderTimeoutMs) {
+      throw new Error('WUKONG_IM_HTTP_TIMEOUT_MS must be less than IM_PROVIDER_TIMEOUT_MS.');
+    }
+  }
   if (imOutboxRetryBaseMs > imOutboxRetryMaxMs) {
     throw new Error('IM_OUTBOX_RETRY_BASE_MS must not exceed IM_OUTBOX_RETRY_MAX_MS.');
   }
@@ -689,11 +1187,35 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
       'AGENT_RUN_CLAIM_TTL_MS must exceed AI_RUNTIME_HTTP_TIMEOUT_MS by more than 15000ms.',
     );
   }
+  if (toolExecutionClaimTtlMs <= 135_000) {
+    throw new Error(
+      'TOOL_EXECUTION_CLAIM_TTL_MS must exceed the maximum Tool timeout by more than 15000ms.',
+    );
+  }
+  if (
+    nodeEnvironment === 'production' &&
+    toolExecutionWorkerEnabled &&
+    source.TOOL_DNS_SERVERS === undefined
+  ) {
+    throw new Error(
+      'TOOL_DNS_SERVERS must explicitly name the platform-controlled resolver in production.',
+    );
+  }
   if (knowledgeSemanticSearchEnabled && repositoryDriver !== 'prisma') {
     throw new Error('KNOWLEDGE_SEMANTIC_SEARCH_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
   }
   if (knowledgeRerankEnabled && !knowledgeSemanticSearchEnabled) {
     throw new Error('KNOWLEDGE_RERANK_ENABLED=true requires semantic search.');
+  }
+  if (knowledgeSearchIndexDriver === 'qdrant' && knowledgeQdrantUrl === undefined) {
+    throw new Error('KNOWLEDGE_QDRANT_URL is required when KNOWLEDGE_SEARCH_INDEX_DRIVER=qdrant.');
+  }
+  if (
+    nodeEnvironment === 'production' &&
+    knowledgeSearchIndexDriver === 'qdrant' &&
+    knowledgeQdrantApiKey === undefined
+  ) {
+    throw new Error('KNOWLEDGE_QDRANT_API_KEY is required for Qdrant in production.');
   }
   if (knowledgeIngestionRetryBaseMs > knowledgeIngestionRetryMaxMs) {
     throw new Error(
@@ -720,12 +1242,15 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     if (feishuAppSecret === undefined) {
       throw new Error('FEISHU_APP_SECRET is required when Feishu directory sync is enabled.');
     }
-    if (feishuDirectoryInitialPassword.length < 10 || feishuDirectoryInitialPassword.length > 128) {
-      throw new Error('FEISHU_DIRECTORY_INITIAL_PASSWORD must contain 10-128 characters.');
-    }
     if (feishuSyncLeaseMs <= feishuHttpTimeoutMs) {
       throw new Error('FEISHU_SYNC_LEASE_MS must be greater than FEISHU_HTTP_TIMEOUT_MS.');
     }
+  }
+  if (feishuSyncWorkerEnabled && repositoryDriver !== 'prisma') {
+    throw new Error('FEISHU_SYNC_WORKER_ENABLED=true requires REPOSITORY_DRIVER=prisma.');
+  }
+  if (feishuSyncRetryBaseMs > feishuSyncRetryMaxMs) {
+    throw new Error('FEISHU_SYNC_RETRY_BASE_MS must not exceed FEISHU_SYNC_RETRY_MAX_MS.');
   }
   if (nodeEnvironment === 'production' && authRecoveryEmailProvider !== 'resend') {
     throw new Error('AUTH_RECOVERY_EMAIL_PROVIDER must be resend in production.');
@@ -757,6 +1282,11 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
         'Static S3 credentials must not be set when KNOWLEDGE_OBJECT_STORE_S3_CREDENTIAL_MODE=default_chain.',
       );
     }
+    if (nodeEnvironment === 'production' && knowledgeObjectStoreS3KmsKeyId === undefined) {
+      throw new Error(
+        'KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID is required for the S3 knowledge object store in production.',
+      );
+    }
   }
   if (nodeEnvironment === 'production' && knowledgeFileScannerDriver === 'disabled') {
     throw new Error('KNOWLEDGE_FILE_SCANNER_DRIVER=disabled is forbidden in production.');
@@ -778,6 +1308,14 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
   }
   if (nodeEnvironment === 'production' && knowledgeDocumentParserDriver !== 'docling') {
     throw new Error('KNOWLEDGE_DOCUMENT_PARSER_DRIVER must be docling in production.');
+  }
+  if (nodeEnvironment === 'production' && knowledgeWebImportAllowedHosts.length === 0) {
+    throw new Error(
+      'KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS must explicitly allow at least one host in production.',
+    );
+  }
+  if (nodeEnvironment === 'production' && knowledgeSourceSyncAllowLocalFixture) {
+    throw new Error('KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE is forbidden in production.');
   }
 
   return {
@@ -802,9 +1340,29 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
         ? {}
         : { ADMIN_DATABASE_URL: databaseUrl }
       : { ADMIN_DATABASE_URL: configuredAdminDatabaseUrl }),
+    ...(configuredLifecycleDatabaseUrl === undefined
+      ? databaseUrl === undefined
+        ? {}
+        : { LIFECYCLE_DATABASE_URL: databaseUrl }
+      : { LIFECYCLE_DATABASE_URL: configuredLifecycleDatabaseUrl }),
+    ...(configuredScimDatabaseUrl === undefined
+      ? databaseUrl === undefined
+        ? {}
+        : { SCIM_DATABASE_URL: databaseUrl }
+      : { SCIM_DATABASE_URL: configuredScimDatabaseUrl }),
     AUTH_TOKEN_PEPPER: authTokenPepper,
+    CONNECTOR_CREDENTIAL_KEYRING: connectorCredentialKeyring,
+    ...(connectorCredentialActiveKeyId === undefined
+      ? {}
+      : { CONNECTOR_CREDENTIAL_ACTIVE_KEY_ID: connectorCredentialActiveKeyId }),
+    IDENTITY_SECRET_KEYRING: identitySecretKeyring,
+    ...(identitySecretActiveKeyId === undefined
+      ? {}
+      : { IDENTITY_SECRET_ACTIVE_KEY_ID: identitySecretActiveKeyId }),
     AUTH_ACCESS_TTL_SECONDS: authAccessTtlSeconds,
     AUTH_REFRESH_TTL_SECONDS: authRefreshTtlSeconds,
+    AUTH_MFA_CHALLENGE_TTL_SECONDS: authMfaChallengeTtlSeconds,
+    IDENTITY_OIDC_HTTP_TIMEOUT_MS: identityOidcHttpTimeoutMs,
     AUTH_LOGIN_RATE_LIMIT_ENABLED: authLoginRateLimitEnabled,
     AUTH_LOGIN_RATE_LIMIT_NETWORK_ENABLED: authLoginRateLimitNetworkEnabled,
     AUTH_LOGIN_RATE_LIMIT_ACCOUNT_FAILURES: authLoginRateLimitAccountFailures,
@@ -817,6 +1375,7 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     AUTH_RECOVERY_RATE_LIMIT_WINDOW_SECONDS: authRecoveryRateLimitWindowSeconds,
     AUTH_PASSWORD_RESET_TTL_SECONDS: authPasswordResetTtlSeconds,
     AUTH_MEMBER_INVITATION_TTL_SECONDS: authMemberInvitationTtlSeconds,
+    AUTH_MEMBER_INVITATION_FALLBACK_TTL_SECONDS: authMemberInvitationFallbackTtlSeconds,
     AUTH_RECOVERY_EMAIL_PROVIDER: authRecoveryEmailProvider,
     ...(authRecoveryEmailApiKey === undefined
       ? {}
@@ -849,17 +1408,54 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     TENCENT_IM_API_BASE_URL: tencentApiBaseUrl,
     TENCENT_IM_USER_SIG_TTL_SECONDS: tencentUserSigTtlSeconds,
     TENCENT_IM_HTTP_TIMEOUT_MS: tencentHttpTimeoutMs,
+    WUKONG_IM_API_BASE_URL: wukongApiBaseUrl,
+    WUKONG_IM_PUBLIC_WS_URL: wukongPublicWsUrl,
+    ...(wukongApiToken === undefined ? {} : { WUKONG_IM_API_TOKEN: wukongApiToken }),
+    ...(wukongTokenSigningSecret === undefined
+      ? {}
+      : { WUKONG_IM_TOKEN_SIGNING_SECRET: wukongTokenSigningSecret }),
+    WUKONG_IM_HTTP_TIMEOUT_MS: wukongHttpTimeoutMs,
+    WUKONG_IM_VERIFIED_AUTH_ENABLED: wukongVerifiedAuthEnabled,
     AGENT_RUN_WORKER_ENABLED: agentRunWorkerEnabled,
     AGENT_RUN_WORKER_CONCURRENCY: agentRunWorkerConcurrency,
     AGENT_RUN_POLL_INTERVAL_MS: agentRunPollIntervalMs,
     AGENT_RUN_CLAIM_TTL_MS: agentRunClaimTtlMs,
+    AGENT_RUN_UNKNOWN_RECONCILIATION_DELAY_MS: agentRunUnknownReconciliationDelayMs,
+    TOOL_EXECUTION_WORKER_ENABLED: toolExecutionWorkerEnabled,
+    TOOL_EXECUTION_WORKER_CONCURRENCY: toolExecutionWorkerConcurrency,
+    TOOL_EXECUTION_POLL_INTERVAL_MS: toolExecutionPollIntervalMs,
+    TOOL_EXECUTION_CLAIM_TTL_MS: toolExecutionClaimTtlMs,
+    TOOL_MAX_CONCURRENT_PER_VERSION: toolMaxConcurrentPerVersion,
+    TOOL_MAX_STARTS_PER_MINUTE_PER_VERSION: toolMaxStartsPerMinutePerVersion,
+    TOOL_PROVIDER_MAX_RESPONSE_BYTES: toolProviderMaxResponseBytes,
+    TOOL_CIRCUIT_FAILURE_THRESHOLD: toolCircuitFailureThreshold,
+    TOOL_CIRCUIT_OPEN_MS: toolCircuitOpenMs,
+    TOOL_ENDPOINT_BINDINGS: toolEndpointBindings,
+    TOOL_DNS_SERVERS: toolDnsServers,
+    FINOPS_PROJECTION_WORKER_ENABLED: finopsProjectionWorkerEnabled,
+    FINOPS_PROJECTION_BATCH_SIZE: finopsProjectionBatchSize,
+    FINOPS_PROJECTION_POLL_INTERVAL_MS: finopsProjectionPollIntervalMs,
+    FINOPS_PROJECTION_CLAIM_TTL_MS: finopsProjectionClaimTtlMs,
     AI_RUNTIME_URL: aiRuntimeUrl,
     AI_RUNTIME_HTTP_TIMEOUT_MS: aiRuntimeHttpTimeoutMs,
+    ...(aiRuntimeServiceToken === undefined
+      ? {}
+      : { AI_RUNTIME_SERVICE_TOKEN: aiRuntimeServiceToken }),
+    ...(aiEvaluationRunnerHmacSecret === undefined
+      ? {}
+      : { AI_EVALUATION_RUNNER_HMAC_SECRET: aiEvaluationRunnerHmacSecret }),
     KNOWLEDGE_SEMANTIC_SEARCH_ENABLED: knowledgeSemanticSearchEnabled,
     KNOWLEDGE_RERANK_ENABLED: knowledgeRerankEnabled,
     KNOWLEDGE_AI_TIMEOUT_MS: knowledgeAiTimeoutMs,
     KNOWLEDGE_EMBEDDING_DIMENSIONS: knowledgeEmbeddingDimensions,
     KNOWLEDGE_VECTOR_SEARCH_MODE: knowledgeVectorSearchMode,
+    KNOWLEDGE_SEARCH_INDEX_DRIVER: knowledgeSearchIndexDriver,
+    ...(knowledgeQdrantUrl === undefined ? {} : { KNOWLEDGE_QDRANT_URL: knowledgeQdrantUrl }),
+    ...(knowledgeQdrantApiKey === undefined
+      ? {}
+      : { KNOWLEDGE_QDRANT_API_KEY: knowledgeQdrantApiKey }),
+    KNOWLEDGE_QDRANT_COLLECTION: knowledgeQdrantCollection,
+    KNOWLEDGE_QDRANT_TIMEOUT_MS: knowledgeQdrantTimeoutMs,
     KNOWLEDGE_OBJECT_STORE_DRIVER: knowledgeObjectStoreDriver,
     KNOWLEDGE_OBJECT_STORE_MAX_BYTES: knowledgeObjectStoreMaxBytes,
     ...(knowledgeObjectStoreLocalRoot === undefined
@@ -883,6 +1479,9 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
         }),
     KNOWLEDGE_OBJECT_STORE_S3_FORCE_PATH_STYLE: knowledgeObjectStoreS3ForcePathStyle,
     KNOWLEDGE_OBJECT_STORE_S3_PREFIX: knowledgeObjectStoreS3Prefix,
+    ...(knowledgeObjectStoreS3KmsKeyId === undefined
+      ? {}
+      : { KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID: knowledgeObjectStoreS3KmsKeyId }),
     KNOWLEDGE_FILE_SCANNER_DRIVER: knowledgeFileScannerDriver,
     KNOWLEDGE_FILE_SCANNER_CLAMAV_HOST: knowledgeFileScannerClamAvHost,
     KNOWLEDGE_FILE_SCANNER_CLAMAV_PORT: knowledgeFileScannerClamAvPort,
@@ -896,6 +1495,21 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
       : { KNOWLEDGE_DOCLING_API_KEY: knowledgeDoclingApiKey }),
     KNOWLEDGE_DOCLING_TIMEOUT_MS: knowledgeDoclingTimeoutMs,
     KNOWLEDGE_DOCLING_MAX_RESPONSE_BYTES: knowledgeDoclingMaxResponseBytes,
+    ...(knowledgeTikaBaseUrl === undefined
+      ? {}
+      : { KNOWLEDGE_TIKA_BASE_URL: knowledgeTikaBaseUrl }),
+    KNOWLEDGE_TIKA_TIMEOUT_MS: knowledgeTikaTimeoutMs,
+    KNOWLEDGE_TIKA_MAX_RESPONSE_BYTES: knowledgeTikaMaxResponseBytes,
+    KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS: knowledgeWebImportAllowedHosts,
+    KNOWLEDGE_WEB_IMPORT_TIMEOUT_MS: knowledgeWebImportTimeoutMs,
+    KNOWLEDGE_WEB_IMPORT_MAX_BYTES: knowledgeWebImportMaxBytes,
+    KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS: knowledgeSourceSyncAllowedHosts,
+    KNOWLEDGE_SOURCE_SYNC_TIMEOUT_MS: knowledgeSourceSyncTimeoutMs,
+    KNOWLEDGE_SOURCE_SYNC_MANIFEST_MAX_BYTES: knowledgeSourceSyncManifestMaxBytes,
+    KNOWLEDGE_SOURCE_SYNC_MAX_PAGES: knowledgeSourceSyncMaxPages,
+    KNOWLEDGE_SOURCE_SYNC_ALLOW_LOCAL_FIXTURE: knowledgeSourceSyncAllowLocalFixture,
+    KNOWLEDGE_LOCAL_BACKEND_ENABLED: knowledgeLocalBackendEnabled,
+    KNOWLEDGE_PERSISTENT_WRITES_ENABLED: knowledgePersistentWritesEnabled,
     KNOWLEDGE_INGESTION_WORKER_ENABLED: knowledgeIngestionWorkerEnabled,
     KNOWLEDGE_INGESTION_POLL_INTERVAL_MS: knowledgeIngestionPollIntervalMs,
     KNOWLEDGE_INGESTION_BATCH_SIZE: knowledgeIngestionBatchSize,
@@ -905,7 +1519,6 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     KNOWLEDGE_INGESTION_CLAIM_TTL_MS: knowledgeIngestionClaimTtlMs,
     FEISHU_DIRECTORY_SYNC_ENABLED: feishuDirectorySyncEnabled,
     FEISHU_DIRECTORY_RECONCILE_REMOVALS: feishuDirectoryReconcileRemovals,
-    FEISHU_DIRECTORY_INITIAL_PASSWORD: feishuDirectoryInitialPassword,
     ...(feishuDirectoryTargetTenantSlug === undefined
       ? {}
       : { FEISHU_DIRECTORY_TARGET_TENANT_SLUG: feishuDirectoryTargetTenantSlug }),
@@ -914,6 +1527,13 @@ export function validateEnvironment(source: Record<string, unknown>): Environmen
     FEISHU_API_BASE_URL: feishuApiBaseUrl,
     FEISHU_HTTP_TIMEOUT_MS: feishuHttpTimeoutMs,
     FEISHU_SYNC_LEASE_MS: feishuSyncLeaseMs,
+    FEISHU_SYNC_PREVIEW_TTL_MS: feishuSyncPreviewTtlMs,
+    FEISHU_SYNC_WORKER_ENABLED: feishuSyncWorkerEnabled,
+    FEISHU_SYNC_WORKER_POLL_INTERVAL_MS: feishuSyncWorkerPollIntervalMs,
+    FEISHU_SYNC_WORKER_BATCH_SIZE: feishuSyncWorkerBatchSize,
+    FEISHU_SYNC_MAX_ATTEMPTS: feishuSyncMaxAttempts,
+    FEISHU_SYNC_RETRY_BASE_MS: feishuSyncRetryBaseMs,
+    FEISHU_SYNC_RETRY_MAX_MS: feishuSyncRetryMaxMs,
   };
 }
 
@@ -921,6 +1541,22 @@ function parseKnowledgeVectorSearchMode(value: unknown): 'exact' | 'hnsw' {
   const parsed = value ?? 'exact';
   if (parsed !== 'exact' && parsed !== 'hnsw') {
     throw new Error('KNOWLEDGE_VECTOR_SEARCH_MODE must be exact or hnsw.');
+  }
+  return parsed;
+}
+
+function parseKnowledgeSearchIndexDriver(value: unknown): 'postgres' | 'qdrant' {
+  const parsed = value ?? 'postgres';
+  if (parsed !== 'postgres' && parsed !== 'qdrant') {
+    throw new Error('KNOWLEDGE_SEARCH_INDEX_DRIVER must be postgres or qdrant.');
+  }
+  return parsed;
+}
+
+function parseQdrantCollection(value: unknown): string {
+  const parsed = parseOptionalString(value) ?? 'enterprise_knowledge_chunks_v1';
+  if (parsed.length > 128 || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(parsed)) {
+    throw new Error('KNOWLEDGE_QDRANT_COLLECTION is invalid.');
   }
   return parsed;
 }
@@ -1089,6 +1725,145 @@ function parseS3Prefix(value: unknown): string {
   return parsed;
 }
 
+function parseOptionalS3KmsKeyReference(
+  value: unknown,
+  environment: NodeEnvironment,
+  region: string,
+): S3KmsKeyReference | undefined {
+  const parsed = parseOptionalString(value);
+  if (parsed === undefined) return undefined;
+  if (
+    parsed.length > 256 ||
+    /[\u0000-\u001f\u007f\s]/u.test(parsed) ||
+    (!isKmsKeyArn(parsed) &&
+      !/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|mrk-[0-9a-f]{32}|alias\/[A-Za-z0-9/_-]{1,249})$/i.test(
+        parsed,
+      ))
+  ) {
+    throw new Error(
+      'KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID must be a KMS key ARN, key ID, multi-Region key ID, or alias.',
+    );
+  }
+  if (environment === 'production') {
+    const arn = parseKmsKeyArn(parsed);
+    if (arn === undefined) {
+      throw new Error(
+        'KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID must be a customer-managed KMS key ARN in production.',
+      );
+    }
+    if (arn.region !== region || arn.partition !== kmsPartitionForRegion(region)) {
+      throw new Error(
+        'KNOWLEDGE_OBJECT_STORE_S3_KMS_KEY_ID must match KNOWLEDGE_OBJECT_STORE_S3_REGION and its AWS partition.',
+      );
+    }
+  }
+  return parsed as S3KmsKeyReference;
+}
+
+function isKmsKeyArn(value: string): boolean {
+  return parseKmsKeyArn(value) !== undefined;
+}
+
+function parseKmsKeyArn(
+  value: string,
+): { readonly partition: string; readonly region: string } | undefined {
+  const match =
+    /^arn:(aws|aws-cn|aws-us-gov):kms:([a-z0-9-]+):[0-9]{12}:key\/(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|mrk-[0-9a-f]{32})$/i.exec(
+      value,
+    );
+  if (match?.[1] === undefined || match[2] === undefined) return undefined;
+  return { partition: match[1].toLowerCase(), region: match[2].toLowerCase() };
+}
+
+function kmsPartitionForRegion(region: string): string {
+  if (region.startsWith('cn-')) return 'aws-cn';
+  if (region.startsWith('us-gov-')) return 'aws-us-gov';
+  return 'aws';
+}
+
+function parseConnectorCredentialKeyring(value: unknown): Readonly<Record<string, string>> {
+  const raw = parseOptionalString(value);
+  if (raw === undefined) return {};
+  if (Buffer.byteLength(raw, 'utf8') > 16_384) {
+    throw new Error('CONNECTOR_CREDENTIAL_KEYRING_JSON exceeds the 16 KiB configuration limit.');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('CONNECTOR_CREDENTIAL_KEYRING_JSON must be valid JSON.');
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error('CONNECTOR_CREDENTIAL_KEYRING_JSON must be an object keyed by key ID.');
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length < 1 || entries.length > 16) {
+    throw new Error('CONNECTOR_CREDENTIAL_KEYRING_JSON must contain 1-16 keys.');
+  }
+  const keyring: Record<string, string> = {};
+  for (const [keyId, encodedKey] of entries) {
+    parseConnectorCredentialKeyId(keyId, 'Connector credential key ID');
+    if (
+      typeof encodedKey !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(encodedKey) ||
+      Buffer.from(encodedKey, 'base64url').length !== 32 ||
+      Buffer.from(encodedKey, 'base64url').toString('base64url') !== encodedKey
+    ) {
+      throw new Error(
+        `Connector credential key ${keyId} must be an unpadded base64url-encoded 32-byte key.`,
+      );
+    }
+    keyring[keyId] = encodedKey;
+  }
+  return Object.freeze(keyring);
+}
+
+function parseIdentitySecretKeyring(value: unknown): Readonly<Record<string, string>> {
+  const raw = parseOptionalString(value);
+  if (raw === undefined) return {};
+  if (Buffer.byteLength(raw, 'utf8') > 16_384) {
+    throw new Error('IDENTITY_SECRET_KEYRING_JSON exceeds the 16 KiB configuration limit.');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('IDENTITY_SECRET_KEYRING_JSON must be valid JSON.');
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error('IDENTITY_SECRET_KEYRING_JSON must be an object keyed by key ID.');
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length < 1 || entries.length > 16) {
+    throw new Error('IDENTITY_SECRET_KEYRING_JSON must contain 1-16 keys.');
+  }
+  const keyring: Record<string, string> = {};
+  for (const [keyId, encodedKey] of entries) {
+    parseConnectorCredentialKeyId(keyId, 'Identity secret key ID');
+    if (
+      typeof encodedKey !== 'string' ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(encodedKey) ||
+      Buffer.from(encodedKey, 'base64url').length !== 32 ||
+      Buffer.from(encodedKey, 'base64url').toString('base64url') !== encodedKey
+    ) {
+      throw new Error(
+        `Identity secret key ${keyId} must be an unpadded base64url-encoded 32-byte key.`,
+      );
+    }
+    keyring[keyId] = encodedKey;
+  }
+  return Object.freeze(keyring);
+}
+
+function parseConnectorCredentialKeyId(value: unknown, name: string): string | undefined {
+  const parsed = parseOptionalString(value);
+  if (parsed === undefined) return undefined;
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(parsed)) {
+    throw new Error(`${name} must contain 1-64 safe ASCII characters.`);
+  }
+  return parsed;
+}
+
 function parseRegistrationMode(value: unknown, environment: NodeEnvironment): 'disabled' | 'open' {
   const parsed = value ?? (environment === 'production' ? 'disabled' : 'open');
   if (parsed !== 'disabled' && parsed !== 'open') {
@@ -1132,12 +1907,279 @@ function parseAuthPublicAppUrl(value: unknown, environment: NodeEnvironment): st
   return parsed.origin;
 }
 
-function parseImProvider(value: unknown): 'local' | 'tencent' {
+function parseImProvider(value: unknown): 'local' | 'tencent' | 'wukong' {
   const parsed = value ?? 'local';
-  if (parsed !== 'local' && parsed !== 'tencent') {
-    throw new Error('IM_PROVIDER must be local or tencent.');
+  if (parsed !== 'local' && parsed !== 'tencent' && parsed !== 'wukong') {
+    throw new Error('IM_PROVIDER must be local, tencent, or wukong.');
   }
   return parsed;
+}
+
+function parseWukongApiBaseUrl(value: unknown, environment: NodeEnvironment): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error('WUKONG_IM_API_BASE_URL must be a valid HTTP(S) origin.');
+  }
+  const localHttp =
+    environment !== 'production' &&
+    parsed.protocol === 'http:' &&
+    isLoopbackHostname(parsed.hostname);
+  if (
+    (parsed.protocol !== 'https:' && !localHttp) ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    (parsed.pathname !== '/' && parsed.pathname !== '')
+  ) {
+    throw new Error(
+      'WUKONG_IM_API_BASE_URL must be an HTTPS origin (loopback HTTP is allowed outside production).',
+    );
+  }
+  return parsed.origin;
+}
+
+function parseWukongPublicWsUrl(value: unknown, environment: NodeEnvironment): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error('WUKONG_IM_PUBLIC_WS_URL must be a valid WebSocket origin.');
+  }
+  const localWs =
+    environment !== 'production' &&
+    parsed.protocol === 'ws:' &&
+    isLoopbackHostname(parsed.hostname);
+  if (
+    (parsed.protocol !== 'wss:' && !localWs) ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    parsed.search !== '' ||
+    parsed.hash !== '' ||
+    (parsed.pathname !== '/' && parsed.pathname !== '')
+  ) {
+    throw new Error(
+      'WUKONG_IM_PUBLIC_WS_URL must be a WSS origin (loopback WS is allowed outside production).',
+    );
+  }
+  return parsed.origin;
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase();
+  return normalized === 'localhost' || normalized === '127.0.0.1' || normalized === '[::1]';
+}
+
+function parseToolEndpointBindings(
+  value: unknown,
+  environment: NodeEnvironment,
+  workerEnabled: boolean,
+): Readonly<Record<string, ToolEndpointBinding>> {
+  const raw = parseOptionalString(value);
+  if (raw === undefined) {
+    if (environment === 'production' && workerEnabled) {
+      throw new Error(
+        'TOOL_ENDPOINT_BINDINGS_JSON is required for an enabled production Tool worker.',
+      );
+    }
+    return {};
+  }
+  if (Buffer.byteLength(raw, 'utf8') > 524_288) {
+    throw new Error('TOOL_ENDPOINT_BINDINGS_JSON exceeds the 512 KiB configuration limit.');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('TOOL_ENDPOINT_BINDINGS_JSON must be valid JSON.');
+  }
+  if (!isPlainRecord(parsed)) {
+    throw new Error('TOOL_ENDPOINT_BINDINGS_JSON must be an object keyed by opaque references.');
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length > 1_000) {
+    throw new Error('TOOL_ENDPOINT_BINDINGS_JSON may contain at most 1000 bindings.');
+  }
+  const bindings: Record<string, ToolEndpointBinding> = {};
+  for (const [reference, candidate] of entries) {
+    if (
+      reference.length < 3 ||
+      reference.length > 300 ||
+      !/^(?:secret|vault|kms):\/\/[A-Za-z0-9._/-]+$/u.test(reference)
+    ) {
+      throw new Error(
+        'Tool endpoint binding keys must be opaque secret://, vault://, or kms:// references.',
+      );
+    }
+    if (!isPlainRecord(candidate)) {
+      throw new Error(`Tool endpoint binding ${reference} must be an object.`);
+    }
+    const unknownKeys = Object.keys(candidate).filter(
+      (key) => !['url', 'method', 'headers', 'signingSecret'].includes(key),
+    );
+    if (unknownKeys.length > 0) {
+      throw new Error(`Tool endpoint binding ${reference} contains unsupported properties.`);
+    }
+    const method = candidate.method;
+    if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(String(method))) {
+      throw new Error(`Tool endpoint binding ${reference} has an unsupported HTTP method.`);
+    }
+    const url = parseBoundToolUrl(candidate.url, reference);
+    const headers = parseBoundToolHeaders(candidate.headers, reference);
+    const signingSecret =
+      candidate.signingSecret === undefined
+        ? null
+        : parseBoundToolSigningSecret(candidate.signingSecret, reference);
+    if (environment === 'production' && workerEnabled && signingSecret === null) {
+      throw new Error(`Tool endpoint binding ${reference} requires a signingSecret in production.`);
+    }
+    bindings[reference] = {
+      url,
+      method: method as ToolEndpointBinding['method'],
+      headers,
+      signingSecret,
+    };
+  }
+  return bindings;
+}
+
+function parseBoundToolUrl(value: unknown, reference: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(String(value));
+  } catch {
+    throw new Error(`Tool endpoint binding ${reference} must contain a valid HTTPS URL.`);
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    (parsed.port !== '' && parsed.port !== '443') ||
+    parsed.hash !== ''
+  ) {
+    throw new Error(
+      `Tool endpoint binding ${reference} must use HTTPS without userinfo, fragments, or a custom port.`,
+    );
+  }
+  return parsed.toString();
+}
+
+function parseBoundToolHeaders(
+  value: unknown,
+  reference: string,
+): Readonly<Record<string, string>> {
+  if (value === undefined) return {};
+  if (!isPlainRecord(value) || Object.keys(value).length > 32) {
+    throw new Error(`Tool endpoint binding ${reference} headers must be an object of at most 32.`);
+  }
+  const blocked = new Set([
+    'connection',
+    'content-length',
+    'host',
+    'idempotency-key',
+    'te',
+    'trailer',
+    'transfer-encoding',
+    'upgrade',
+  ]);
+  const headers: Record<string, string> = {};
+  for (const [rawName, rawValue] of Object.entries(value)) {
+    const name = rawName.toLowerCase();
+    if (
+      !/^[!#$%&'*+.^_`|~0-9a-z-]{1,80}$/u.test(name) ||
+      blocked.has(name) ||
+      name.startsWith('x-enterprise-') ||
+      typeof rawValue !== 'string' ||
+      rawValue.length < 1 ||
+      rawValue.length > 2_048 ||
+      /[\r\n\u0000]/u.test(rawValue)
+    ) {
+      throw new Error(`Tool endpoint binding ${reference} contains an unsafe header.`);
+    }
+    headers[name] = rawValue;
+  }
+  return headers;
+}
+
+function parseBoundToolSigningSecret(value: unknown, reference: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 32 ||
+    value.length > 512 ||
+    /[\u0000-\u001f\u007f]/u.test(value)
+  ) {
+    throw new Error(
+      `Tool endpoint binding ${reference} signingSecret must contain 32-512 characters.`,
+    );
+  }
+  return value;
+}
+
+function parseToolDnsServers(value: unknown): readonly string[] {
+  const raw = parseOptionalString(value) ?? '1.1.1.1,8.8.8.8';
+  const servers = raw
+    .split(',')
+    .map((server) => server.trim())
+    .filter(Boolean);
+  if (servers.length < 1 || servers.length > 8 || new Set(servers).size !== servers.length) {
+    throw new Error('TOOL_DNS_SERVERS must contain 1-8 unique DNS server addresses.');
+  }
+  for (const server of servers) {
+    const ipv4WithPort = /^([^:]+):(\d{1,5})$/u.exec(server);
+    const address = ipv4WithPort?.[1] ?? server;
+    const port = ipv4WithPort === null ? null : Number(ipv4WithPort[2]);
+    if (
+      isIP(address) === 0 ||
+      (port !== null && (!Number.isInteger(port) || port < 1 || port > 65_535))
+    ) {
+      throw new Error('TOOL_DNS_SERVERS entries must be IP addresses with optional IPv4 ports.');
+    }
+  }
+  return servers;
+}
+
+function parseKnowledgeWebImportAllowedHosts(value: unknown): readonly string[] {
+  const hosts = (parseOptionalString(value) ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase().replace(/\.$/u, ''))
+    .filter(Boolean);
+  if (hosts.length > 100 || new Set(hosts).size !== hosts.length) {
+    throw new Error(
+      'KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS must contain at most 100 unique exact hostnames.',
+    );
+  }
+  const hostnamePattern =
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+  if (hosts.some((host) => !hostnamePattern.test(host))) {
+    throw new Error(
+      'KNOWLEDGE_WEB_IMPORT_ALLOWED_HOSTS entries must be exact DNS hostnames without wildcards.',
+    );
+  }
+  return hosts;
+}
+
+function parseKnowledgeSourceSyncAllowedHosts(value: unknown): readonly string[] {
+  const hosts = (parseOptionalString(value) ?? '')
+    .split(',')
+    .map((host) => host.trim().toLowerCase().replace(/\.$/u, ''))
+    .filter(Boolean);
+  if (hosts.length > 100 || new Set(hosts).size !== hosts.length) {
+    throw new Error(
+      'KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS must contain at most 100 unique exact hostnames.',
+    );
+  }
+  const dnsHostnamePattern =
+    /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+  if (
+    hosts.some((host) => host !== 'localhost' && isIP(host) === 0 && !dnsHostnamePattern.test(host))
+  ) {
+    throw new Error(
+      'KNOWLEDGE_SOURCE_SYNC_ALLOWED_HOSTS entries must be exact hostnames or IP addresses without wildcards.',
+    );
+  }
+  return hosts;
 }
 
 function parseRepositoryDriver(value: unknown): 'memory' | 'prisma' {
@@ -1146,6 +2188,10 @@ function parseRepositoryDriver(value: unknown): 'memory' | 'prisma' {
     throw new Error('REPOSITORY_DRIVER must be memory or prisma.');
   }
   return parsed;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function parseOptionalString(value: unknown): string | undefined {

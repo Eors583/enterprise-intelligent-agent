@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import type { EnvironmentVariables } from '../../config/environment.js';
+import { AuthorizationModule } from '../authorization/authorization.module.js';
 import { AgentControlService } from './application/agent-control.service.js';
 import { AgentRepository } from './domain/agent.repository.js';
 import { DevAgentRepository } from './infrastructure/dev/dev-agent.repository.js';
@@ -9,6 +10,7 @@ import { PrismaAgentRepository } from './infrastructure/prisma/prisma-agent.repo
 import { DirectoryPersonalAgentProvisioner } from './infrastructure/prisma/directory-personal-agent.provisioner.js';
 
 @Module({
+  imports: [AuthorizationModule],
   providers: [
     AgentControlService,
     DevAgentRepository,

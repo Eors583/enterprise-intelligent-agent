@@ -1,60 +1,130 @@
-import type { AuthAccount, AuthSessionResponse } from '@enterprise/contracts';
-import { useEffect, useState, type ReactNode } from 'react';
+import type { AuthAccount, BrowserAuthSessionResponse } from '@enterprise/contracts/auth-session';
+import { lazy, Suspense, useEffect, useState, type ReactNode } from 'react';
 
-import { logout } from '@/api/admin-api';
-import { readSession, writeSession } from '@/auth/session';
-import { Icon, type IconName } from '@/components/Icons';
-import { roleLabel } from '@/components/ui';
-import { ChangePasswordModal } from '@/features/auth/ChangePasswordModal';
-import { KnowledgePage } from '@/features/knowledge/KnowledgePage';
-import { AgentsPage } from '@/features/agents/AgentsPage';
-import { MembersPage } from '@/features/members/MembersPage';
-import { OrganizationPage } from '@/features/organization/OrganizationPage';
+import { logout } from '@/api/session-api';
+import { writeSession } from '@/auth/session';
+import { Icon } from '@/components/Icons';
+import { LoadingPanel, roleLabel } from '@/components/ui';
+import {
+  ADMIN_SECONDARY_NAVIGATION,
+  adminNavigationForRole,
+  normalizeAdminRoute,
+  parseAdminRoute,
+  primaryNavigationForRoute,
+  isAdminRouteAllowed,
+  type AdminPageId,
+  type AdminPrimaryId,
+  type AdminRouteId,
+} from './admin-navigation';
 
-type PageId = 'organization' | 'members' | 'agents' | 'knowledge';
+const AdminOverviewPage = lazy(() =>
+  import('@/features/admin-overview/AdminOverviewPage').then((module) => ({
+    default: module.AdminOverviewPage,
+  })),
+);
+const ChangePasswordModal = lazy(() =>
+  import('@/features/auth/ChangePasswordModal').then((module) => ({
+    default: module.ChangePasswordModal,
+  })),
+);
+const OrganizationPage = lazy(() =>
+  import('@/features/organization/OrganizationPage').then((module) => ({
+    default: module.OrganizationPage,
+  })),
+);
+const MembersPage = lazy(() =>
+  import('@/features/members/MembersPage').then((module) => ({ default: module.MembersPage })),
+);
+const AgentsPage = lazy(() =>
+  import('@/features/agents/AgentsPage').then((module) => ({ default: module.AgentsPage })),
+);
+const RoleBlueprintsPage = lazy(() =>
+  import('@/features/role-blueprints/RoleBlueprintsPage').then((module) => ({
+    default: module.RoleBlueprintsPage,
+  })),
+);
+const RoleAssignmentsPage = lazy(() =>
+  import('@/features/role-assignments/RoleAssignmentsPage').then((module) => ({
+    default: module.RoleAssignmentsPage,
+  })),
+);
+const BusinessSemanticsPage = lazy(() =>
+  import('@/features/business-semantics/BusinessSemanticsPage').then((module) => ({
+    default: module.BusinessSemanticsPage,
+  })),
+);
+const MarketingManagementPage = lazy(() =>
+  import('@/features/marketing-management/MarketingManagementPage').then((module) => ({
+    default: module.MarketingManagementPage,
+  })),
+);
+const PeopleOrganizationPage = lazy(() =>
+  import('@/features/people-organization/PeopleOrganizationPage').then((module) => ({
+    default: module.PeopleOrganizationPage,
+  })),
+);
+const ExperienceGovernancePage = lazy(() =>
+  import('@/features/experience-governance/ExperienceGovernancePage').then((module) => ({
+    default: module.ExperienceGovernancePage,
+  })),
+);
+const IdentitySecurityPage = lazy(() =>
+  import('@/features/identity-governance/IdentitySecurityPage').then((module) => ({
+    default: module.IdentitySecurityPage,
+  })),
+);
+const AiModelRoutingPage = lazy(() =>
+  import('@/features/ai-model-routing/AiModelRoutingPage').then((module) => ({
+    default: module.AiModelRoutingPage,
+  })),
+);
+const AiEvaluationPage = lazy(() =>
+  import('@/features/ai-evaluation/AiEvaluationPage').then((module) => ({
+    default: module.AiEvaluationPage,
+  })),
+);
+const KnowledgePage = lazy(() =>
+  import('@/features/knowledge/KnowledgePage').then((module) => ({
+    default: module.KnowledgePage,
+  })),
+);
+const KnowledgeIntegrationsPage = lazy(() =>
+  import('@/features/knowledge-integrations/KnowledgeIntegrationsPage').then((module) => ({
+    default: module.KnowledgeIntegrationsPage,
+  })),
+);
 
-interface NavigationItem {
-  id: PageId;
-  label: string;
-  description: string;
-  icon: IconName;
-}
-
-const NAVIGATION: ReadonlyArray<NavigationItem> = [
-  { id: 'organization', label: '组织架构', description: '部门与层级', icon: 'organization' },
-  { id: 'members', label: '成员管理', description: '账号与权限', icon: 'members' },
-  { id: 'agents', label: '智能体管理', description: '角色与运行状态', icon: 'agent' },
-  { id: 'knowledge', label: '知识库', description: '范围与文档', icon: 'knowledge' },
-];
-
-function initialPage(canManageOrganization: boolean): PageId {
-  const value = window.location.hash.replace(/^#\/?/, '');
-  if (value === 'knowledge') return value;
-  if (
-    canManageOrganization &&
-    (value === 'organization' || value === 'members' || value === 'agents')
-  )
-    return value;
-  return canManageOrganization ? 'organization' : 'knowledge';
-}
-
-export function AdminShell({ session }: { session: AuthSessionResponse }): ReactNode {
-  const canManageOrganization =
-    session.account.role === 'OWNER' || session.account.role === 'ADMIN';
-  const [page, setPage] = useState<PageId>(() => initialPage(canManageOrganization));
+export function AdminShell({ session }: { session: BrowserAuthSessionResponse }): ReactNode {
+  const [route, setRoute] = useState<AdminRouteId>(() =>
+    parseAdminRoute(window.location.hash, session.account.role),
+  );
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [passwordModalOpen, setPasswordModalOpen] = useState(
     session.account.passwordChangeRequired,
   );
 
-  const navigation = canManageOrganization
-    ? NAVIGATION
-    : NAVIGATION.filter((item) => item.id === 'knowledge');
+  const navigation = adminNavigationForRole(session.account.role);
+  const page = normalizeAdminRoute(route);
+  const activePrimary = primaryNavigationForRoute(route);
+  const secondaryNavigation =
+    activePrimary === null
+      ? []
+      : (ADMIN_SECONDARY_NAVIGATION[activePrimary] ?? []).filter((item) =>
+          isAdminRouteAllowed(item.id, session.account.role),
+        );
 
   useEffect(() => {
-    window.location.hash = page;
+    const nextHash = `#${route}`;
+    if (window.location.hash !== nextHash) window.location.hash = route;
     setSidebarOpen(false);
-  }, [page]);
+  }, [route]);
+
+  useEffect(() => {
+    const selectHashPage = (): void =>
+      setRoute(parseAdminRoute(window.location.hash, session.account.role));
+    window.addEventListener('hashchange', selectHashPage);
+    return () => window.removeEventListener('hashchange', selectHashPage);
+  }, [session.account.role]);
 
   useEffect(() => {
     if (session.account.passwordChangeRequired) setPasswordModalOpen(true);
@@ -62,12 +132,12 @@ export function AdminShell({ session }: { session: AuthSessionResponse }): React
 
   const acceptChangedAccount = (account: AuthAccount): void => {
     setPasswordModalOpen(false);
-    writeSession({ ...(readSession() ?? session), account });
+    writeSession({ account });
   };
 
   const signOut = async (): Promise<void> => {
     try {
-      await logout(session.refreshToken);
+      await logout();
     } catch {
       // Local logout must still succeed when the server is unavailable.
     } finally {
@@ -87,14 +157,15 @@ export function AdminShell({ session }: { session: AuthSessionResponse }): React
             <small>管理控制台</small>
           </span>
         </div>
-        <nav className="sidebar-nav" aria-label="管理功能">
-          <span className="nav-group-label">企业管理</span>
+        <nav className="sidebar-nav" aria-label="管理后台主导航">
+          <span className="nav-group-label">业务工作台</span>
           {navigation.map((item) => (
             <button
               type="button"
               key={item.id}
-              className={page === item.id ? 'active' : ''}
-              onClick={() => setPage(item.id)}
+              className={activePrimary === item.id ? 'active' : ''}
+              aria-current={activePrimary === item.id ? 'page' : undefined}
+              onClick={() => setRoute(item.id)}
             >
               <Icon name={item.icon} />
               <span>
@@ -104,33 +175,32 @@ export function AdminShell({ session }: { session: AuthSessionResponse }): React
             </button>
           ))}
         </nav>
-        <div className="sidebar-account">
-          <span className="avatar">{session.account.displayName.slice(0, 1).toUpperCase()}</span>
-          <span className="account-copy">
-            <strong>{session.account.displayName}</strong>
-            <small>{roleLabel(session.account.role)}</small>
-          </span>
-          <span className="account-actions">
-            <button
-              type="button"
-              className="icon-button"
-              title="修改密码"
-              aria-label="修改密码"
-              onClick={() => setPasswordModalOpen(true)}
-            >
+        <details className="sidebar-account-menu">
+          <summary className="sidebar-account">
+            <span className="avatar">{session.account.displayName.slice(0, 1).toUpperCase()}</span>
+            <span className="account-copy">
+              <strong>{session.account.displayName}</strong>
+              <small>{roleLabel(session.account.role)}</small>
+            </span>
+            <span className="account-menu-indicator" aria-hidden="true">
+              ···
+            </span>
+          </summary>
+          <div className="sidebar-account-popover" aria-label="账号菜单">
+            <button type="button" onClick={() => setRoute('identity-security')}>
+              <Icon name="settings" size={17} />
+              账号与安全
+            </button>
+            <button type="button" onClick={() => setPasswordModalOpen(true)}>
               <Icon name="password" size={18} />
+              修改密码
             </button>
-            <button
-              type="button"
-              className="icon-button"
-              title="退出登录"
-              aria-label="退出登录"
-              onClick={() => void signOut()}
-            >
+            <button type="button" onClick={() => void signOut()}>
               <Icon name="logout" size={18} />
+              退出登录
             </button>
-          </span>
-        </div>
+          </div>
+        </details>
       </aside>
       {sidebarOpen ? (
         <button
@@ -159,29 +229,80 @@ export function AdminShell({ session }: { session: AuthSessionResponse }): React
               <small>{session.account.tenantSlug}</small>
             </span>
           </div>
-          <div className="topbar-meta">
-            <span className="secure-dot" />
-            已安全登录
-          </div>
         </header>
         <div className="page-container">
-          {page === 'organization' ? <OrganizationPage /> : null}
-          {page === 'members' ? <MembersPage currentUserId={session.account.userId} /> : null}
-          {page === 'agents' ? (
-            <AgentsPage canManageLimits={session.account.role === 'OWNER'} />
+          {activePrimary !== null && secondaryNavigation.length > 1 ? (
+            <SecondaryNavigation primary={activePrimary} page={page} onNavigate={setRoute} />
           ) : null}
-          {page === 'knowledge' ? <KnowledgePage /> : null}
+          <Suspense fallback={<LoadingPanel label="正在加载当前页面…" />}>
+            {page === 'overview' ? <AdminOverviewPage /> : null}
+            {page === 'organization' ? <OrganizationPage /> : null}
+            {page === 'members' ? <MembersPage currentUserId={session.account.userId} /> : null}
+            {page === 'agents' ? <AgentsPage /> : null}
+            {page === 'role-blueprints' ? (
+              <RoleBlueprintsPage currentUserId={session.account.userId} />
+            ) : null}
+            {page === 'role-assignments' ? <RoleAssignmentsPage /> : null}
+            {page === 'business-semantics' ? (
+              <BusinessSemanticsPage currentUserId={session.account.userId} />
+            ) : null}
+            {page === 'marketing-management' ? (
+              <MarketingManagementPage currentUserId={session.account.userId} />
+            ) : null}
+            {page === 'people-organization' ? <PeopleOrganizationPage /> : null}
+            {page === 'experience-governance' ? <ExperienceGovernancePage /> : null}
+            {page === 'identity-security' ? <IdentitySecurityPage /> : null}
+            {page === 'ai-model-routing' ? <AiModelRoutingPage /> : null}
+            {page === 'ai-evaluation' ? <AiEvaluationPage /> : null}
+            {page === 'knowledge' ? (
+              <KnowledgePage
+                currentUserId={session.account.userId}
+                currentUserName={session.account.displayName}
+              />
+            ) : null}
+            {page === 'knowledge-integrations' ? <KnowledgeIntegrationsPage /> : null}
+          </Suspense>
         </div>
       </main>
       {passwordModalOpen || session.account.passwordChangeRequired ? (
-        <ChangePasswordModal
-          required={session.account.passwordChangeRequired}
-          onClose={() => {
-            if (!session.account.passwordChangeRequired) setPasswordModalOpen(false);
-          }}
-          onChanged={acceptChangedAccount}
-        />
+        <Suspense fallback={null}>
+          <ChangePasswordModal
+            required={session.account.passwordChangeRequired}
+            onClose={() => {
+              if (!session.account.passwordChangeRequired) setPasswordModalOpen(false);
+            }}
+            onChanged={acceptChangedAccount}
+          />
+        </Suspense>
       ) : null}
     </div>
+  );
+}
+
+function SecondaryNavigation({
+  primary,
+  page,
+  onNavigate,
+}: {
+  primary: AdminPrimaryId;
+  page: AdminPageId;
+  onNavigate: (route: AdminRouteId) => void;
+}): ReactNode {
+  const items = ADMIN_SECONDARY_NAVIGATION[primary] ?? [];
+  return (
+    <nav className="admin-secondary-nav" aria-label={`${primary} 二级导航`}>
+      {items.map((item) => (
+        <button
+          key={item.id}
+          type="button"
+          className={page === item.id ? 'active' : ''}
+          aria-current={page === item.id ? 'page' : undefined}
+          onClick={() => onNavigate(item.id)}
+        >
+          <strong>{item.label}</strong>
+          <small>{item.description}</small>
+        </button>
+      ))}
+    </nav>
   );
 }

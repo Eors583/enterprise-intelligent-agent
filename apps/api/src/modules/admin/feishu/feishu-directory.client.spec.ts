@@ -139,6 +139,55 @@ describe('FeishuDirectoryClient', () => {
     expect(tokenRequests).toBe(2);
   });
 
+  it('probes department and member read permissions instead of accepting a token alone', async () => {
+    const requestedUrls: URL[] = [];
+    const fetchImpl = vi.fn<FeishuFetch>(async (input) => {
+      const url = toUrl(input);
+      requestedUrls.push(url);
+      if (url.pathname === TOKEN_PATH) return tokenResponse('t-probe');
+      return pageResponse([]);
+    });
+
+    await expect(createClient(fetchImpl).verifyConnection()).resolves.toBeUndefined();
+    expect(
+      requestedUrls.map((url) => ({
+        path: url.pathname,
+        pageSize: url.searchParams.get('page_size'),
+        departmentId: url.searchParams.get('department_id'),
+        recursive: url.searchParams.get('fetch_child'),
+      })),
+    ).toEqual([
+      { path: TOKEN_PATH, pageSize: null, departmentId: null, recursive: null },
+      {
+        path: '/open-apis/contact/v3/departments/0/children',
+        pageSize: '1',
+        departmentId: null,
+        recursive: 'false',
+      },
+      {
+        path: USERS_PATH,
+        pageSize: '1',
+        departmentId: '0',
+        recursive: null,
+      },
+    ]);
+  });
+
+  it('rejects binding verification when the member-read permission probe is denied', async () => {
+    const fetchImpl = vi.fn<FeishuFetch>(async (input) => {
+      const url = toUrl(input);
+      if (url.pathname === TOKEN_PATH) return tokenResponse('t-probe');
+      if (url.pathname.endsWith('/children')) return pageResponse([]);
+      return jsonResponse({ code: 99991672, msg: 'missing contact scope' }, 403);
+    });
+
+    await expect(createClient(fetchImpl).verifyConnection()).rejects.toMatchObject({
+      code: 'FEISHU_API_99991672',
+      providerCode: 99991672,
+      retryable: false,
+    });
+  });
+
   it('accepts Feishu empty terminal pages that omit the items field', async () => {
     const fetchImpl = vi.fn<FeishuFetch>(async (input) => {
       const url = toUrl(input);

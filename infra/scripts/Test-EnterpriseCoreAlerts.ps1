@@ -1,8 +1,21 @@
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Container')]
 param(
-  [Parameter(Mandatory = $true)]
+  [Parameter(Mandatory = $true, ParameterSetName = 'Container')]
   [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]*$')]
   [string]$Container,
+
+  [Parameter(Mandatory = $true, ParameterSetName = 'DirectClient')]
+  [ValidateNotNullOrEmpty()]
+  [string]$PgBinDirectory,
+
+  [Parameter(ParameterSetName = 'DirectClient')]
+  [Alias('Host')]
+  [ValidateNotNullOrEmpty()]
+  [string]$DatabaseHost = '127.0.0.1',
+
+  [Parameter(ParameterSetName = 'DirectClient')]
+  [ValidateRange(1, 65535)]
+  [int]$Port = 5432,
 
   [Parameter(Mandatory = $true)]
   [ValidatePattern('^[a-zA-Z_][a-zA-Z0-9_]*$')]
@@ -20,11 +33,20 @@ param(
   [ValidateRange(1, 1440)]
   [int]$RunAgeMinutes = 10,
 
+  [ValidateRange(1, 1440)]
+  [int]$ProcessAgeMinutes = 15,
+
+  [ValidateRange(1, 1440)]
+  [int]$ToolAgeMinutes = 10,
+
   [ValidateRange(1, 168)]
   [int]$BackupMaxAgeHours = 25,
 
   [ValidateRange(1, 720)]
   [int]$RestoreReportMaxAgeHours = 168,
+
+  [ValidateRange(1, 720)]
+  [int]$DisasterRecoveryReportMaxAgeHours = 168,
 
   [ValidateRange(1, 99)]
   [int]$QuotaWarningPercent = 85,
@@ -41,28 +63,134 @@ if ([string]::IsNullOrWhiteSpace($BackupDirectory)) {
 }
 
 . (Join-Path $PSScriptRoot 'lib\EnterpriseCoreAlertStatus.ps1')
+. (Join-Path $PSScriptRoot 'lib\EnterpriseCoreAlertOutboxSql.ps1')
 . (Join-Path $PSScriptRoot 'lib\EnterpriseBackupHealth.ps1')
+. (Join-Path $PSScriptRoot 'lib\EnterprisePostgresClient.ps1')
+
+$directClient = if ($PSCmdlet.ParameterSetName -eq 'DirectClient') {
+  Resolve-EnterprisePostgresClient `
+    -PgBinDirectory $PgBinDirectory `
+    -DatabaseHost $DatabaseHost `
+    -Port $Port
+}
+else {
+  $null
+}
+$transportMode = if ($null -eq $directClient) { 'docker' } else { 'direct-client' }
 
 function Invoke-Scalar {
   param([Parameter(Mandatory = $true)][string]$Sql)
 
-  $result = & docker exec $Container psql --username=$DatabaseUser --dbname=$Database --no-psqlrc --tuples-only --no-align --set=ON_ERROR_STOP=1 --command=$Sql
-  if ($LASTEXITCODE -ne 0) {
+  if ($null -eq $directClient) {
+    $invocation = Invoke-EnterpriseProcessWithUtf8StandardInput `
+      -FilePath 'docker' `
+      -Arguments @(
+        'exec',
+        '-i',
+        $Container,
+        'psql',
+        "--username=$DatabaseUser",
+        "--dbname=$Database",
+        '--no-psqlrc',
+        '--tuples-only',
+        '--no-align',
+        '--set=ON_ERROR_STOP=1',
+        '--file=-'
+      ) `
+      -StandardInput $Sql
+    if ($invocation.ExitCode -ne 0) {
+      throw 'Core alert probe could not query PostgreSQL.'
+    }
+    $result = $invocation.Output
+  }
+  else {
+    $arguments = @(
+      New-EnterprisePostgresConnectionArguments `
+        -Client $directClient `
+        -DatabaseUser $DatabaseUser `
+        -Database $Database
+    ) + @(
+      '--no-psqlrc',
+      '--tuples-only',
+      '--no-align',
+      '--set=ON_ERROR_STOP=1',
+      '--file=-'
+    )
+    try {
+      $result = Invoke-EnterprisePostgresClient `
+        -Client $directClient `
+        -Tool psql `
+        -Arguments $arguments `
+        -StandardInput $Sql
+    }
+    catch {
+      throw 'Core alert probe could not query PostgreSQL.'
+    }
+  }
+  if ($null -eq $result) {
     throw 'Core alert probe could not query PostgreSQL.'
   }
   return (($result | Out-String).Trim())
 }
 
-$outboxStaleSql = @"
-SELECT count(*) FROM public."outbox_events"
-WHERE status = 'PENDING'
-  AND available_at < now() - interval '$QueueAgeMinutes minutes';
+function Test-EnterpriseTableExists {
+  param([Parameter(Mandatory = $true)][ValidatePattern('^[a-z_][a-z0-9_]*$')][string]$Table)
+  return (Invoke-Scalar "SELECT to_regclass('public.$Table') IS NOT NULL;") -eq 't'
+}
+
+function Invoke-OptionalScalar {
+  param(
+    [Parameter(Mandatory = $true)][bool]$Available,
+    [Parameter(Mandatory = $true)][string]$Sql,
+    [int]$UnavailableValue = -1
+  )
+  if (-not $Available) { return $UnavailableValue }
+  return [int](Invoke-Scalar $Sql)
+}
+
+$outboxSignals = (
+  Invoke-Scalar (
+    Get-EnterpriseCoreAlertOutboxSignalsSql -QueueAgeMinutes $QueueAgeMinutes
+  )
+) | ConvertFrom-Json
+$agentQueuedSignalSql = @"
+WITH stale_queued_runs AS (
+  SELECT
+    ar."tenant_id",
+    ar."id"
+  FROM public."agent_runs" AS ar
+  WHERE ar."status" = 'QUEUED'
+    AND ar."created_at" < now() - interval '$QueueAgeMinutes minutes'
+), queued_with_active_delivery AS (
+  SELECT
+    stale_run."tenant_id",
+    stale_run."id"
+  FROM stale_queued_runs AS stale_run
+  JOIN public."outbox_events" AS event
+    ON event."tenant_id" = stale_run."tenant_id"
+   AND event."aggregate_id" = stale_run."id"
+   AND event."event_type" = 'agent.run_requested.v1'
+  JOIN public."outbox_event_deliveries" AS delivery
+    ON delivery."tenant_id" = event."tenant_id"
+   AND delivery."event_id" = event."id"
+   AND delivery."consumer_key" = 'agent-run-worker'
+   AND delivery."lane" = 'agent.run.execute'
+   AND delivery."status" = 'PENDING'::public."OutboxEventStatus"
+   AND delivery."available_at" <= now()
+)
+SELECT json_build_object(
+  'agentRunsStaleQueued', count(*) FILTER (WHERE active."id" IS NOT NULL),
+  'agentRunsStaleQueuedOrphaned', count(*) FILTER (WHERE active."id" IS NULL),
+  'agentRunsStaleQueuedTotal', count(*)
+)::text
+FROM stale_queued_runs AS stale_run
+LEFT JOIN queued_with_active_delivery AS active
+  ON active."tenant_id" = stale_run."tenant_id"
+  AND active."id" = stale_run."id";
 "@
-$agentQueuedSql = @"
-SELECT count(*) FROM public."agent_runs"
-WHERE status = 'QUEUED'
-  AND created_at < now() - interval '$QueueAgeMinutes minutes';
-"@
+
+$agentQueuedSignal = (Invoke-Scalar $agentQueuedSignalSql) | ConvertFrom-Json
+
 $agentActiveSql = @"
 SELECT count(*) FROM public."agent_runs"
 WHERE status IN ('DISPATCHING', 'RUNNING')
@@ -127,23 +255,29 @@ $semanticReadiness = Resolve-EnterpriseSemanticReadiness `
   -MatchingEmbeddingCount $matchingEmbeddings `
   -SchemaAvailable $semanticSchemaAvailable
 
+$processRuntimeSchemaAvailable = (
+  (Test-EnterpriseTableExists -Table 'process_instances') -and
+  (Test-EnterpriseTableExists -Table 'process_step_instances')
+)
+$toolGatewaySchemaAvailable = (
+  (Test-EnterpriseTableExists -Table 'tool_invocations') -and
+  (Test-EnterpriseTableExists -Table 'tool_execution_receipts')
+)
+
 $signals = [ordered]@{
-  outboxUnknown = [int](Invoke-Scalar @'
-SELECT count(*)
-FROM public."outbox_events" event
-WHERE event.status = 'UNKNOWN'
-  AND (
-    event.aggregate_type <> 'agent_run'
-    OR EXISTS (
-      SELECT 1 FROM public."agent_runs" run
-      WHERE run.id = event.aggregate_id AND run.tenant_id = event.tenant_id
-        AND run.status = 'UNKNOWN'
-    )
-  );
-'@)
-  outboxStalePending = [int](Invoke-Scalar $outboxStaleSql)
-  agentRunsStaleQueued = [int](Invoke-Scalar $agentQueuedSql)
+  outboxPending = [int]$outboxSignals.pending
+  outboxFailed = [int]$outboxSignals.failed
+  outboxUnknown = [int]$outboxSignals.unknown
+  outboxStalePending = [int]$outboxSignals.stalePending
+  outboxOldestPendingAgeSeconds = [int]$outboxSignals.oldestPendingAgeSeconds
+  outboxQuarantined = [int]$outboxSignals.quarantined
+  outboxRoutingIntegrityFailures = [int]$outboxSignals.routingIntegrityFailures
+  agentRunsStaleQueued = [int]$agentQueuedSignal.agentRunsStaleQueued
+  agentRunsStaleQueuedOrphaned = [int]$agentQueuedSignal.agentRunsStaleQueuedOrphaned
+  agentRunsStaleQueuedTotal = [int]$agentQueuedSignal.agentRunsStaleQueuedTotal
   agentRunsStaleActive = [int](Invoke-Scalar $agentActiveSql)
+  agentRunsQueued = [int](Invoke-Scalar 'SELECT count(*) FROM public."agent_runs" WHERE status = ''QUEUED'';')
+  agentRunsActive = [int](Invoke-Scalar 'SELECT count(*) FROM public."agent_runs" WHERE status IN (''DISPATCHING'', ''RUNNING'');')
   agentRunsUnknown = [int](Invoke-Scalar 'SELECT count(*) FROM public."agent_runs" WHERE status = ''UNKNOWN'';')
   agentRunUnverifiedHolds = [int](Invoke-Scalar 'SELECT count(*) FROM public."agent_runs" WHERE reserved_tokens > 0 AND status IN (''SUCCEEDED'', ''FAILED'', ''UNKNOWN'', ''CANCELLED'');')
   tenantQuotasNearLimit = [int](Invoke-Scalar @"
@@ -169,6 +303,29 @@ WHERE (COALESCE(ledger.used_tokens, 0) + COALESCE(ledger.held_tokens, 0)) * 100
   currentKnowledgeChunks = $currentChunkCount
   currentChunksWithMatchingEmbeddings = $matchingEmbeddings
   currentChunksMissingEmbeddings = $missingEmbeddings
+  processRuntimeSchemaAvailable = if ($processRuntimeSchemaAvailable) { 1 } else { 0 }
+  processInstancesStale = Invoke-OptionalScalar `
+    -Available $processRuntimeSchemaAvailable `
+    -Sql "SELECT count(*) FROM public.`"process_instances`" WHERE status IN ('RUNNING', 'COMPENSATING') AND updated_at < now() - interval '$ProcessAgeMinutes minutes';"
+  processStepsOverdue = Invoke-OptionalScalar `
+    -Available $processRuntimeSchemaAvailable `
+    -Sql "SELECT count(*) FROM public.`"process_step_instances`" WHERE status IN ('READY', 'RUNNING') AND due_at IS NOT NULL AND due_at < now();"
+  processStepsFailed24h = Invoke-OptionalScalar `
+    -Available $processRuntimeSchemaAvailable `
+    -Sql "SELECT count(*) FROM public.`"process_step_instances`" WHERE status IN ('FAILED', 'TIMED_OUT', 'COMPENSATION_FAILED') AND updated_at >= now() - interval '24 hours';"
+  toolGatewaySchemaAvailable = if ($toolGatewaySchemaAvailable) { 1 } else { 0 }
+  toolInvocationsUnknown = Invoke-OptionalScalar `
+    -Available $toolGatewaySchemaAvailable `
+    -Sql 'SELECT count(*) FROM public."tool_invocations" WHERE status = ''UNKNOWN'';'
+  toolInvocationsStaleExecuting = Invoke-OptionalScalar `
+    -Available $toolGatewaySchemaAvailable `
+    -Sql "SELECT count(*) FROM public.`"tool_invocations`" WHERE status IN ('EXECUTING', 'COMPENSATING') AND updated_at < now() - interval '$ToolAgeMinutes minutes';"
+  toolInvocationsFailed24h = Invoke-OptionalScalar `
+    -Available $toolGatewaySchemaAvailable `
+    -Sql 'SELECT count(*) FROM public."tool_invocations" WHERE status IN (''FAILED'', ''COMPENSATION_FAILED'') AND completed_at >= now() - interval ''24 hours'';'
+  toolExecutionLatencyP95Ms24h = Invoke-OptionalScalar `
+    -Available $toolGatewaySchemaAvailable `
+    -Sql 'SELECT COALESCE(percentile_disc(0.95) WITHIN GROUP (ORDER BY latency_ms), 0)::integer FROM public."tool_execution_receipts" WHERE created_at >= now() - interval ''24 hours'';'
 }
 
 $resolvedBackupDirectory = [System.IO.Path]::GetFullPath($BackupDirectory)
@@ -176,24 +333,39 @@ $backupContinuity = Get-EnterpriseBackupContinuityStatus `
   -BackupDirectory $resolvedBackupDirectory `
   -Database $Database `
   -BackupMaxAgeHours $BackupMaxAgeHours `
-  -RestoreReportMaxAgeHours $RestoreReportMaxAgeHours
+  -RestoreReportMaxAgeHours $RestoreReportMaxAgeHours `
+  -DisasterRecoveryReportMaxAgeHours $DisasterRecoveryReportMaxAgeHours
 $backupStatus = [string]$backupContinuity.backupStatus
 $restoreStatus = [string]$backupContinuity.restoreStatus
+$disasterRecoveryStatus = [string]$backupContinuity.disasterRecoveryStatus
 
 $alerts = @()
+if ($signals.outboxFailed -gt 0) { $alerts += 'OUTBOX_FAILED' }
 if ($signals.outboxUnknown -gt 0) { $alerts += 'OUTBOX_UNKNOWN' }
 if ($signals.outboxStalePending -gt 0) { $alerts += 'OUTBOX_STALE' }
+if ($signals.outboxQuarantined -gt 0) { $alerts += 'OUTBOX_EVENT_QUARANTINED' }
+if ($signals.outboxRoutingIntegrityFailures -gt 0) { $alerts += 'OUTBOX_ROUTING_INTEGRITY' }
 if ($signals.agentRunsUnknown -gt 0) { $alerts += 'AGENT_RUN_UNKNOWN' }
 if ($signals.agentRunUnverifiedHolds -gt 0) { $alerts += 'AGENT_RUN_USAGE_UNVERIFIED' }
 if ($signals.tenantQuotasNearLimit -gt 0) { $alerts += 'TENANT_AGENT_QUOTA_NEAR_LIMIT' }
 if ($signals.blockedLoginBuckets -gt 0) { $alerts += 'AUTH_LOGIN_BUCKET_BLOCKED' }
 if ($signals.agentRunsStaleQueued -gt 0) { $alerts += 'AGENT_RUN_QUEUE_STALE' }
+if ($signals.agentRunsStaleQueuedOrphaned -gt 0) { $alerts += 'AGENT_RUN_QUEUE_ORPHANED' }
 if ($signals.agentRunsStaleActive -gt 0) { $alerts += 'AGENT_RUN_ACTIVE_STALE' }
 if ($signals.ingestionFailures24h -gt 0) { $alerts += 'KNOWLEDGE_INGESTION_FAILED' }
 if ($signals.currentChunksMissingEmbeddings -gt 0) { $alerts += 'KNOWLEDGE_EMBEDDING_GAP' }
 if ($signals.currentChunksMissingEmbeddings -eq -1) { $alerts += 'SEMANTIC_SCHEMA_MISSING' }
+if ($signals.processRuntimeSchemaAvailable -eq 0) { $alerts += 'PROCESS_RUNTIME_SCHEMA_MISSING' }
+if ($signals.processInstancesStale -gt 0) { $alerts += 'PROCESS_INSTANCE_STALE' }
+if ($signals.processStepsOverdue -gt 0) { $alerts += 'PROCESS_STEP_OVERDUE' }
+if ($signals.processStepsFailed24h -gt 0) { $alerts += 'PROCESS_STEP_FAILED' }
+if ($signals.toolGatewaySchemaAvailable -eq 0) { $alerts += 'TOOL_GATEWAY_SCHEMA_MISSING' }
+if ($signals.toolInvocationsUnknown -gt 0) { $alerts += 'TOOL_INVOCATION_UNKNOWN' }
+if ($signals.toolInvocationsStaleExecuting -gt 0) { $alerts += 'TOOL_INVOCATION_STALE' }
+if ($signals.toolInvocationsFailed24h -gt 0) { $alerts += 'TOOL_INVOCATION_FAILED' }
 if ($backupStatus -ne 'fresh') { $alerts += 'BACKUP_NOT_FRESH' }
 if ($restoreStatus -ne 'verified') { $alerts += 'RESTORE_REHEARSAL_NOT_VERIFIED' }
+if ($disasterRecoveryStatus -ne 'verified') { $alerts += 'DISASTER_RECOVERY_OBJECTIVES_NOT_VERIFIED' }
 
 $healthStatus = if ($alerts.Count -eq 0) { 'healthy' } else { 'alerting' }
 $readinessBlockers = @()
@@ -208,12 +380,14 @@ $result = [ordered]@{
   status = $status
   healthStatus = $healthStatus
   checkedAtUtc = [DateTime]::UtcNow.ToString('o')
+  transport = $transportMode
   database = $Database
   expectedEmbeddingModel = if ([string]::IsNullOrWhiteSpace($ExpectedEmbeddingModel)) { $null } else { $ExpectedEmbeddingModel }
   semanticReadiness = $semanticReadiness
   signals = $signals
   backupStatus = $backupStatus
   restoreStatus = $restoreStatus
+  disasterRecoveryStatus = $disasterRecoveryStatus
   readinessBlockers = $readinessBlockers
   alerts = $alerts
 }

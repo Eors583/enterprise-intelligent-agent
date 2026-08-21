@@ -1,21 +1,36 @@
 import { createHash, randomUUID } from 'node:crypto';
 
-import { BadRequestException, ConflictException, Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
+  type ApplyFeishuDirectoryPreviewRequest,
   adminMemberSchema,
   type BindFeishuOrganizationRequest,
+  type FeishuDirectoryPreview,
+  type FeishuDirectorySyncRunDetail,
+  type FeishuDirectorySyncRunList,
   type FeishuOrganizationSyncStatus,
 } from '@enterprise/contracts';
 import { Prisma } from '@prisma/client';
 
 import type { EnvironmentVariables } from '../../config/environment.js';
 import { AdminPrismaService } from '../../database/admin-prisma.service.js';
-import { PasswordHasher } from '../auth/application/password-hasher.js';
 import { DirectoryPersonalAgentProvisioner } from '../agent-control/infrastructure/prisma/directory-personal-agent.provisioner.js';
 import { AdminAccessService, type AdminPrincipal } from './admin-access.service.js';
 import { recordAdminAudit } from './admin-audit.js';
 import { lockOrganizationDirectory } from './organization-directory-lock.js';
+import {
+  cancelAssignedAgentRuns,
+  cascadeAssignmentDescendants,
+  disableAgentInstanceWithoutEffectiveAssignments,
+} from './role-assignment-admin.service.js';
 import { FeishuDirectoryClient } from './feishu/feishu-directory.client.js';
 import { FeishuCredentialVault } from './feishu/feishu-credential-vault.js';
 import {
@@ -29,9 +44,11 @@ import type {
   FeishuDirectoryUser,
 } from './feishu/feishu-directory.models.js';
 import { FeishuDirectoryError } from './feishu/feishu-directory.models.js';
+import { KnowledgeGateway } from '../knowledge-gateway/knowledge-gateway.port.js';
 
 const APPLY_TRANSACTION_TIMEOUT_MS = 600_000;
 const REMOVAL_CONFIRMATION_DELAY_MS = 60 * 60_000;
+const DIRECTORY_SYNC_EVENT_TYPE = 'admin.directory.feishu.sync.requested.v1';
 
 interface SyncCounters {
   readonly departments: {
@@ -62,6 +79,20 @@ interface ClaimedSync {
   readonly client: FeishuDirectoryClient;
 }
 
+export interface DirectorySyncWorkerClaim {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly integrationId: string;
+  readonly organizationId: string;
+  readonly previewId: string;
+  readonly requestedById: string;
+  readonly expectedSnapshotCursor: string;
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly workerId: string;
+  readonly leaseExpiresAt: Date;
+}
+
 interface FeishuConnection {
   readonly source: 'ADMIN' | 'ENVIRONMENT';
   readonly appId: string;
@@ -79,16 +110,18 @@ export class FeishuDirectorySyncService {
   private readonly environmentTenantSlug: string | undefined;
   private readonly apiBaseUrl: string;
   private readonly httpTimeoutMs: number;
-  private readonly initialPassword: string;
+  private readonly previewTtlMs: number;
+  private readonly workerEnabled: boolean;
+  private readonly maxAttempts: number;
 
   constructor(
     @Inject(AdminPrismaService) private readonly prisma: AdminPrismaService,
     @Inject(AdminAccessService) private readonly access: AdminAccessService,
     @Inject(FeishuDirectoryClient) private readonly feishu: FeishuDirectoryClient,
     @Inject(FeishuCredentialVault) private readonly vault: FeishuCredentialVault,
-    @Inject(PasswordHasher) private readonly passwords: PasswordHasher,
     @Inject(DirectoryPersonalAgentProvisioner)
     private readonly personalAgents: DirectoryPersonalAgentProvisioner,
+    @Inject(KnowledgeGateway) private readonly knowledge: KnowledgeGateway,
     @Inject(ConfigService) config: ConfigService<EnvironmentVariables, true>,
   ) {
     this.leaseMs = config.get('FEISHU_SYNC_LEASE_MS', { infer: true });
@@ -102,7 +135,9 @@ export class FeishuDirectorySyncService {
     });
     this.apiBaseUrl = config.get('FEISHU_API_BASE_URL', { infer: true });
     this.httpTimeoutMs = config.get('FEISHU_HTTP_TIMEOUT_MS', { infer: true });
-    this.initialPassword = config.get('FEISHU_DIRECTORY_INITIAL_PASSWORD', { infer: true });
+    this.previewTtlMs = config.get('FEISHU_SYNC_PREVIEW_TTL_MS', { infer: true });
+    this.workerEnabled = config.get('FEISHU_SYNC_WORKER_ENABLED', { infer: true });
+    this.maxAttempts = config.get('FEISHU_SYNC_MAX_ATTEMPTS', { infer: true });
   }
 
   async getStatus(): Promise<FeishuOrganizationSyncStatus> {
@@ -157,7 +192,10 @@ export class FeishuDirectorySyncService {
       }
       throw error;
     }
-    const encryptedSecret = this.vault.encrypt(request.appSecret);
+    const encryptedSecret = this.vault.encrypt(request.appSecret, {
+      tenantId: principal.tenantId,
+      appId: request.appId,
+    });
 
     await this.prisma.withTenant(principal.tenantId, async (transaction) => {
       const existing = await transaction.directoryIntegration.findFirst({
@@ -207,6 +245,268 @@ export class FeishuDirectorySyncService {
     return this.getStatus();
   }
 
+  async createPreview(): Promise<FeishuDirectoryPreview> {
+    const principal = this.access.requireDirectoryWrite();
+    const context = await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const organization = await transaction.organization.findFirstOrThrow({
+        where: { tenantId: principal.tenantId },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, externalKey: true },
+      });
+      let integration = await transaction.directoryIntegration.findFirst({
+        where: { tenantId: principal.tenantId, provider: 'FEISHU' },
+      });
+      const connection = this.resolveConnection(organization.externalKey, integration);
+      if (connection === null) {
+        throw new BadRequestException('请先绑定并验证飞书企业自建应用。');
+      }
+      // Environment-managed credentials are a supported connection source, but
+      // previews and runs still need a durable integration identity. Materialize
+      // it without persisting the environment secret in the database.
+      if (integration === null) {
+        integration = await transaction.directoryIntegration.upsert({
+          where: {
+            tenantId_provider: {
+              tenantId: principal.tenantId,
+              provider: 'FEISHU',
+            },
+          },
+          create: {
+            tenantId: principal.tenantId,
+            organizationId: organization.id,
+            provider: 'FEISHU',
+            connectorFingerprint: connection.fingerprint,
+            status: 'IDLE',
+          },
+          update: { organizationId: organization.id },
+        });
+      }
+      if (
+        integration.connectorFingerprint !== null &&
+        integration.connectorFingerprint !== connection.fingerprint
+      ) {
+        throw new ConflictException('飞书应用与当前通讯录绑定不一致，已拒绝生成预览。');
+      }
+      return { organization, integration, connection };
+    });
+
+    const snapshot = validateFeishuDirectorySnapshot(
+      await context.connection.client.fetchSnapshot(),
+    );
+    const cursor = snapshotCursor(snapshot);
+    const now = new Date();
+    const expiresAt = new Date(now.getTime() + this.previewTtlMs);
+    try {
+      return await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        const existing = await transaction.directorySyncPreview.findFirst({
+          where: {
+            tenantId: principal.tenantId,
+            integrationId: context.integration.id,
+            snapshotCursor: cursor,
+            status: 'READY',
+            expiresAt: { gt: now },
+          },
+          include: { items: { orderBy: { sequence: 'asc' } } },
+        });
+        if (existing !== null) return mapPreview(existing);
+
+        await transaction.directorySyncPreview.updateMany({
+          where: {
+            tenantId: principal.tenantId,
+            integrationId: context.integration.id,
+            status: 'READY',
+          },
+          data: { status: 'EXPIRED' },
+        });
+        const previewBuild = await buildPreviewChanges(transaction, {
+          tenantId: principal.tenantId,
+          integrationId: context.integration.id,
+          snapshot,
+          now,
+          reconcileRemovals: this.reconcileRemovals,
+        });
+        const summary = summarizePreview(previewBuild.changes, previewBuild.unchanged);
+        const preview = await transaction.directorySyncPreview.create({
+          data: {
+            tenantId: principal.tenantId,
+            integrationId: context.integration.id,
+            organizationId: context.organization.id,
+            requestedById: principal.userId,
+            snapshotCursor: cursor,
+            summary: summary as unknown as Prisma.InputJsonObject,
+            expiresAt,
+            items: {
+              create: previewBuild.changes.map((change, sequence) => ({
+                sequence,
+                ...change,
+                fieldChanges: change.fieldChanges as Prisma.InputJsonObject,
+              })),
+            },
+          },
+          include: { items: { orderBy: { sequence: 'asc' } } },
+        });
+        await transaction.directoryIntegration.update({
+          where: { id: context.integration.id },
+          data: { lastPreviewCursor: cursor, version: { increment: 1 } },
+        });
+        await recordAdminAudit(
+          transaction,
+          principal,
+          'admin.directory.feishu.preview.created',
+          'directory_sync_preview',
+          preview.id,
+          {
+            snapshotCursor: cursor,
+            expiresAt: expiresAt.toISOString(),
+            summary,
+          } as unknown as Prisma.InputJsonObject,
+        );
+        return mapPreview(preview);
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+        throw error;
+      }
+      const winner = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+        transaction.directorySyncPreview.findFirst({
+          where: {
+            tenantId: principal.tenantId,
+            integrationId: context.integration.id,
+            snapshotCursor: cursor,
+            status: 'READY',
+            expiresAt: { gt: new Date() },
+          },
+          include: { items: { orderBy: { sequence: 'asc' } } },
+        }),
+      );
+      if (winner === null) {
+        throw new ConflictException('飞书快照已变化，请重新生成差异预览。');
+      }
+      return mapPreview(winner);
+    }
+  }
+
+  async getCurrentPreview(): Promise<FeishuDirectoryPreview | null> {
+    const principal = this.access.requireDirectoryRead();
+    return this.prisma.withTenant(principal.tenantId, async (transaction) => {
+      const now = new Date();
+      await transaction.directorySyncPreview.updateMany({
+        where: { tenantId: principal.tenantId, status: 'READY', expiresAt: { lte: now } },
+        data: { status: 'EXPIRED' },
+      });
+      const preview = await transaction.directorySyncPreview.findFirst({
+        where: { tenantId: principal.tenantId },
+        orderBy: { createdAt: 'desc' },
+        include: { items: { orderBy: { sequence: 'asc' } } },
+      });
+      return preview === null ? null : mapPreview(preview);
+    });
+  }
+
+  async enqueuePreview(
+    request: ApplyFeishuDirectoryPreviewRequest,
+  ): Promise<FeishuDirectorySyncRunDetail> {
+    if (!this.workerEnabled) {
+      throw new ServiceUnavailableException('飞书通讯录后台同步 Worker 尚未启用。');
+    }
+    const principal = this.access.requireDirectoryWrite();
+    const requestHash = stableHash(JSON.stringify({ previewId: request.previewId }), 64);
+    try {
+      return await this.prisma.withTenant(principal.tenantId, async (transaction) => {
+        const existing = await transaction.directorySyncRun.findUnique({
+          where: {
+            tenantId_idempotencyKey: {
+              tenantId: principal.tenantId,
+              idempotencyKey: request.idempotencyKey,
+            },
+          },
+        });
+        if (existing !== null) {
+          if (existing.requestHash !== requestHash) {
+            throw new ConflictException('该幂等键已用于不同的飞书同步请求。');
+          }
+          return mapRun(existing);
+        }
+        const preview = await transaction.directorySyncPreview.findFirst({
+          where: {
+            id: request.previewId,
+            tenantId: principal.tenantId,
+            status: 'READY',
+            expiresAt: { gt: new Date() },
+          },
+        });
+        if (preview === null) {
+          throw new ConflictException('同步预览不存在、已过期或已被应用，请重新生成预览。');
+        }
+        const run = await transaction.directorySyncRun.create({
+          data: {
+            tenantId: principal.tenantId,
+            integrationId: preview.integrationId,
+            organizationId: preview.organizationId,
+            previewId: preview.id,
+            requestedById: principal.userId,
+            idempotencyKey: request.idempotencyKey,
+            requestHash,
+            expectedSnapshotCursor: preview.snapshotCursor,
+            maxAttempts: this.maxAttempts,
+          },
+        });
+        await transaction.outboxEvent.create({
+          data: {
+            tenantId: principal.tenantId,
+            aggregateType: 'directory_sync_run',
+            aggregateId: run.id,
+            eventType: DIRECTORY_SYNC_EVENT_TYPE,
+            payload: {
+              runId: run.id,
+              previewId: preview.id,
+              expectedSnapshotCursor: preview.snapshotCursor,
+            },
+          },
+        });
+        await recordAdminAudit(
+          transaction,
+          principal,
+          'admin.directory.feishu.sync.queued',
+          'directory_sync_run',
+          run.id,
+          { previewId: preview.id, snapshotCursor: preview.snapshotCursor },
+        );
+        return mapRun(run);
+      });
+    } catch (error) {
+      if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== 'P2002') {
+        throw error;
+      }
+      const existing = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+        transaction.directorySyncRun.findUnique({
+          where: {
+            tenantId_idempotencyKey: {
+              tenantId: principal.tenantId,
+              idempotencyKey: request.idempotencyKey,
+            },
+          },
+        }),
+      );
+      if (existing === null || existing.requestHash !== requestHash) {
+        throw new ConflictException('该幂等键已用于不同的飞书同步请求。');
+      }
+      return mapRun(existing);
+    }
+  }
+
+  async listRuns(): Promise<FeishuDirectorySyncRunList> {
+    const principal = this.access.requireDirectoryRead();
+    const items = await this.prisma.withTenant(principal.tenantId, (transaction) =>
+      transaction.directorySyncRun.findMany({
+        where: { tenantId: principal.tenantId },
+        orderBy: { createdAt: 'desc' },
+        take: 50,
+      }),
+    );
+    return { items: items.map(mapRun) };
+  }
+
   async startSync(): Promise<FeishuOrganizationSyncStatus> {
     const principal = this.access.requireDirectoryWrite();
     let claim: ClaimedSync;
@@ -219,12 +519,196 @@ export class FeishuDirectorySyncService {
       throw error;
     }
 
-    void this.execute(claim).catch(() => {
-      // execute() records a sanitized failure state. This final guard prevents
-      // a detached promise rejection from escaping the request lifecycle.
-    });
+    await this.execute(claim);
 
-    return runningStatus(claim);
+    return this.getStatus();
+  }
+
+  async executeWorkerClaim(claim: DirectorySyncWorkerClaim): Promise<void> {
+    const record = await this.prisma.withTenant(claim.tenantId, (transaction) =>
+      transaction.directorySyncRun.findFirstOrThrow({
+        where: {
+          id: claim.id,
+          tenantId: claim.tenantId,
+          status: 'RUNNING',
+          leaseOwner: claim.workerId,
+          leaseExpiresAt: { gt: new Date() },
+        },
+        include: {
+          integration: {
+            include: { organization: { select: { externalKey: true } } },
+          },
+          preview: true,
+          requestedBy: { select: { id: true, role: true } },
+        },
+      }),
+    );
+    if (record.preview.status !== 'READY' || record.preview.expiresAt <= new Date()) {
+      throw new DirectorySyncExecutionError('PREVIEW_EXPIRED', false);
+    }
+    const connection = this.resolveConnection(
+      record.integration.organization.externalKey,
+      record.integration,
+    );
+    if (connection === null) {
+      throw new DirectorySyncExecutionError('FEISHU_NOT_CONFIGURED', false);
+    }
+    const snapshot = validateFeishuDirectorySnapshot(await connection.client.fetchSnapshot());
+    const cursor = snapshotCursor(snapshot);
+    if (cursor !== record.expectedSnapshotCursor) {
+      throw new DirectorySyncExecutionError('SNAPSHOT_CHANGED', false);
+    }
+
+    const startedAt = record.startedAt ?? new Date();
+    const integrationLease = await this.prisma.withTenant(claim.tenantId, (transaction) =>
+      transaction.directoryIntegration.updateMany({
+        where: {
+          id: claim.integrationId,
+          tenantId: claim.tenantId,
+          OR: [
+            { status: { not: 'RUNNING' } },
+            { leaseOwner: claim.workerId },
+            { leaseExpiresAt: { lte: new Date() } },
+          ],
+        },
+        data: {
+          status: 'RUNNING',
+          leaseOwner: claim.workerId,
+          leaseExpiresAt: claim.leaseExpiresAt,
+          lastSyncStartedAt: startedAt,
+          lastSyncFinishedAt: null,
+          lastErrorCode: null,
+          version: { increment: 1 },
+        },
+      }),
+    );
+    if (integrationLease.count !== 1) {
+      throw new DirectorySyncExecutionError('SYNC_LEASE_BUSY', true);
+    }
+
+    await this.applySnapshot(
+      {
+        principal: {
+          tenantId: claim.tenantId,
+          userId: record.requestedBy.id,
+          role: record.requestedBy.role,
+          authenticationSource: 'session',
+        },
+        organizationId: claim.organizationId,
+        organizationName: '',
+        integrationId: claim.integrationId,
+        leaseOwner: claim.workerId,
+        startedAt,
+        previousSuccessfulAt: record.integration.lastSuccessfulSyncAt,
+        client: connection.client,
+      },
+      snapshot,
+      { runId: claim.id, previewId: claim.previewId, cursor },
+    );
+  }
+
+  async renewWorkerLease(claim: DirectorySyncWorkerClaim, leaseExpiresAt: Date): Promise<boolean> {
+    return this.prisma.withTenant(claim.tenantId, async (transaction) => {
+      const renewed = await transaction.directorySyncRun.updateMany({
+        where: {
+          id: claim.id,
+          tenantId: claim.tenantId,
+          status: 'RUNNING',
+          leaseOwner: claim.workerId,
+          leaseExpiresAt: { gt: new Date() },
+        },
+        data: { leaseExpiresAt },
+      });
+      if (renewed.count !== 1) return false;
+      await transaction.directoryIntegration.updateMany({
+        where: {
+          id: claim.integrationId,
+          tenantId: claim.tenantId,
+          status: 'RUNNING',
+          leaseOwner: claim.workerId,
+        },
+        data: { leaseExpiresAt },
+      });
+      return true;
+    });
+  }
+
+  async failWorkerClaim(
+    claim: DirectorySyncWorkerClaim,
+    error: unknown,
+    retryAt: Date | null,
+  ): Promise<void> {
+    const described = describeDirectorySyncExecutionError(error);
+    await this.prisma.withTenant(claim.tenantId, async (transaction) => {
+      const shouldRetry =
+        described.retryable && retryAt !== null && claim.attempts < claim.maxAttempts;
+      const status = shouldRetry
+        ? ('QUEUED' as const)
+        : claim.attempts >= claim.maxAttempts
+          ? ('DEAD_LETTER' as const)
+          : ('FAILED' as const);
+      const runClockFloor = shouldRetry
+        ? null
+        : await transaction.directorySyncRun.findFirst({
+            where: { id: claim.id, tenantId: claim.tenantId },
+            select: {
+              startedAt: true,
+              integration: { select: { lastSyncStartedAt: true } },
+            },
+          });
+      const finishedAt = shouldRetry
+        ? null
+        : new Date(
+            Math.max(
+              Date.now(),
+              (runClockFloor?.startedAt?.getTime() ?? 0) + 1,
+              (runClockFloor?.integration.lastSyncStartedAt?.getTime() ?? 0) + 1,
+            ),
+          );
+      const updated = await transaction.directorySyncRun.updateMany({
+        where: {
+          id: claim.id,
+          tenantId: claim.tenantId,
+          status: 'RUNNING',
+          leaseOwner: claim.workerId,
+        },
+        data: {
+          status,
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          nextAttemptAt: retryAt ?? new Date(),
+          lastErrorCode: described.code,
+          finishedAt,
+        },
+      });
+      if (updated.count !== 1) return;
+      await transaction.directoryIntegration.updateMany({
+        where: {
+          id: claim.integrationId,
+          tenantId: claim.tenantId,
+          status: 'RUNNING',
+          leaseOwner: claim.workerId,
+        },
+        data: {
+          status: shouldRetry ? 'IDLE' : 'FAILED',
+          leaseOwner: null,
+          leaseExpiresAt: null,
+          ...(shouldRetry ? {} : { lastSyncFinishedAt: finishedAt }),
+          lastErrorCode: described.code,
+          version: { increment: 1 },
+        },
+      });
+      await transaction.directorySyncPreviewItem.updateMany({
+        where: {
+          tenantId: claim.tenantId,
+          previewId: claim.previewId,
+          applyStatus: 'PENDING',
+        },
+        data: shouldRetry
+          ? { diagnosticCode: described.code }
+          : { applyStatus: 'FAILED', diagnosticCode: described.code },
+      });
+    });
   }
 
   private async claim(principal: AdminPrincipal): Promise<ClaimedSync> {
@@ -328,13 +812,10 @@ export class FeishuDirectorySyncService {
 
   private async execute(claim: ClaimedSync): Promise<void> {
     try {
-      const [snapshot, temporaryPasswordHash] = await Promise.all([
-        claim.client.fetchSnapshot(),
-        this.passwords.hash(this.initialPassword),
-      ]);
+      const snapshot = await claim.client.fetchSnapshot();
       const validated = validateFeishuDirectorySnapshot(snapshot);
       await this.renewLease(claim);
-      await this.applySnapshot(claim, validated, temporaryPasswordHash);
+      await this.applySnapshot(claim, validated);
     } catch (error) {
       const code = safeSyncErrorCode(error);
       try {
@@ -349,7 +830,11 @@ export class FeishuDirectorySyncService {
   private async applySnapshot(
     claim: ClaimedSync,
     snapshot: FeishuDirectorySnapshot,
-    temporaryPasswordHash: string,
+    durableRun?: {
+      readonly runId: string;
+      readonly previewId: string;
+      readonly cursor: string;
+    },
   ): Promise<void> {
     await this.prisma.withTenant(
       claim.principal.tenantId,
@@ -364,6 +849,21 @@ export class FeishuDirectorySyncService {
           },
         });
         if (integration === null) throw new SyncLeaseLostError();
+        if (durableRun !== undefined) {
+          const validPreview = await transaction.directorySyncPreview.count({
+            where: {
+              id: durableRun.previewId,
+              tenantId: claim.principal.tenantId,
+              integrationId: claim.integrationId,
+              status: 'READY',
+              snapshotCursor: durableRun.cursor,
+              expiresAt: { gt: new Date() },
+            },
+          });
+          if (validPreview !== 1) {
+            throw new DirectorySyncExecutionError('PREVIEW_EXPIRED', false);
+          }
+        }
         await lockOrganizationDirectory(
           transaction,
           claim.principal.tenantId,
@@ -379,14 +879,7 @@ export class FeishuDirectorySyncService {
           snapshot.departments,
           summary,
         );
-        await this.applyUsers(
-          transaction,
-          claim,
-          localDepartmentIds,
-          snapshot.users,
-          summary,
-          temporaryPasswordHash,
-        );
+        await this.applyUsers(transaction, claim, localDepartmentIds, snapshot.users, summary);
         await this.reconcileMissingDepartments(transaction, claim, summary);
 
         if (
@@ -404,7 +897,10 @@ export class FeishuDirectorySyncService {
           });
         }
 
-        const finishedAt = new Date();
+        // The database and API hosts can differ slightly in wall-clock time.
+        // Never persist a finish timestamp before the database-originated
+        // start timestamp (including sub-millisecond precision lost in JS).
+        const finishedAt = new Date(Math.max(Date.now(), claim.startedAt.getTime() + 1));
         const completed = await transaction.directoryIntegration.updateMany({
           where: {
             id: claim.integrationId,
@@ -421,10 +917,53 @@ export class FeishuDirectorySyncService {
             lastSuccessfulSyncAt: finishedAt,
             lastErrorCode: null,
             lastSummary: summary as unknown as Prisma.InputJsonObject,
+            ...(durableRun === undefined ? {} : { lastAppliedCursor: durableRun.cursor }),
             version: { increment: 1 },
           },
         });
         if (completed.count !== 1) throw new SyncLeaseLostError();
+
+        if (durableRun !== undefined) {
+          const completedRun = await transaction.directorySyncRun.updateMany({
+            where: {
+              id: durableRun.runId,
+              tenantId: claim.principal.tenantId,
+              status: 'RUNNING',
+              leaseOwner: claim.leaseOwner,
+              leaseExpiresAt: { gt: finishedAt },
+            },
+            data: {
+              status: 'SUCCEEDED',
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              lastErrorCode: null,
+              summary: summary as unknown as Prisma.InputJsonObject,
+              finishedAt,
+            },
+          });
+          if (completedRun.count !== 1) throw new SyncLeaseLostError();
+          await transaction.directorySyncPreview.update({
+            where: {
+              tenantId_id: { tenantId: claim.principal.tenantId, id: durableRun.previewId },
+            },
+            data: { status: 'APPLIED', appliedAt: finishedAt },
+          });
+          await transaction.directorySyncPreviewItem.updateMany({
+            where: {
+              tenantId: claim.principal.tenantId,
+              previewId: durableRun.previewId,
+            },
+            data: { applyStatus: 'APPLIED', diagnosticCode: null },
+          });
+          await transaction.directorySyncPreviewItem.updateMany({
+            where: {
+              tenantId: claim.principal.tenantId,
+              previewId: durableRun.previewId,
+              action: 'CONFLICT',
+            },
+            data: { applyStatus: 'FAILED', diagnosticCode: 'LOCAL_DATA_CONFLICT' },
+          });
+        }
 
         await recordAdminAudit(
           transaction,
@@ -577,7 +1116,6 @@ export class FeishuDirectorySyncService {
     departmentIds: ReadonlyMap<string, string>,
     users: readonly FeishuDirectoryUser[],
     summary: SyncCounters,
-    temporaryPasswordHash: string,
   ): Promise<void> {
     const [userBindings, employmentBindings, agentPlan] = await Promise.all([
       transaction.directoryUserBinding.findMany({
@@ -586,9 +1124,7 @@ export class FeishuDirectorySyncService {
           integrationId: claim.integrationId,
         },
         include: {
-          user: {
-            include: { passwordCredential: { select: { userId: true } } },
-          },
+          user: true,
         },
       }),
       transaction.directoryEmploymentBinding.findMany({
@@ -601,7 +1137,6 @@ export class FeishuDirectorySyncService {
       this.personalAgents.prepare(transaction, {
         tenantId: claim.principal.tenantId,
         actorUserId: claim.principal.userId,
-        publishedAt: claim.startedAt,
       }),
     ]);
     const usersByExternalId = new Map(
@@ -627,7 +1162,7 @@ export class FeishuDirectorySyncService {
     for (const remote of users) {
       seenUsers.add(remote.externalId);
       const binding = usersByExternalId.get(remote.externalId);
-      const remoteMayDeactivateAccount = binding === undefined || binding.user.role === 'MEMBER';
+      const remoteMayDeactivateAccount = binding === undefined || binding.user.role !== 'OWNER';
       const desiredUserStatus =
         binding?.user.status === 'LOCKED'
           ? 'LOCKED'
@@ -680,6 +1215,9 @@ export class FeishuDirectorySyncService {
           binding.user.status !== desiredUserStatus ||
           binding.openId !== desiredOpenId ||
           binding.unionId !== desiredUnionId;
+        if (desiredUserStatus !== 'ACTIVE' && remoteMayDeactivateAccount) {
+          await lockDirectoryMemberPasswordFlow(transaction, claim.principal.tenantId, localUserId);
+        }
         if (binding.user.status === 'ACTIVE' && desiredUserStatus !== 'ACTIVE') {
           summary.members.deactivated += 1;
         }
@@ -702,21 +1240,6 @@ export class FeishuDirectorySyncService {
         });
       }
 
-      if (
-        (binding === undefined || binding.user.passwordCredential === null) &&
-        (binding === undefined || binding.user.role === 'MEMBER')
-      ) {
-        await transaction.passwordCredential.create({
-          data: {
-            tenantId: claim.principal.tenantId,
-            userId: localUserId,
-            passwordHash: temporaryPasswordHash,
-            mustChangePassword: true,
-          },
-        });
-        if (binding !== undefined) memberChanged = true;
-      }
-
       await this.personalAgents.reconcileMember(transaction, agentPlan, {
         userId: localUserId,
         displayName: remote.name,
@@ -724,14 +1247,31 @@ export class FeishuDirectorySyncService {
       });
 
       if (desiredUserStatus !== 'ACTIVE' && remoteMayDeactivateAccount) {
+        const revokedAt = new Date();
         await transaction.authSession.updateMany({
           where: {
             tenantId: claim.principal.tenantId,
             userId: localUserId,
             revokedAt: null,
           },
-          data: { revokedAt: new Date() },
+          data: { revokedAt },
         });
+        await transaction.authActionToken.updateMany({
+          where: {
+            tenantId: claim.principal.tenantId,
+            userId: localUserId,
+            consumedAt: null,
+            revokedAt: null,
+          },
+          data: { revokedAt },
+        });
+        await revokeDirectoryRoleAssignments(
+          transaction,
+          claim,
+          localUserId,
+          'DIRECTORY_ACCOUNT_DEACTIVATED',
+          revokedAt,
+        );
       }
 
       const remoteDepartmentIds =
@@ -752,6 +1292,25 @@ export class FeishuDirectorySyncService {
       const previousPrimaryEmployment = ownedEmploymentBindings.find(
         (candidate) => candidate.employment.isPrimary,
       )?.employment;
+      // An administrator's email override is an identity alias owned by the
+      // tenant, not by Feishu. Carry one canonical override to every active
+      // membership, including departments first seen after the override.
+      const localWorkEmailOverride =
+        ownedEmploymentBindings.find(
+          (candidate) =>
+            candidate.employment.status !== 'TERMINATED' &&
+            candidate.employment.isPrimary &&
+            candidate.employment.workEmailOverridden,
+        ) ??
+        ownedEmploymentBindings.find(
+          (candidate) =>
+            candidate.employment.status !== 'TERMINATED' &&
+            candidate.employment.workEmailOverridden,
+        ) ??
+        ownedEmploymentBindings.find(
+          (candidate) => candidate.employment.isPrimary && candidate.employment.workEmailOverridden,
+        ) ??
+        ownedEmploymentBindings.find((candidate) => candidate.employment.workEmailOverridden);
       if (ownedEmploymentIds.length > 0) {
         await transaction.employment.updateMany({
           where: { id: { in: ownedEmploymentIds }, tenantId: claim.principal.tenantId },
@@ -769,6 +1328,21 @@ export class FeishuDirectorySyncService {
       );
       const remoteWorkEmail =
         remote.email === undefined ? undefined : normalizeWorkEmail(remote.email);
+      const claimedWorkEmail =
+        localWorkEmailOverride === undefined
+          ? remoteWorkEmail
+          : localWorkEmailOverride.employment.workEmail;
+      if (
+        typeof claimedWorkEmail === 'string' &&
+        (await directoryWorkEmailConflicts(
+          transaction,
+          claim.principal.tenantId,
+          localUserId,
+          claimedWorkEmail,
+        ))
+      ) {
+        throw new InvalidFeishuSnapshotError('USER_EMAIL_CONFLICT');
+      }
       const employeeNumber = await this.availableEmployeeNumber(
         transaction,
         claim.principal.tenantId,
@@ -809,8 +1383,13 @@ export class FeishuDirectorySyncService {
         if (existingBinding === undefined && employment !== undefined) {
           throw new InvalidFeishuSnapshotError('LOCAL_EMPLOYMENT_OWNERSHIP_CONFLICT');
         }
-        const desiredWorkEmail =
-          remoteWorkEmail === undefined ? (employment?.workEmail ?? null) : remoteWorkEmail;
+        const preserveLocalWorkEmail = localWorkEmailOverride !== undefined;
+        const desiredWorkEmail = preserveLocalWorkEmail
+          ? localWorkEmailOverride.employment.workEmail
+          : remoteWorkEmail === undefined
+            ? (employment?.workEmail ?? null)
+            : remoteWorkEmail;
+        const desiredWorkEmailOverridden = preserveLocalWorkEmail;
 
         if (employment === null || employment === undefined) {
           employment = await transaction.employment.create({
@@ -822,6 +1401,7 @@ export class FeishuDirectorySyncService {
               positionId: desiredPositionId,
               employeeNumber: desiredEmployeeNumber,
               workEmail: desiredWorkEmail,
+              workEmailOverridden: desiredWorkEmailOverridden,
               status: desiredEmploymentStatus,
               isPrimary,
             },
@@ -834,6 +1414,7 @@ export class FeishuDirectorySyncService {
             employment.positionId !== desiredPositionId ||
             employment.employeeNumber !== desiredEmployeeNumber ||
             employment.workEmail !== desiredWorkEmail ||
+            employment.workEmailOverridden !== desiredWorkEmailOverridden ||
             employment.status !== desiredEmploymentStatus ||
             employment.isPrimary !== isPrimary;
           // Primary flags and employee numbers are cleared before membership
@@ -848,6 +1429,7 @@ export class FeishuDirectorySyncService {
                 positionId: desiredPositionId,
                 employeeNumber: desiredEmployeeNumber,
                 workEmail: desiredWorkEmail,
+                workEmailOverridden: desiredWorkEmailOverridden,
                 status: desiredEmploymentStatus,
                 isPrimary,
               },
@@ -915,6 +1497,16 @@ export class FeishuDirectorySyncService {
         },
         data: { status: 'TERMINATED', isPrimary: false, employeeNumber: null },
       });
+      if (terminated.count > 0 && seenUsers.has(binding.externalUserId)) {
+        await revokeDirectoryRoleAssignments(
+          transaction,
+          claim,
+          binding.userId,
+          'DIRECTORY_EMPLOYMENT_CHANGED',
+          new Date(),
+          binding.employmentId,
+        );
+      }
       if (
         terminated.count > 0 &&
         binding.employment.position?.code.startsWith('FEISHU_MEMBER_') === true
@@ -958,10 +1550,12 @@ export class FeishuDirectorySyncService {
       potentiallyDeactivated.add(binding.externalUserId);
     }
 
-    for (const externalUserId of potentiallyDeactivated) {
-      const binding = usersByExternalId.get(externalUserId);
-      if (binding === undefined) continue;
-      if (binding.user.role !== 'MEMBER') continue;
+    const deactivationBindings = [...potentiallyDeactivated]
+      .map((externalUserId) => usersByExternalId.get(externalUserId))
+      .filter((binding): binding is (typeof userBindings)[number] => binding !== undefined)
+      .sort((left, right) => left.userId.localeCompare(right.userId));
+    for (const binding of deactivationBindings) {
+      if (binding.user.role === 'OWNER') continue;
       const activeEmployments = await transaction.employment.count({
         where: {
           tenantId: claim.principal.tenantId,
@@ -969,20 +1563,40 @@ export class FeishuDirectorySyncService {
           status: { in: ['ACTIVE', 'PENDING'] },
         },
       });
-      if (activeEmployments > 0 || binding.user.status !== 'ACTIVE') continue;
-      await transaction.user.update({
-        where: { id: binding.userId },
-        data: { status: 'INACTIVE' },
-      });
+      if (activeEmployments > 0) continue;
+      await lockDirectoryMemberPasswordFlow(transaction, claim.principal.tenantId, binding.userId);
+      if (binding.user.status === 'ACTIVE') {
+        await transaction.user.update({
+          where: { id: binding.userId },
+          data: { status: 'INACTIVE' },
+        });
+      }
+      const revokedAt = new Date();
       await transaction.authSession.updateMany({
         where: {
           tenantId: claim.principal.tenantId,
           userId: binding.userId,
           revokedAt: null,
         },
-        data: { revokedAt: new Date() },
+        data: { revokedAt },
       });
-      summary.members.deactivated += 1;
+      await transaction.authActionToken.updateMany({
+        where: {
+          tenantId: claim.principal.tenantId,
+          userId: binding.userId,
+          consumedAt: null,
+          revokedAt: null,
+        },
+        data: { revokedAt },
+      });
+      await revokeDirectoryRoleAssignments(
+        transaction,
+        claim,
+        binding.userId,
+        'DIRECTORY_ACCOUNT_REMOVED',
+        revokedAt,
+      );
+      if (binding.user.status === 'ACTIVE') summary.members.deactivated += 1;
     }
   }
 
@@ -1051,11 +1665,10 @@ export class FeishuDirectorySyncService {
             orgUnitId: binding.orgUnitId,
           },
         }),
-        transaction.knowledgeBaseOrgUnit.count({
-          where: {
-            tenantId: claim.principal.tenantId,
-            orgUnitId: binding.orgUnitId,
-          },
+        this.knowledge.countOrgUnitBindings({
+          tenantId: claim.principal.tenantId,
+          userId: claim.principal.userId,
+          orgUnitId: binding.orgUnitId,
         }),
       ]);
       if (activeChildren + activeEmployments + positions + knowledgeScopes > 0) {
@@ -1136,7 +1749,7 @@ export class FeishuDirectorySyncService {
           status: 'FAILED',
           leaseOwner: null,
           leaseExpiresAt: null,
-          lastSyncFinishedAt: new Date(),
+          lastSyncFinishedAt: new Date(Math.max(Date.now(), claim.startedAt.getTime() + 1)),
           lastErrorCode: code,
           lastSummary: emptyCounters() as unknown as Prisma.InputJsonObject,
           version: { increment: 1 },
@@ -1178,7 +1791,10 @@ export class FeishuDirectorySyncService {
   ): FeishuConnection | null {
     if (integration?.connectorAppId && integration.connectorSecret) {
       try {
-        const appSecret = this.vault.decrypt(integration.connectorSecret);
+        const appSecret = this.vault.decrypt(integration.connectorSecret, {
+          tenantId: integration.tenantId,
+          appId: integration.connectorAppId,
+        });
         return {
           source: 'ADMIN',
           appId: integration.connectorAppId,
@@ -1266,11 +1882,51 @@ function normalizeWorkEmail(value: string | undefined): string | null {
     normalized === undefined ||
     normalized.length === 0 ||
     normalized.length > 320 ||
+    normalized.endsWith('@external.invalid') ||
     !adminMemberSchema.shape.email.safeParse(normalized).success
   ) {
     return null;
   }
   return normalized;
+}
+
+async function lockDirectoryMemberPasswordFlow(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  userId: string,
+): Promise<void> {
+  await transaction.$queryRaw`
+    WITH password_flow_lock AS (
+      SELECT pg_advisory_xact_lock(hashtextextended(${`password-flow:${tenantId}:${userId}`}, 0))
+    )
+    SELECT 1::integer AS locked FROM password_flow_lock
+  `;
+}
+
+async function directoryWorkEmailConflicts(
+  transaction: Prisma.TransactionClient,
+  tenantId: string,
+  userId: string | null,
+  email: string,
+): Promise<boolean> {
+  const [canonicalOwners, employmentOwners] = await Promise.all([
+    transaction.user.count({
+      where: {
+        tenantId,
+        ...(userId === null ? {} : { id: { not: userId } }),
+        emailNormalized: email,
+      },
+    }),
+    transaction.employment.count({
+      where: {
+        tenantId,
+        ...(userId === null ? {} : { userId: { not: userId } }),
+        status: { not: 'TERMINATED' },
+        workEmail: { equals: email, mode: 'insensitive' },
+      },
+    }),
+  ]);
+  return canonicalOwners > 0 || employmentOwners > 0;
 }
 
 function emptyCounters(): SyncCounters {
@@ -1454,4 +2110,632 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function countValue(value: unknown): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+export async function revokeDirectoryRoleAssignments(
+  transaction: Prisma.TransactionClient,
+  claim: ClaimedSync,
+  userId: string,
+  reason:
+    'DIRECTORY_ACCOUNT_DEACTIVATED' | 'DIRECTORY_ACCOUNT_REMOVED' | 'DIRECTORY_EMPLOYMENT_CHANGED',
+  revokedAt: Date,
+  employmentId?: string,
+): Promise<void> {
+  const assignments = await transaction.roleAssignment.findMany({
+    where: {
+      tenantId: claim.principal.tenantId,
+      userId,
+      ...(employmentId === undefined ? {} : { employmentId }),
+      status: { in: ['PENDING', 'ACTIVE', 'SUSPENDED'] },
+    },
+    select: {
+      id: true,
+      status: true,
+      version: true,
+      agentInstanceId: true,
+    },
+  });
+  for (const assignment of assignments) {
+    const transitioned = await transaction.roleAssignment.updateMany({
+      where: {
+        id: assignment.id,
+        tenantId: claim.principal.tenantId,
+        status: assignment.status,
+        version: assignment.version,
+      },
+      data: {
+        status: 'REVOKED',
+        revokedAt,
+        revokedById: claim.principal.userId,
+        revokeReason: reason,
+        version: { increment: 1 },
+        updatedAt: revokedAt,
+      },
+    });
+    if (transitioned.count !== 1) continue;
+    await cancelAssignedAgentRuns(
+      transaction,
+      claim.principal.tenantId,
+      assignment.id,
+      assignment.agentInstanceId,
+      userId,
+      revokedAt,
+      {
+        errorCode: reason,
+        errorMessage: 'Directory authority revoked this role assignment.',
+      },
+    );
+    await disableAgentInstanceWithoutEffectiveAssignments(
+      transaction,
+      claim.principal.tenantId,
+      assignment.id,
+      assignment.agentInstanceId,
+      revokedAt,
+    );
+    await cascadeAssignmentDescendants(
+      transaction,
+      claim.principal.tenantId,
+      assignment.id,
+      'REVOKED',
+      revokedAt,
+      {
+        revokedById: claim.principal.userId,
+        reason: `Directory authority revoked source assignment ${assignment.id}.`,
+        errorCode: 'ROLE_ASSIGNMENT_SOURCE_DIRECTORY_REVOKED',
+        errorMessage: 'The source role assignment was revoked by directory synchronization.',
+      },
+    );
+    await recordAdminAudit(
+      transaction,
+      claim.principal,
+      'admin.directory.feishu.role_assignment.revoked',
+      'role_assignment',
+      assignment.id,
+      {
+        userId,
+        employmentId: employmentId ?? null,
+        reason,
+      },
+    );
+  }
+}
+
+interface DirectoryPreviewChange {
+  readonly entityType: 'DEPARTMENT' | 'MEMBER';
+  readonly action: 'CREATE' | 'UPDATE' | 'ARCHIVE' | 'DEACTIVATE' | 'CONFLICT';
+  readonly externalId: string;
+  readonly displayName: string;
+  readonly localResourceType: 'org_unit' | 'user' | null;
+  readonly localResourceId: string | null;
+  readonly fieldChanges: Record<string, unknown>;
+  readonly diagnosticCode: string | null;
+}
+
+export async function buildPreviewChanges(
+  transaction: Prisma.TransactionClient,
+  input: {
+    readonly tenantId: string;
+    readonly integrationId: string;
+    readonly snapshot: FeishuDirectorySnapshot;
+    readonly now: Date;
+    readonly reconcileRemovals: boolean;
+  },
+): Promise<{ readonly changes: readonly DirectoryPreviewChange[]; readonly unchanged: number }> {
+  const [departmentBindings, userBindings, employmentBindings] = await Promise.all([
+    transaction.directoryOrgUnitBinding.findMany({
+      where: { tenantId: input.tenantId, integrationId: input.integrationId },
+      include: { orgUnit: true },
+    }),
+    transaction.directoryUserBinding.findMany({
+      where: { tenantId: input.tenantId, integrationId: input.integrationId },
+      include: { user: true },
+    }),
+    transaction.directoryEmploymentBinding.findMany({
+      where: { tenantId: input.tenantId, integrationId: input.integrationId },
+      include: {
+        employment: {
+          include: { position: true },
+        },
+      },
+    }),
+  ]);
+  const changes: DirectoryPreviewChange[] = [];
+  let unchanged = 0;
+  const departmentsByExternalId = new Map(
+    departmentBindings.map((binding) => [binding.externalDepartmentId, binding]),
+  );
+  const externalDepartmentByLocalId = new Map(
+    departmentBindings.map((binding) => [binding.orgUnitId, binding.externalDepartmentId]),
+  );
+  const seenDepartments = new Set<string>([ROOT_DEPARTMENT_ID]);
+  for (const department of input.snapshot.departments) {
+    seenDepartments.add(department.externalId);
+    const binding = departmentsByExternalId.get(department.externalId);
+    if (binding === undefined) {
+      changes.push({
+        entityType: 'DEPARTMENT',
+        action: 'CREATE',
+        externalId: department.externalId,
+        displayName: department.name,
+        localResourceType: null,
+        localResourceId: null,
+        fieldChanges: {
+          name: { before: null, after: department.name },
+          parentExternalId: {
+            before: null,
+            after: department.parentExternalId ?? ROOT_DEPARTMENT_ID,
+          },
+          sortOrder: { before: null, after: department.sortOrder ?? 0 },
+        },
+        diagnosticCode: null,
+      });
+      continue;
+    }
+    const desiredParent = department.parentExternalId ?? ROOT_DEPARTMENT_ID;
+    const currentParent =
+      binding.orgUnit.parentId === null
+        ? ROOT_DEPARTMENT_ID
+        : (externalDepartmentByLocalId.get(binding.orgUnit.parentId) ?? null);
+    const fields: Record<string, unknown> = {};
+    if (binding.orgUnit.name !== department.name) {
+      fields.name = { before: binding.orgUnit.name, after: department.name };
+    }
+    if (currentParent !== desiredParent) {
+      fields.parentExternalId = { before: currentParent, after: desiredParent };
+    }
+    const desiredSort = department.sortOrder ?? binding.orgUnit.sortOrder;
+    if (binding.orgUnit.sortOrder !== desiredSort) {
+      fields.sortOrder = { before: binding.orgUnit.sortOrder, after: desiredSort };
+    }
+    if (binding.orgUnit.status !== 'ACTIVE') {
+      fields.status = { before: binding.orgUnit.status, after: 'ACTIVE' };
+    }
+    if (Object.keys(fields).length === 0) {
+      unchanged += 1;
+      continue;
+    }
+    changes.push({
+      entityType: 'DEPARTMENT',
+      action: 'UPDATE',
+      externalId: department.externalId,
+      displayName: department.name,
+      localResourceType: 'org_unit',
+      localResourceId: binding.orgUnitId,
+      fieldChanges: fields,
+      diagnosticCode: null,
+    });
+  }
+  for (const binding of departmentBindings) {
+    if (
+      binding.externalDepartmentId === ROOT_DEPARTMENT_ID ||
+      seenDepartments.has(binding.externalDepartmentId) ||
+      binding.orgUnit.status === 'ARCHIVED'
+    ) {
+      continue;
+    }
+    const confirmed =
+      binding.missingSinceAt !== null && removalConfirmed(binding.missingSinceAt, input.now);
+    changes.push({
+      entityType: 'DEPARTMENT',
+      action: 'ARCHIVE',
+      externalId: binding.externalDepartmentId,
+      displayName: binding.orgUnit.name,
+      localResourceType: 'org_unit',
+      localResourceId: binding.orgUnitId,
+      fieldChanges: { status: { before: binding.orgUnit.status, after: 'ARCHIVED' } },
+      diagnosticCode:
+        input.reconcileRemovals && confirmed ? null : 'TOMBSTONE_CONFIRMATION_REQUIRED',
+    });
+  }
+
+  const usersByExternalId = new Map(
+    userBindings.map((binding) => [binding.externalUserId, binding]),
+  );
+  const employmentsByExternalUser = new Map<string, Array<(typeof employmentBindings)[number]>>();
+  for (const employment of employmentBindings) {
+    const records = employmentsByExternalUser.get(employment.externalUserId) ?? [];
+    records.push(employment);
+    employmentsByExternalUser.set(employment.externalUserId, records);
+  }
+  const seenUsers = new Set<string>();
+  for (const remote of input.snapshot.users) {
+    seenUsers.add(remote.externalId);
+    const binding = usersByExternalId.get(remote.externalId);
+    if (binding === undefined) {
+      const remoteEmail = normalizeWorkEmail(remote.email);
+      if (
+        typeof remoteEmail === 'string' &&
+        (await directoryWorkEmailConflicts(transaction, input.tenantId, null, remoteEmail))
+      ) {
+        changes.push({
+          entityType: 'MEMBER',
+          action: 'CONFLICT',
+          externalId: remote.externalId,
+          displayName: remote.name,
+          localResourceType: null,
+          localResourceId: null,
+          fieldChanges: { workEmail: { before: null, after: remoteEmail } },
+          diagnosticCode: 'USER_EMAIL_CONFLICT',
+        });
+        continue;
+      }
+      changes.push({
+        entityType: 'MEMBER',
+        action: remote.active ? 'CREATE' : 'DEACTIVATE',
+        externalId: remote.externalId,
+        displayName: remote.name,
+        localResourceType: null,
+        localResourceId: null,
+        fieldChanges: {
+          displayName: { before: null, after: remote.name },
+          active: { before: null, after: remote.active },
+          departments: { before: [], after: remote.departmentExternalIds },
+        },
+        diagnosticCode: null,
+      });
+      continue;
+    }
+    const desiredStatus =
+      binding.user.status === 'LOCKED'
+        ? 'LOCKED'
+        : remote.active
+          ? 'ACTIVE'
+          : binding.user.role !== 'OWNER'
+            ? 'INACTIVE'
+            : binding.user.status;
+    const fields: Record<string, unknown> = {};
+    if (binding.user.displayName !== remote.name) {
+      fields.displayName = { before: binding.user.displayName, after: remote.name };
+    }
+    if (binding.user.status !== desiredStatus) {
+      fields.status = { before: binding.user.status, after: desiredStatus };
+    }
+    if (remote.avatarUrl !== undefined && binding.user.avatarUrl !== remote.avatarUrl) {
+      fields.avatarUrl = { before: binding.user.avatarUrl, after: remote.avatarUrl };
+    }
+    if (binding.openId !== (remote.openId ?? binding.openId)) {
+      fields.openId = { before: binding.openId, after: remote.openId ?? null };
+    }
+    if (binding.unionId !== (remote.unionId ?? binding.unionId)) {
+      fields.unionId = { before: binding.unionId, after: remote.unionId ?? null };
+    }
+    const currentEmployments = (employmentsByExternalUser.get(remote.externalId) ?? []).filter(
+      (record) => record.employment.status !== 'TERMINATED',
+    );
+    const currentDepartmentIds = currentEmployments
+      .map((record) => record.externalDepartmentId)
+      .sort();
+    const remoteDepartmentIds = (
+      remote.departmentExternalIds.length === 0
+        ? [ROOT_DEPARTMENT_ID]
+        : [...new Set(remote.departmentExternalIds)]
+    ).sort();
+    if (!equalStrings(currentDepartmentIds, remoteDepartmentIds)) {
+      fields.departments = { before: currentDepartmentIds, after: remoteDepartmentIds };
+    }
+    const currentPrimary = currentEmployments.find((record) => record.employment.isPrimary);
+    const desiredPrimary =
+      remote.primaryDepartmentExternalId !== undefined &&
+      remoteDepartmentIds.includes(remote.primaryDepartmentExternalId)
+        ? remote.primaryDepartmentExternalId
+        : (remoteDepartmentIds[0] ?? ROOT_DEPARTMENT_ID);
+    const currentPrimaryDepartmentId = currentPrimary?.externalDepartmentId ?? null;
+    if (currentPrimaryDepartmentId !== desiredPrimary) {
+      fields.primaryDepartment = {
+        before: currentPrimaryDepartmentId,
+        after: desiredPrimary,
+      };
+    }
+    if (remote.jobTitle !== undefined) {
+      const currentTitle = currentPrimary?.employment.position?.name ?? null;
+      const desiredTitle = remote.jobTitle.trim() || null;
+      if (currentTitle !== desiredTitle) {
+        fields.jobTitle = { before: currentTitle, after: desiredTitle };
+      }
+    }
+    const workEmailLocallyOverridden = currentEmployments.some(
+      (record) => record.employment.workEmailOverridden === true,
+    );
+    const locallyOverriddenWorkEmail = currentEmployments.find(
+      (record) =>
+        record.employment.workEmailOverridden === true &&
+        typeof record.employment.workEmail === 'string',
+    )?.employment.workEmail;
+    if (
+      typeof locallyOverriddenWorkEmail === 'string' &&
+      (await directoryWorkEmailConflicts(
+        transaction,
+        input.tenantId,
+        binding.userId,
+        locallyOverriddenWorkEmail,
+      ))
+    ) {
+      changes.push({
+        entityType: 'MEMBER',
+        action: 'CONFLICT',
+        externalId: remote.externalId,
+        displayName: remote.name,
+        localResourceType: 'user',
+        localResourceId: binding.userId,
+        fieldChanges: {
+          workEmail: {
+            before: locallyOverriddenWorkEmail,
+            after: locallyOverriddenWorkEmail,
+          },
+        },
+        diagnosticCode: 'USER_EMAIL_CONFLICT',
+      });
+      continue;
+    }
+    if (remote.email !== undefined && !workEmailLocallyOverridden) {
+      const currentEmail = currentPrimary?.employment.workEmail ?? null;
+      const desiredEmail = normalizeWorkEmail(remote.email);
+      if (
+        typeof desiredEmail === 'string' &&
+        (await directoryWorkEmailConflicts(
+          transaction,
+          input.tenantId,
+          binding.userId,
+          desiredEmail,
+        ))
+      ) {
+        changes.push({
+          entityType: 'MEMBER',
+          action: 'CONFLICT',
+          externalId: remote.externalId,
+          displayName: remote.name,
+          localResourceType: 'user',
+          localResourceId: binding.userId,
+          fieldChanges: { workEmail: { before: currentEmail, after: desiredEmail } },
+          diagnosticCode: 'USER_EMAIL_CONFLICT',
+        });
+        continue;
+      }
+      if (currentEmail !== desiredEmail) {
+        fields.workEmail = { before: currentEmail, after: desiredEmail };
+      }
+    }
+    if (remote.employeeNumber !== undefined) {
+      const currentEmployeeNumber = currentPrimary?.employment.employeeNumber ?? null;
+      const desiredEmployeeNumber = remote.employeeNumber.trim() || null;
+      if (currentEmployeeNumber !== desiredEmployeeNumber) {
+        fields.employeeNumber = {
+          before: currentEmployeeNumber,
+          after: desiredEmployeeNumber,
+        };
+      }
+    }
+    if (binding.user.role === 'OWNER' && !remote.active) {
+      changes.push({
+        entityType: 'MEMBER',
+        action: 'CONFLICT',
+        externalId: remote.externalId,
+        displayName: remote.name,
+        localResourceType: 'user',
+        localResourceId: binding.userId,
+        fieldChanges: fields,
+        diagnosticCode: 'PROTECTED_OWNER_OFFBOARDING',
+      });
+      continue;
+    }
+    if (Object.keys(fields).length === 0) {
+      unchanged += 1;
+      continue;
+    }
+    changes.push({
+      entityType: 'MEMBER',
+      action: desiredStatus === 'INACTIVE' ? 'DEACTIVATE' : 'UPDATE',
+      externalId: remote.externalId,
+      displayName: remote.name,
+      localResourceType: 'user',
+      localResourceId: binding.userId,
+      fieldChanges: fields,
+      diagnosticCode: null,
+    });
+  }
+  for (const binding of userBindings) {
+    if (seenUsers.has(binding.externalUserId) || binding.user.status !== 'ACTIVE') continue;
+    if (binding.user.role === 'OWNER') {
+      changes.push({
+        entityType: 'MEMBER',
+        action: 'CONFLICT',
+        externalId: binding.externalUserId,
+        displayName: binding.user.displayName,
+        localResourceType: 'user',
+        localResourceId: binding.userId,
+        fieldChanges: {},
+        diagnosticCode: 'PROTECTED_OWNER_OFFBOARDING',
+      });
+      continue;
+    }
+    const confirmed =
+      binding.missingSinceAt !== null && removalConfirmed(binding.missingSinceAt, input.now);
+    changes.push({
+      entityType: 'MEMBER',
+      action: 'DEACTIVATE',
+      externalId: binding.externalUserId,
+      displayName: binding.user.displayName,
+      localResourceType: 'user',
+      localResourceId: binding.userId,
+      fieldChanges: { status: { before: 'ACTIVE', after: 'INACTIVE' } },
+      diagnosticCode:
+        input.reconcileRemovals && confirmed ? null : 'TOMBSTONE_CONFIRMATION_REQUIRED',
+    });
+  }
+  return { changes, unchanged };
+}
+
+function equalStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function summarizePreview(
+  changes: readonly DirectoryPreviewChange[],
+  unchanged: number,
+): {
+  readonly created: number;
+  readonly updated: number;
+  readonly archived: number;
+  readonly deactivated: number;
+  readonly conflicts: number;
+  readonly unchanged: number;
+} {
+  return {
+    created: changes.filter((item) => item.action === 'CREATE').length,
+    updated: changes.filter((item) => item.action === 'UPDATE').length,
+    archived: changes.filter((item) => item.action === 'ARCHIVE').length,
+    deactivated: changes.filter((item) => item.action === 'DEACTIVATE').length,
+    conflicts: changes.filter((item) => item.action === 'CONFLICT').length,
+    unchanged,
+  };
+}
+
+function snapshotCursor(snapshot: FeishuDirectorySnapshot): string {
+  const canonical = {
+    departments: [...snapshot.departments]
+      .map((item) => ({
+        externalId: item.externalId,
+        name: item.name,
+        parentExternalId: item.parentExternalId ?? null,
+        sortOrder: item.sortOrder ?? null,
+      }))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+    users: [...snapshot.users]
+      .map((item) => ({
+        externalId: item.externalId,
+        openId: item.openId ?? null,
+        unionId: item.unionId ?? null,
+        name: item.name,
+        email: item.email ?? null,
+        avatarUrl: item.avatarUrl ?? null,
+        active: item.active,
+        jobTitle: item.jobTitle ?? null,
+        employeeNumber: item.employeeNumber ?? null,
+        primaryDepartmentExternalId: item.primaryDepartmentExternalId ?? null,
+        departmentExternalIds: [...item.departmentExternalIds].sort(),
+      }))
+      .sort((left, right) => left.externalId.localeCompare(right.externalId)),
+  };
+  return createHash('sha256').update(JSON.stringify(canonical)).digest('hex');
+}
+
+type PreviewRecord = {
+  readonly id: string;
+  readonly status: 'READY' | 'APPLIED' | 'EXPIRED';
+  readonly snapshotCursor: string;
+  readonly summary: Prisma.JsonValue;
+  readonly expiresAt: Date;
+  readonly appliedAt: Date | null;
+  readonly createdAt: Date;
+  readonly items: ReadonlyArray<{
+    readonly id: string;
+    readonly sequence: number;
+    readonly entityType: 'DEPARTMENT' | 'MEMBER';
+    readonly action: 'CREATE' | 'UPDATE' | 'ARCHIVE' | 'DEACTIVATE' | 'CONFLICT';
+    readonly externalId: string;
+    readonly displayName: string;
+    readonly localResourceType: string | null;
+    readonly localResourceId: string | null;
+    readonly fieldChanges: Prisma.JsonValue;
+    readonly diagnosticCode: string | null;
+    readonly applyStatus: 'PENDING' | 'APPLIED' | 'FAILED';
+  }>;
+};
+
+function mapPreview(preview: PreviewRecord): FeishuDirectoryPreview {
+  const parsedSummary = isObject(preview.summary) ? preview.summary : {};
+  return {
+    id: preview.id,
+    status: preview.status,
+    snapshotCursor: preview.snapshotCursor,
+    summary: {
+      created: countValue(parsedSummary.created),
+      updated: countValue(parsedSummary.updated),
+      archived: countValue(parsedSummary.archived),
+      deactivated: countValue(parsedSummary.deactivated),
+      conflicts: countValue(parsedSummary.conflicts),
+      unchanged: countValue(parsedSummary.unchanged),
+    },
+    expiresAt: preview.expiresAt.toISOString(),
+    appliedAt: preview.appliedAt?.toISOString() ?? null,
+    createdAt: preview.createdAt.toISOString(),
+    items: preview.items.map((item) => ({
+      id: item.id,
+      sequence: item.sequence,
+      entityType: item.entityType,
+      action: item.action,
+      externalId: item.externalId,
+      displayName: item.displayName,
+      localResourceType: item.localResourceType,
+      localResourceId: item.localResourceId,
+      fieldChanges: isObject(item.fieldChanges) ? item.fieldChanges : {},
+      diagnosticCode: item.diagnosticCode,
+      applyStatus: item.applyStatus,
+    })),
+  };
+}
+
+type RunRecord = {
+  readonly id: string;
+  readonly previewId: string;
+  readonly status: 'QUEUED' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'DEAD_LETTER';
+  readonly attempts: number;
+  readonly maxAttempts: number;
+  readonly expectedSnapshotCursor: string;
+  readonly lastErrorCode: string | null;
+  readonly summary: Prisma.JsonValue | null;
+  readonly startedAt: Date | null;
+  readonly finishedAt: Date | null;
+  readonly createdAt: Date;
+};
+
+function mapRun(run: RunRecord): FeishuDirectorySyncRunDetail {
+  return {
+    id: run.id,
+    previewId: run.previewId,
+    status: run.status,
+    attempts: run.attempts,
+    maxAttempts: run.maxAttempts,
+    expectedSnapshotCursor: run.expectedSnapshotCursor,
+    lastErrorCode: run.lastErrorCode,
+    summary: run.summary === null ? null : isObject(run.summary) ? run.summary : {},
+    startedAt: run.startedAt?.toISOString() ?? null,
+    finishedAt: run.finishedAt?.toISOString() ?? null,
+    createdAt: run.createdAt.toISOString(),
+  };
+}
+
+class DirectorySyncExecutionError extends Error {
+  constructor(
+    readonly code: string,
+    readonly retryable: boolean,
+  ) {
+    super(code);
+    this.name = 'DirectorySyncExecutionError';
+  }
+}
+
+function describeDirectorySyncExecutionError(error: unknown): {
+  readonly code: string;
+  readonly retryable: boolean;
+} {
+  if (error instanceof DirectorySyncExecutionError) {
+    return { code: truncateErrorCode(error.code), retryable: error.retryable };
+  }
+  if (error instanceof FeishuDirectoryError) {
+    return { code: truncateErrorCode(error.code), retryable: error.retryable };
+  }
+  if (error instanceof InvalidFeishuSnapshotError) {
+    return { code: truncateErrorCode(error.code), retryable: false };
+  }
+  if (error instanceof SyncLeaseLostError) {
+    return { code: 'SYNC_LEASE_LOST', retryable: true };
+  }
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    return {
+      code: error.code === 'P2002' ? 'LOCAL_DATA_CONFLICT' : 'DATABASE_ERROR',
+      retryable: error.code !== 'P2002',
+    };
+  }
+  return { code: 'SYNC_FAILED', retryable: true };
 }
